@@ -116,6 +116,14 @@ def _loss(model, torch, clip, timesteps) -> float:
     return total / float(len(timesteps))
 
 
+def _base_dtype(model) -> str:
+    """The precision the base model's weights are held at, as a result's name records it."""
+    from khaos_attribution.gradient import dtype_tag  # noqa: PLC0415
+    lora = {id(p) for n, p in model.named_parameters() if "lora" in n}
+    dtypes = {str(p.dtype) for p in model.parameters() if id(p) not in lora}
+    return dtype_tag("torch.float16" if "torch.float16" in dtypes else next(iter(dtypes), "unknown"))
+
+
 def _peak_gb() -> float | None:
     """The worker's peak device memory, so the room can plan for it."""
     try:
@@ -154,7 +162,7 @@ def run(req: dict) -> dict:
     command = req["command"]
     if command == "parameters":
         return {"n_params": n_params, "n_tensors": len(params), "signature": signature, "device": str(device).split(":")[0],
-                "compute_dtype": "fp32"}
+                "compute_dtype": _base_dtype(model)}
     if command in ("index", "feature"):
         projection = (G.make_projection(n_params, int(req["projection"]["dim"]), int(req["projection"]["seed"]))
                       if command == "index" else G.projection_from_meta(req["index_meta"]))
@@ -187,7 +195,7 @@ def run(req: dict) -> dict:
             out.parent.mkdir(parents=True, exist_ok=True)
             np.save(str(out), np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, projection.dim), np.float32))
             return {**extra, "rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(params),
-                    "signature": signature, "device": str(device).split(":")[0], "compute_dtype": "fp32"}
+                    "signature": signature, "device": str(device).split(":")[0], "compute_dtype": _base_dtype(model)}
         return {**extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors),
                 "signature": signature}
     if command == "loss":

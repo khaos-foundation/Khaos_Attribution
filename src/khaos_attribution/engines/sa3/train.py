@@ -128,7 +128,10 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
                                       "provision the engine first")
         return Handle(root=api.root, python=api.python, adapter=adapter_file.resolve(), device_type="mps",
                       dtype="float16", runtime="mlx", base_npz=base_npz.absolute())
-    return Handle(root=api.root, python=api.python, adapter=adapter_file.resolve(), device_type=str(device).split(":")[0])
+    device_type = str(device).split(":")[0]
+    # The torch worker loads the base at half precision on CUDA (Stability's loader) and at full precision elsewhere.
+    return Handle(root=api.root, python=api.python, adapter=adapter_file.resolve(), device_type=device_type,
+                  dtype="float16" if device_type == "cuda" else "float32")
 
 
 # ── preprocessing: Khaos's dataset into Stability's clips ─────────────────────

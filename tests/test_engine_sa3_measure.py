@@ -51,7 +51,9 @@ def test_open_module_gives_a_handle_for_each_runtime(tmp_path):
         T.open_module(api, {}, adapter, device="cuda:0")
     adapter.write_bytes(b"w")
     h = T.open_module(api, {}, adapter, device="cuda:0")
-    assert isinstance(h, M.Handle) and h.device_type == "cuda" and h.adapter == adapter.resolve() and h.dtype == "torch.float32"
+    assert isinstance(h, M.Handle) and h.device_type == "cuda" and h.adapter == adapter.resolve()
+    assert h.dtype == "float16", "on CUDA the torch worker's base is half precision, and the index says so"
+    assert T.open_module(api, {}, adapter, device="cpu").dtype == "float32"
     assert h.runtime == "torch" and h.base_npz is None
     mlx = T.TrainingApi(root=tmp_path, runtime="mlx", python=sys.executable)
     with pytest.raises(T.TrainingUnavailable, match="base weights"):
