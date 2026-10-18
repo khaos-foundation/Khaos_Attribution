@@ -164,20 +164,33 @@ def calibrated_shares(totals: Mapping[str, float], factors: Mapping[str, float])
     return {t: v / total for t, v in sorted(scaled.items())}
 
 
+def index_engine(meta: Mapping | None) -> str | None:
+    """The engine an index's record says its adapter runs on: its own field, else its base model id, else ACE-Step's
+    (a record from before engines were named); None when the record names something that is not a base model id."""
+    from khaos_attribution.base_model import ACESTEP_ENGINE, engine_of  # noqa: PLC0415
+    if (meta or {}).get("engine"):
+        return str(meta["engine"])
+    base = (meta or {}).get("base_model_id")
+    try:
+        return engine_of(str(base)) if base else ACESTEP_ENGINE
+    except ValueError:
+        return None
+
+
+def calibration_engine(block: Mapping) -> str:
+    """The engine a calibration's factors were measured on; one from before engines were named is ACE-Step's."""
+    from khaos_attribution.base_model import ACESTEP_ENGINE  # noqa: PLC0415
+    return str((block.get("fitted_on") or {}).get("engine") or ACESTEP_ENGINE)
+
+
 def calibration_of(meta: Mapping | None) -> dict | None:
     """The calibration an index's record carries, when it was measured on the index's own engine; else None, since
-    one engine's subset adapters say nothing about another's. A block from before engines were named is ACE-Step's."""
-    from khaos_attribution.base_model import ACESTEP_ENGINE, engine_of  # noqa: PLC0415
+    one engine's subset adapters say nothing about another's. For what a page summarises; the card reads the block
+    whole through read_calibration, which refuses it in words."""
     block = (meta or {}).get("calibration")
     if not isinstance(block, Mapping) or not block.get("factors"):
         return None
-    base = (meta or {}).get("base_model_id")
-    try:
-        index_engine = engine_of(str(base)) if base else ACESTEP_ENGINE
-    except ValueError:
-        return None
-    fitted = str((block.get("fitted_on") or {}).get("engine") or ACESTEP_ENGINE)
-    return dict(block) if fitted == index_engine else None
+    return dict(block) if calibration_engine(block) == index_engine(meta) else None
 
 
 def calibration_sha256(block: Mapping | None) -> str | None:
@@ -187,14 +200,18 @@ def calibration_sha256(block: Mapping | None) -> str | None:
     return hashlib.sha256(json.dumps(block, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def read_calibration(block: Mapping | None, *, index_tracks: Sequence[str], artist_id: str | None = None) -> dict:
-    """Whether an index's calibration block is applied, and why not: it must be this artist's, carry the
-    schema, finite non-negative factors fitted on enough outputs, its own validation and a sane error,
-    and at least one factor for a track the index holds."""
+def read_calibration(block: Mapping | None, *, index_tracks: Sequence[str], artist_id: str | None = None,
+                     engine: str | None = None) -> dict:
+    """Whether an index's calibration block is applied, and why not: it must be this artist's, measured on the
+    index's engine, carry the schema, finite non-negative factors fitted on enough outputs, its own validation
+    and a sane error, and at least one factor for a track the index holds."""
     if not block:
         return {"applied": False, "reason": "no calibration: the kernel alone"}
     if not isinstance(block, Mapping):
         return {"applied": False, "reason": "calibration is not a record"}
+    if engine is not None and calibration_engine(block) != engine:
+        return {"applied": False, "reason": f"calibration was measured on {calibration_engine(block)}, and this "
+                                            f"index's adapter runs on {engine}"}
     if block.get("schema") != CALIBRATION_SCHEMA:
         return {"applied": False, "reason": f"calibration schema {block.get('schema')!r} is not {CALIBRATION_SCHEMA}"}
     if artist_id is not None and block.get("artist_id") != artist_id:
@@ -482,7 +499,8 @@ def build_influence_estimate(*, generation_id: str, artist_id: str, adapter_vers
     ``validation`` and ``measured_error_pp`` are the kernel's, and without an error no estimate is made."""
     if abstention is not None and abstention.get("checked") and not abstention.get("accepted"):
         raise NotAttributable(abstention)
-    cal = read_calibration(calibration, index_tracks=index.track_ids, artist_id=artist_id)
+    cal = read_calibration(calibration, index_tracks=index.track_ids, artist_id=artist_id,
+                           engine=index_engine(index.meta) or "an engine the record does not name")
     share = calibrated_shares(track_totals, cal["factors"]) if cal["applied"] else shares(track_totals)
     if cal["applied"] and not share and any(v > 0 for v in shares(track_totals).values()):
         raise InfluenceRefused("the calibration gives every track the kernel named a factor of zero; nothing to split")

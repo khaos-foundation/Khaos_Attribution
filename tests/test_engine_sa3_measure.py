@@ -122,6 +122,9 @@ def test_a_workers_refusal_is_the_sockets(handle, tmp_path):
     handle.adapter = tmp_path / "bad.safetensors"
     handle.adapter.write_bytes(b"w")
     with pytest.raises(GradientUnavailable, match="cannot be switched off"):
+        M.paired_loss(handle, {"timesteps": [0.5], "noise_seed": 1, "feature_version": M.DESCRIPTOR.feature_version},
+                      [tmp_path / "x.wav"])
+    with pytest.raises(GradientUnavailable, match="before it was versioned"):
         M.paired_loss(handle, {"timesteps": [0.5], "noise_seed": 1}, [tmp_path / "x.wav"])
     assert M.memory_plan("cuda", 30.0, total_gb=96.0, env={})["fits"] == "resident"
     assert M.memory_plan("cuda", 30.0, total_gb=8.0, env={})["fits"] is None

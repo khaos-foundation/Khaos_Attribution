@@ -141,6 +141,9 @@ def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+            for pipe in (proc.stdin, proc.stdout):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
         err.seek(0)
         stderr = err.read()
     last = "".join(lines).strip().splitlines()[-1:] or [""]
@@ -225,6 +228,11 @@ def output_feature(handle: Handle, index_meta: dict, files):
 
 
 def paired_loss(handle: Handle, index_meta: dict, files) -> dict:
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    # Abstention reads the index's thresholds against these losses, so the version gate comes first here too.
+    why = _index_refusal(index_meta)
+    if why:
+        raise GradientUnavailable(why)
     r = _ask(handle, _base(handle, index_meta, files, "loss"))
     return {"with": float(r["with"]), "without": float(r["without"])}
 
