@@ -38,7 +38,7 @@ LOSSES_CSV = "khaos_losses.csv"
 POLL_SECONDS = 2.0
 TORCH_MIN_PAIRS = 4
 
-__all__ = ["LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs",
+__all__ = ["LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs", "heldout_summary",
            "open_module", "open_session", "pair_files", "preprocess_pairs", "training_api"]
 
 
@@ -548,25 +548,33 @@ class HeldoutEvaluator:
         return True
 
     def evaluate(self) -> dict:
-        api = self.session.api
         adapter = self.adapter or self.session.latest_adapter
-        adapter = Path(adapter).resolve() if adapter else None
-        request = {"runtime": api.runtime, "model": DESCRIPTOR.variant_config("base"), "clips_dir": str(self.tensor_val_dir),
-                   "latents_dir": str(self.tensor_val_dir / LATENTS_DIRNAME), "adapter": str(adapter) if adapter else None,
-                   "timesteps": self.timesteps, "seed": self.session.seed, "high_noise_t": HIGH_NOISE_T,
-                   "checkpoint_root": str(self.session.checkpoint_root.resolve()),
-                   "base_npz": str((self.session.checkpoint_root / BASE_NPZ).absolute())}
-        done = subprocess.run([str(api.python), str(HELDOUT_WORKER)], input=json.dumps(request), cwd=str(api.root),
-                              capture_output=True, text=True, env=_env(api))
-        last = (done.stdout or "").strip().splitlines()[-1:] or [""]
-        try:
-            reply = json.loads(last[0])
-        except ValueError:
-            reply = None
-        if done.returncode != 0 or not isinstance(reply, dict) or reply.get("error"):
-            why = (reply or {}).get("error") if isinstance(reply, dict) else "\n".join((done.stderr or "").splitlines()[-6:])
-            raise RuntimeError(f"the Stable Audio 3 held-out worker failed: {why}")
-        return summarise(reply["per_sample"], self.timesteps)
+        return heldout_summary(self.session.api, self.tensor_val_dir, adapter, seed=self.session.seed,
+                               timesteps=self.timesteps, checkpoint_root=self.session.checkpoint_root)
+
+
+def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str | None, *, seed: int,
+                    timesteps: list, checkpoint_root: Path | str | None) -> dict:
+    """The held-out record of the clips under ``clips_dir`` scored under ``adapter`` (the base alone when None), by
+    the worker the trainer's own held-out loss runs: what a datamodel reads per subset adapter."""
+    clips_dir = Path(clips_dir).resolve()
+    adapter = Path(adapter).resolve() if adapter else None
+    root = Path(checkpoint_root) if checkpoint_root else Path(api.root) / "checkpoints"
+    request = {"runtime": api.runtime, "model": DESCRIPTOR.variant_config("base"), "clips_dir": str(clips_dir),
+               "latents_dir": str(clips_dir / LATENTS_DIRNAME), "adapter": str(adapter) if adapter else None,
+               "timesteps": list(timesteps), "seed": int(seed), "high_noise_t": HIGH_NOISE_T,
+               "checkpoint_root": str(root.resolve()), "base_npz": str((root / BASE_NPZ).absolute())}
+    done = subprocess.run([str(api.python), str(HELDOUT_WORKER)], input=json.dumps(request), cwd=str(api.root),
+                          capture_output=True, text=True, env=_env(api))
+    last = (done.stdout or "").strip().splitlines()[-1:] or [""]
+    try:
+        reply = json.loads(last[0])
+    except ValueError:
+        reply = None
+    if done.returncode != 0 or not isinstance(reply, dict) or reply.get("error"):
+        why = (reply or {}).get("error") if isinstance(reply, dict) else "\n".join((done.stderr or "").splitlines()[-6:])
+        raise RuntimeError(f"the Stable Audio 3 held-out worker failed: {why}")
+    return summarise(reply["per_sample"], list(timesteps))
 
 
 def summarise(per_sample: dict, timesteps: list) -> dict:

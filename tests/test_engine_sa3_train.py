@@ -279,3 +279,24 @@ def test_the_torch_trainer_needs_four_pairs_for_its_demo_batch(api, tmp_path, mo
     with pytest.raises(TrainingUnavailable, match="at least 4 pairs"):
         T.open_session(api, RECIPE, checkpoint_root=tmp_path, tensor_dir=tensors, output_dir=tmp_path / "run",
                        device="cuda", precision="bf16", seed=1)
+
+
+def test_the_heldout_loss_of_any_clips_under_any_adapter_comes_from_the_trainers_own_worker(tmp_path, monkeypatch):
+    """A datamodel scores outputs under each subset adapter by the worker the trainer's held-out loss runs; the base
+    alone when no adapter is named."""
+    seen = tmp_path / "req.json"
+    worker = tmp_path / "heldout.py"
+    worker.write_text("import json, sys\nreq = json.loads(sys.stdin.read())\n"
+                      f"open({str(seen)!r}, 'w').write(json.dumps(req))\n"
+                      "row = {f'{t:.2f}': 1.0 + t for t in req['timesteps']}\n"
+                      "print(json.dumps({'per_sample': {'trk_a_seg_000.wav': row, 'trk_b_seg_000.wav': row}}))\n")
+    monkeypatch.setattr(T, "HELDOUT_WORKER", worker)
+    api = T.TrainingApi(root=tmp_path, runtime="mlx", python=sys.executable)
+    out = T.heldout_summary(api, tmp_path / "clips", tmp_path / "a.safetensors", seed=3, timesteps=[0.25, 0.75],
+                            checkpoint_root=tmp_path / "ck")
+    req = json.loads(seen.read_text())
+    assert req["adapter"].endswith("a.safetensors") and req["seed"] == 3 and req["runtime"] == "mlx"
+    assert req["base_npz"].endswith("ck/" + T.BASE_NPZ) and req["latents_dir"].endswith("clips/" + T.LATENTS_DIRNAME)
+    assert set(out["by_track"]) == {"trk_a", "trk_b"} and out["mean"] == 1.5
+    T.heldout_summary(api, tmp_path / "clips", None, seed=3, timesteps=[0.5], checkpoint_root=None)
+    assert json.loads(seen.read_text())["adapter"] is None
