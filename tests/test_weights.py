@@ -129,3 +129,24 @@ def test_an_empty_file_in_a_set_is_written_whole_and_never_resumed(mirror, tmp_p
         "files": [{"path": "empty.txt", "size": 0, "sha256": hashlib.sha256(b"").hexdigest()}]}))
     assert W.fetch_into_dir("org/withempty", tmp_path / "e", base=base) == rev
     assert (tmp_path / "e" / "empty.txt").is_file() and (tmp_path / "e" / "empty.txt").stat().st_size == 0
+
+
+def test_a_file_fetched_by_address_comes_from_the_mirror_or_says_it_cannot(mirror, tmp_path):
+    """A hub address maps to its repository's set (a pinned revision must match); any other address to the url
+    manifest; anything the mirror does not hold answers False so the caller goes to the address itself."""
+    base, repo, rev, files = mirror
+    root = tmp_path / "mirror"
+    assert W.fetch_url(f"https://huggingface.co/{repo}/resolve/{rev}/config.json", tmp_path / "a" / "c.json", base=base)
+    assert (tmp_path / "a" / "c.json").read_bytes() == files["config.json"]
+    assert W.fetch_url(f"https://huggingface.co/{repo}/resolve/main/LICENSE", tmp_path / "a" / "L", base=base), "main takes the served revision"
+    assert not W.fetch_url(f"https://huggingface.co/{repo}/resolve/{'d' * 40}/config.json", tmp_path / "a" / "x", base=base)
+    assert not W.fetch_url(f"https://huggingface.co/{repo}/resolve/{rev}/absent.bin", tmp_path / "a" / "y", base=base)
+    data = b"model bytes" * 100
+    (root / "urls" / "github.com" / "o" / "r").mkdir(parents=True)
+    (root / "urls" / "github.com" / "o" / "r" / "m.pt").write_bytes(data)
+    (root / "urls" / "manifest.json").write_text(json.dumps({"repo": "urls", "revision": "2026-10-18", "files": [
+        {"url": "https://github.com/o/r/m.pt", "path": "github.com/o/r/m.pt", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}]}))
+    assert W.fetch_url("https://github.com/o/r/m.pt", tmp_path / "b" / "m.pt", base=base)
+    assert (tmp_path / "b" / "m.pt").read_bytes() == data
+    assert not W.fetch_url("https://example.org/other.pt", tmp_path / "b" / "o.pt", base=base)
+    assert not W.fetch_url("https://github.com/o/r/m.pt", tmp_path / "c" / "m.pt", base="http://127.0.0.1:9"), "unreachable is False"

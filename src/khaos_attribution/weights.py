@@ -132,6 +132,45 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
     return doc["revision"]
 
 
+URLS_DIR = "urls"
+
+
+def _hub_file(url: str) -> tuple | None:
+    """(repo, revision, file) for a hub download address (https://huggingface.co/<repo>/resolve/<rev>/<file>)."""
+    from urllib.parse import urlsplit  # noqa: PLC0415
+    parts = urlsplit(url)
+    if parts.hostname != "huggingface.co" or "/resolve/" not in parts.path:
+        return None
+    repo, _, rest = parts.path.strip("/").partition("/resolve/")
+    revision, _, name = rest.partition("/")
+    return (repo, revision, name) if repo and revision and name else None
+
+
+def fetch_url(url: str, dest: Path | str, *, base: str | None = None,
+              progress: Callable[[str], None] | None = None) -> bool:
+    """One file the rooms would fetch by address, from the mirror instead: a hub address from that repository's set
+    (a pinned revision must be the one served), any other address from the mirror's url manifest. True when the
+    mirror served it; False when it cannot, so the caller fetches from the address itself."""
+    hub = _hub_file(url)
+    if hub:
+        repo, revision, name = hub
+        doc = manifest(repo, base)
+        if doc is None or (revision != "main" and revision != doc["revision"]):
+            return False
+        entry = next((f for f in doc["files"] if f["path"] == name), None)
+        if entry is None:
+            return False
+        _download(f"{base_url(base)}/{repo}/{doc['revision']}/{name}", Path(dest), int(entry["size"]), entry["sha256"],
+                  progress)
+        return True
+    doc = manifest(URLS_DIR, base)
+    entry = next((f for f in (doc or {}).get("files", []) if f.get("url") == url), None)
+    if entry is None:
+        return False
+    _download(f"{base_url(base)}/{URLS_DIR}/{entry['path']}", Path(dest), int(entry["size"]), entry["sha256"], progress)
+    return True
+
+
 def default_hub_cache() -> Path:
     """Where the hub library keeps its cache, read the way it reads it, without importing it."""
     if os.environ.get("HF_HUB_CACHE"):
