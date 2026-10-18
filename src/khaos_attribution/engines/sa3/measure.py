@@ -1,5 +1,5 @@
-"""Stable Audio 3's measure slot, not built yet: the descriptor declares no platform measures on this engine, and
-every call here says so rather than guessing a number."""
+"""Stable Audio 3's measure slot: features through a worker in the engine's own environment, torch (CUDA) or MLX
+(a Mac). The descriptor declares no platform measure yet, so no room serves a measured split on this engine."""
 
 from __future__ import annotations
 
@@ -9,22 +9,23 @@ from khaos_attribution.engines.sa3 import DESCRIPTOR
 
 SYSTEM_RESERVE_GB = 6.0
 LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
-NOT_BUILT = f"{DESCRIPTOR.name} has no influence measure yet; outputs made on it carry no measured split"
 
-__all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "NOT_BUILT", "SYSTEM_RESERVE_GB", "enable_checkpointing", "flush_accelerator",
+__all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
            "index_rows", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb"]
 
 
 _SCORER = DESCRIPTOR.memory.get("scorer") or {}
-# Measured once on khaos on a 56 s clip (the longest the Workshop cuts): the worker's whole-model fp32 peak. Not fitted
-# by length; a longer clip would need another measurement.
-SCORER_BASE_GB = float(_SCORER.get("base_gb") or 0.0)
-SCORER_PROCESS_GB = float(_SCORER.get("process_gb") or 0.0)
+
+
+def expected_dtype(device_type: str) -> str:
+    """The precision this measure takes features at on a device type: the base at half on CUDA (Stability's loader)
+    and on a Mac (the MLX port), at full precision elsewhere."""
+    return "fp16" if device_type in ("cuda", "mps") else "fp32"
 
 
 def _scorer(device_type: str) -> dict:
-    """The worker's measured peak on a device type: CUDA's under "scorer", any other under "scorer_<device>" (mps:
-    the MLX worker on the Studio on a 56 s clip, its MLX peak plus the rest of the process, memory being shared)."""
+    """The worker's measured peak on a device type, each on a 56 s clip (the longest the Workshop cuts): CUDA's under
+    "scorer", any other under "scorer_<device>" (mps: the MLX peak plus the rest of the process, memory being shared)."""
     if device_type == "cuda":
         return _SCORER
     return DESCRIPTOR.memory.get(f"scorer_{device_type}") or {}
@@ -191,7 +192,11 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
     r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target}, files, "index"),
                       "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
              on_progress=progress)
-    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
+    if r.get("compute_dtype") and r["compute_dtype"] != dtype_tag(handle.dtype):
+        Path(r["matrix"]).unlink(missing_ok=True)
+        raise GradientUnavailable(f"the worker ran at {r['compute_dtype']}, and the index would record "
+                                  f"{dtype_tag(handle.dtype)}; they must be one precision")
     try:
         matrix = np.load(str(r["matrix"]))
     except (OSError, ValueError) as exc:
@@ -235,13 +240,6 @@ def paired_loss(handle: Handle, index_meta: dict, files) -> dict:
         raise GradientUnavailable(why)
     r = _ask(handle, _base(handle, index_meta, files, "loss"))
     return {"with": float(r["with"]), "without": float(r["without"])}
-
-
-def measured_peak_gb(handle: Handle, index_meta: dict, files) -> dict:
-    """The worker's peak device memory for a feature and for a paired loss on these files: what the descriptor's
-    memory block is measured from."""
-    f = _ask(handle, _base(handle, index_meta, files, "feature"))
-    return {"feature_peak_gb": f.get("peak_gb"), "n": len(files)}
 
 
 def output_loss(handle: Handle, index_meta: dict, files) -> float:

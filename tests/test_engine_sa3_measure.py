@@ -164,3 +164,23 @@ def test_a_worker_left_behind_is_stopped_when_its_caller_fails(handle, tmp_path,
     with pytest.raises(RuntimeError, match="caller stopped"):
         M._ask(handle, {"command": "index"}, on_progress=boom)
     assert time.monotonic() - start < 10, "the worker is killed, not waited on for its minute"
+
+
+def test_a_worker_that_ran_at_another_precision_than_the_handle_names_is_refused(handle, tmp_path, monkeypatch):
+    worker = tmp_path / "half.py"
+    worker.write_text("import json, sys, numpy as np\nreq = json.loads(sys.stdin.read())\n"
+                      "np.save(req['out'], np.zeros((1, req['projection']['dim']), np.float32))\n"
+                      "print(json.dumps({'rows': [{'row': 0, 'pair_id': 'p', 'track_id': 't', 'gradient_norm': 1.0}], "
+                      "'matrix': req['out'], 'compute_dtype': 'fp16'}))\n")
+    monkeypatch.setattr(M, "MEASURE_WORKER", worker)
+    f = tmp_path / "t_seg_000.wav"
+    f.write_bytes(b"x")
+    with pytest.raises(GradientUnavailable, match="one precision"):
+        M.index_rows(handle, [f], projection=make_projection(12, 8, 1), timesteps=[0.5], noise_seed=7)
+    assert not (tmp_path / ".khaos_index_rows.tmp.npy").exists()
+    handle.dtype = "float16"
+    assert M.index_rows(handle, [f], projection=make_projection(12, 8, 1), timesteps=[0.5], noise_seed=7)[0].shape == (1, 8)
+
+
+def test_the_precision_a_device_measures_at():
+    assert M.expected_dtype("cuda") == M.expected_dtype("mps") == "fp16" and M.expected_dtype("cpu") == "fp32"

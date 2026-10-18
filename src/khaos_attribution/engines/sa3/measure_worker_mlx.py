@@ -1,7 +1,8 @@
 """Gradient features on Stable Audio 3's MLX runtime, inside the engine's MLX environment: the same commands and
 reply as the torch worker. The forward is the MLX trainer's own (its pre-encoded latents, its conditioning, the
 generation mask), the gradient is MLX's over the adapter's parameters, flattened in the adapter file's key order
-and projected by the contract, so a Mac-trained adapter is measured on the weights it was trained and renders with."""
+and projected by the contract, so a Mac-trained adapter is measured on the weights it was trained and renders with.
+The request's convention, precision and keep_flat are for comparing the two runtimes; the rooms never send them."""
 
 from __future__ import annotations
 
@@ -202,6 +203,7 @@ def _peak_gb(mx) -> float | None:
 def run(req: dict) -> dict:
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.measure import ROW_PREFIX  # noqa: PLC0415
     mx, nn = _imports()
     convention = str(req.get("convention") or "mlx")
     if convention not in CONVENTIONS:
@@ -224,7 +226,7 @@ def run(req: dict) -> dict:
     n_params = int(sum(int(v.size) for v in sized))
     signature = G.parameter_signature(sized)
     command = req["command"]
-    base = {"device": "mps", "compute_dtype": f"{precision}-base/fp32-adapter", "runtime": "mlx", "convention": convention}
+    base = {"device": "mps", "compute_dtype": precision, "runtime": "mlx", "convention": convention}
     if command == "parameters":
         return {**base, "n_params": n_params, "n_tensors": len(paths), "signature": signature}
     if command in ("index", "feature"):
@@ -243,7 +245,7 @@ def run(req: dict) -> dict:
             if command == "index":
                 rows.append({"row": i, "pair_id": item["wav"].stem, "track_id": G.track_of_pair(item["wav"].stem),
                              "gradient_norm": round(float(np.linalg.norm(projected)), 8)})
-                sys.stdout.write("khaos-row " + json.dumps(rows[-1]) + "\n")
+                sys.stdout.write(ROW_PREFIX + json.dumps(rows[-1]) + "\n")
                 sys.stdout.flush()
                 vectors.append(G.l2_normalise(projected))
             else:

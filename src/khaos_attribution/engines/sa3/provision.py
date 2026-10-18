@@ -110,9 +110,7 @@ def unpack_archive(url: str, root: Path, commit: str) -> None:
 
 
 MLX_TRAINER = Path("optimized") / "mlx" / "scripts" / "lora_train_mlx.py"
-# Stability's MLX trainer conditions every step on an all-ones inpaint mask ("keep everything, the context is
-# silence") while its renderer and the torch trainer generate under all zeros; the base model's loss under ones is
-# tens of times its loss under zeros, so a Mac adapter would learn to undo the mask. Khaos trains under zeros.
+# Khaos trains under the generation mask (all zeros) the renderer and the torch trainer use, never the MLX trainer's ones.
 TRAINER_MASK_ONES = "np.concatenate([np.ones((1, 1, crop_len), np.float32),"
 TRAINER_MASK_ZEROS = "np.concatenate([np.zeros((1, 1, crop_len), np.float32),"
 

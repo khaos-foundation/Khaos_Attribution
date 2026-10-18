@@ -39,7 +39,7 @@ POLL_SECONDS = 2.0
 TORCH_MIN_PAIRS = 4
 
 __all__ = ["LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs", "heldout_summary",
-           "open_module", "open_session", "pair_files", "preprocess_pairs", "training_api"]
+           "open_module", "open_session", "pair_files", "preprocess_pairs", "run_refusal", "training_api"]
 
 
 @dataclass(frozen=True)
@@ -81,6 +81,18 @@ def adapter_file_in(directory: Path | str) -> Path | None:
     return files[0] if files else None
 
 
+def run_refusal(run_dir: Path | str) -> str | None:
+    """Why a run folder's adapter cannot be measured, or None: a run whose trainer record is missing, or one trained
+    on a Mac under the all-ones inpaint mask the renderer never uses. A folder that is no run (a bundle) passes."""
+    run_dir = Path(run_dir)
+    if (run_dir / "training_config.yaml").is_file() and not (run_dir / TRAINER_DIRNAME / "train_command.json").is_file():
+        return f"{run_dir.name}'s trainer record is missing, so how it was trained is unknown; it cannot be measured"
+    if trained_mask(run_dir) == "ones":
+        return (f"{run_dir.name} was trained on a Mac under the all-ones inpaint mask the renderer never uses; its "
+                "gradients describe that mask, not the music. Retrain it, then measure it")
+    return None
+
+
 def mask_to_record(trainer_now: str | None, run_dir: Path | str, *, resuming: bool) -> str | None:
     """The mask a Mac run records: the trainer's today, except that a resumed run is only as clean as its first
     steps, so an earlier all-ones stretch stays on the record."""
@@ -114,13 +126,9 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
     adapter_file = Path(adapter_file)
     if not adapter_file.is_file():
         raise TrainingUnavailable(f"no adapter file at {adapter_file}")
-    if output_dir is not None and (Path(output_dir) / "training_config.yaml").is_file() \
-            and not (Path(output_dir) / TRAINER_DIRNAME / "train_command.json").is_file():
-        raise TrainingUnavailable("this run's trainer record is missing, so the inpaint mask it trained under is "
-                                  "unknown; it cannot be indexed")
-    if output_dir is not None and trained_mask(output_dir) == "ones":
-        raise TrainingUnavailable("this adapter was trained on a Mac under the all-ones inpaint mask the renderer never "
-                                  "uses; its gradients describe that mask, not the music. Retrain it, then index it")
+    why = run_refusal(output_dir) if output_dir is not None else None
+    if why:
+        raise TrainingUnavailable(why)
     if api.runtime == "mlx":
         base_npz = Path(checkpoint_root or "") / BASE_NPZ
         if not base_npz.is_file():

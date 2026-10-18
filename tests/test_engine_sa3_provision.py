@@ -1,7 +1,6 @@
 """Stable Audio 3's provision slot behind fakes: --check reports what is missing without changing anything, the
 pin is compared not assumed, every listed weight is accounted for, and the report says CHECK OK only when all is."""
 import subprocess
-from pathlib import Path
 
 import pytest
 

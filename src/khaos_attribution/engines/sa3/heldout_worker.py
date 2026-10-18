@@ -112,7 +112,8 @@ def heldout_mlx(req: dict) -> dict:
     if req.get("adapter"):
         load_trainable_lora_state(bundle, sd)
     # The generation mask, as the renderer and Khaos's patched trainer condition.
-    lac_const = mx.array(np.zeros((1, 257, t_lat), np.float32).transpose(0, 2, 1)).astype(mx.float16)
+    channels = items[0][2].shape[0]
+    lac_const = mx.array(np.zeros((1, 1 + channels, t_lat), np.float32).transpose(0, 2, 1)).astype(mx.float16)
     timesteps = [float(t) for t in req["timesteps"]]
     per_sample = {}
     for npy, meta, arr in items:

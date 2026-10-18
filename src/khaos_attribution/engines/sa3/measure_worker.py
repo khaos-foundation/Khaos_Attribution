@@ -35,7 +35,7 @@ def _load(req: dict):
     params = [named[i][1] for i in order]
     for p in params:
         p.requires_grad_(True)
-    return wrapped, model, params, torch
+    return wrapped, model, params, torch, sorted(state)
 
 
 def _clip(model, torch, wav: Path, device, pair_seed: int):
@@ -119,9 +119,12 @@ def _loss(model, torch, clip, timesteps) -> float:
 def _base_dtype(model) -> str:
     """The precision the base model's weights are held at, as a result's name records it."""
     from khaos_attribution.gradient import dtype_tag  # noqa: PLC0415
-    lora = {id(p) for n, p in model.named_parameters() if "lora" in n}
-    dtypes = {str(p.dtype) for p in model.parameters() if id(p) not in lora}
-    return dtype_tag("torch.float16" if "torch.float16" in dtypes else next(iter(dtypes), "unknown"))
+    from stable_audio_3.models.lora.utils import name_is_lora  # noqa: PLC0415
+    from collections import Counter  # noqa: PLC0415
+    lora = {id(p) for n, p in model.named_parameters() if name_is_lora(n)}
+    counts = Counter(str(p.dtype) for p in model.parameters() if id(p) not in lora)
+    # The dtype most of the base's weights are held at; a few kept at full precision do not change the label.
+    return dtype_tag(counts.most_common(1)[0][0]) if counts else "unknown"
 
 
 def _peak_gb() -> float | None:
@@ -149,9 +152,10 @@ def main() -> int:
 
 def run(req: dict) -> dict:
     import numpy as np  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.measure import ROW_PREFIX  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
 
-    wrapped, model, params, torch = _load(req)
+    wrapped, model, params, torch, keys = _load(req)
     device = wrapped.device
     timesteps = [float(t) for t in req["timesteps"]]
     noise_seed = int(req["noise_seed"])
@@ -179,7 +183,7 @@ def run(req: dict) -> dict:
                 norm = float(np.linalg.norm(projected))
                 vectors.append(G.l2_normalise(projected))
                 rows.append({"row": i, "pair_id": wav.stem, "track_id": G.track_of_pair(wav.stem), "gradient_norm": round(norm, 8)})
-                sys.stdout.write("khaos-row " + json.dumps(rows[-1]) + "\n")
+                sys.stdout.write(ROW_PREFIX + json.dumps(rows[-1]) + "\n")
                 sys.stdout.flush()
             else:
                 vectors.append(projected)
@@ -189,7 +193,7 @@ def run(req: dict) -> dict:
         extra = {}
         if raw:
             np.save(str(req["keep_flat"]), np.stack(raw).astype(np.float32))
-            extra = {"flat": str(req["keep_flat"])}
+            extra = {"flat": str(req["keep_flat"]), "keys": keys}
         if command == "index":
             out = Path(req["out"])
             out.parent.mkdir(parents=True, exist_ok=True)

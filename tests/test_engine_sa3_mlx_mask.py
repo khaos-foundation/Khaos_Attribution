@@ -70,7 +70,7 @@ def test_training_and_measuring_refuse_the_old_mask(root, tmp_path):
     assert T.open_module(api, {}, adapter, checkpoint_root=ckpt, output_dir=run).runtime == "mlx"
 
 
-def test_a_run_missing_its_trainer_record_is_refused_and_a_resume_keeps_an_earlier_ones(root, tmp_path):
+def test_a_run_missing_its_trainer_record_is_refused_and_a_published_bundle_is_not(root, tmp_path):
     api = T.TrainingApi(root=root, runtime="mlx", python=sys.executable)
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
@@ -80,7 +80,7 @@ def test_a_run_missing_its_trainer_record_is_refused_and_a_resume_keeps_an_earli
     (run / "training_config.yaml").write_text("engine: stable-audio-3\n")
     adapter = run / "adapter_model.safetensors"
     adapter.write_bytes(b"w")
-    with pytest.raises(T.TrainingUnavailable, match="record is missing"):
+    with pytest.raises(T.TrainingUnavailable, match="trainer record is missing"):
         T.open_module(api, {}, adapter, checkpoint_root=ckpt, output_dir=run)
     bundle = tmp_path / "bundle"
     bundle.mkdir()
@@ -97,3 +97,17 @@ def test_a_resumed_run_keeps_an_earlier_all_ones_stretch_on_its_record(tmp_path)
     assert T.mask_to_record("zeros", run, resuming=False) == "zeros", "a fresh start is judged by today's trainer"
     rec.write_text(json.dumps({"command": ["scripts/lora_train_mlx.py"], "mlx_inpaint_mask": "zeros"}))
     assert T.mask_to_record("zeros", run, resuming=True) == "zeros"
+
+
+def test_one_rule_says_why_a_run_cannot_be_measured(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    assert T.run_refusal(run) is None, "a folder that is no run passes"
+    (run / "training_config.yaml").write_text("engine: stable-audio-3\n")
+    assert "trainer record is missing" in T.run_refusal(run)
+    (run / T.TRAINER_DIRNAME).mkdir()
+    rec = run / T.TRAINER_DIRNAME / "train_command.json"
+    rec.write_text(json.dumps({"command": ["scripts/lora_train_mlx.py"]}))
+    assert "all-ones" in T.run_refusal(run)
+    rec.write_text(json.dumps({"command": ["scripts/lora_train_mlx.py"], "mlx_inpaint_mask": "zeros"}))
+    assert T.run_refusal(run) is None
