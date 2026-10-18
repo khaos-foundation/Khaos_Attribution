@@ -44,7 +44,7 @@ def handle(tmp_path, monkeypatch):
     return M.Handle(root=tmp_path, python=sys.executable, adapter=adapter)
 
 
-def test_open_module_gives_a_handle_on_the_torch_runtime_only(tmp_path):
+def test_open_module_gives_a_handle_for_each_runtime(tmp_path):
     api = T.TrainingApi(root=tmp_path, runtime="torch", python=sys.executable)
     adapter = tmp_path / "a.safetensors"
     with pytest.raises(T.TrainingUnavailable, match="no adapter file"):
@@ -52,8 +52,28 @@ def test_open_module_gives_a_handle_on_the_torch_runtime_only(tmp_path):
     adapter.write_bytes(b"w")
     h = T.open_module(api, {}, adapter, device="cuda:0")
     assert isinstance(h, M.Handle) and h.device_type == "cuda" and h.adapter == adapter.resolve() and h.dtype == "torch.float32"
-    with pytest.raises(T.TrainingUnavailable, match="torch runtime"):
-        T.open_module(T.TrainingApi(root=tmp_path, runtime="mlx", python=sys.executable), {}, adapter)
+    assert h.runtime == "torch" and h.base_npz is None
+    mlx = T.TrainingApi(root=tmp_path, runtime="mlx", python=sys.executable)
+    with pytest.raises(T.TrainingUnavailable, match="base weights"):
+        T.open_module(mlx, {}, adapter, checkpoint_root=tmp_path / "ckpt")
+    (tmp_path / "ckpt").mkdir()
+    (tmp_path / "ckpt" / T.BASE_NPZ).write_bytes(b"npz")
+    hm = T.open_module(mlx, {}, adapter, checkpoint_root=tmp_path / "ckpt", device="mps")
+    assert hm.runtime == "mlx" and hm.device_type == "mps" and hm.base_npz == (tmp_path / "ckpt" / T.BASE_NPZ).absolute()
+    assert hm.dtype == "float16", "recorded as fp16: the trainer's half-precision base"
+
+
+def test_an_mlx_handle_asks_the_mlx_worker_and_names_the_base_weights(handle, tmp_path, monkeypatch):
+    seen = tmp_path / "seen.json"
+    mlx_worker = tmp_path / "mlx_worker.py"
+    mlx_worker.write_text("import json, sys\nreq = json.loads(sys.stdin.read())\n"
+                          f"open({str(seen)!r}, 'w').write(json.dumps(req))\n"
+                          "print(json.dumps({'n_params': 5, 'n_tensors': 2, 'signature': 'mlx'}))\n")
+    monkeypatch.setattr(M, "MEASURE_WORKER_MLX", mlx_worker)
+    handle.runtime, handle.base_npz, handle.device_type = "mlx", tmp_path / "base.npz", "mps"
+    assert M.parameter_count(handle) == (5, 2, "mlx")
+    req = json.loads(seen.read_text())
+    assert req["runtime"] == "mlx" and req["base_npz"] == str(tmp_path / "base.npz")
 
 
 def test_the_index_rows_and_features_come_back_in_the_contracts_shapes(handle, tmp_path):
@@ -75,6 +95,28 @@ def test_the_index_rows_and_features_come_back_in_the_contracts_shapes(handle, t
         M.index_rows(handle, files, projection=make_projection(12, 8, 1), timesteps=[0.5], noise_seed=7, timestep_norm=True)
 
 
+def test_the_rows_reach_the_room_while_the_worker_runs(handle, tmp_path, monkeypatch):
+    """Each row line the worker prints reaches on_row as it comes, once, and a stray line never breaks the reply."""
+    worker = tmp_path / "rows_worker.py"
+    worker.write_text("import json, sys, numpy as np\nreq = json.loads(sys.stdin.read())\n"
+                      "rows = []\n"
+                      "for i, f in enumerate(req['files']):\n"
+                      "    rows.append({'row': i, 'pair_id': 'p', 'track_id': 't', 'gradient_norm': 1.0 + i})\n"
+                      "    print('khaos-row ' + json.dumps(rows[-1]), flush=True)\n"
+                      "print('khaos-row not json', flush=True)\n"
+                      "sys.stderr.write('x' * 200000)\n"
+                      "np.save(req['out'], np.zeros((len(rows), req['projection']['dim']), np.float32))\n"
+                      "print(json.dumps({'rows': rows, 'matrix': req['out']}))\n")
+    monkeypatch.setattr(M, "MEASURE_WORKER", worker)
+    files = [tmp_path / f"t_seg_00{i}.wav" for i in range(2)]
+    for f in files:
+        f.write_bytes(b"x")
+    seen = []
+    M.index_rows(handle, files, projection=make_projection(12, 8, 1), timesteps=[0.5], noise_seed=7,
+                 on_row=lambda i, p, n: seen.append((i, n)))
+    assert seen == [(0, 1.0), (1, 2.0)]
+
+
 def test_a_workers_refusal_is_the_sockets(handle, tmp_path):
     handle.adapter = tmp_path / "bad.safetensors"
     handle.adapter.write_bytes(b"w")
@@ -82,5 +124,8 @@ def test_a_workers_refusal_is_the_sockets(handle, tmp_path):
         M.paired_loss(handle, {"timesteps": [0.5], "noise_seed": 1}, [tmp_path / "x.wav"])
     assert M.memory_plan("cuda", 30.0, total_gb=96.0, env={})["fits"] == "resident"
     assert M.memory_plan("cuda", 30.0, total_gb=8.0, env={})["fits"] is None
-    assert "CUDA only" in M.memory_plan("mps", 30.0, total_gb=96.0, env={})["refusal"]
+    assert "not been measured on cpu" in M.memory_plan("cpu", 30.0, total_gb=96.0, env={})["refusal"]
+    assert M.memory_plan("mps", 56.0, total_gb=32.0, env={})["fits"] == "resident", "the MLX worker fits a 32 GB Mac"
+    assert M.memory_plan("mps", 56.0, total_gb=16.0, env={})["fits"] is None
+    assert M.scorer_need_gb(56, device_type="mps") == 21.9
     assert M.scorer_need_gb(300) == M.scorer_need_gb(5) == 9.2, "one measured number, not fitted by length"

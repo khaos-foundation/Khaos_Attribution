@@ -97,18 +97,21 @@ def heldout_mlx(req: dict) -> dict:
     dit_model = mod.load_dit(base_path, T_lat=t_lat, dtype=mx.float16, compile_=False)
     t5 = T5Gemma.from_npz(str(ensure_local(T5GEMMA_NPZ_REL)))
     padding_emb, secs_embedder = load_conditioner_from_npz(base_path, prefix="cond.")
-    sd, ckpt_cfg = load_lora_checkpoint(str(req["adapter"]))
-    lora_config = underfit_lora_config()
-    lora_config.update({k: ckpt_cfg[k] for k in ("adapter_type", "rank", "alpha") if k in (ckpt_cfg or {})})
-    inject_from_lora_config(dit_model, lora_config, checkpoint_prefix="model.")
     secs_module = None
-    if any(str(k).startswith("conditioners.seconds_total.") for k in sd):
-        secs_module = TrainableSecondsEmbedder(secs_embedder.W, secs_embedder.b)
-        inject_from_lora_config(secs_module, lora_config, checkpoint_prefix="conditioners.seconds_total.")
+    # Before the first checkpoint there is no adapter: the base model alone, as the torch path scores it.
+    if req.get("adapter"):
+        sd, ckpt_cfg = load_lora_checkpoint(str(req["adapter"]))
+        lora_config = underfit_lora_config()
+        lora_config.update({k: ckpt_cfg[k] for k in ("adapter_type", "rank", "alpha") if k in (ckpt_cfg or {})})
+        inject_from_lora_config(dit_model, lora_config, checkpoint_prefix="model.")
+        if any(str(k).startswith("conditioners.seconds_total.") for k in sd):
+            secs_module = TrainableSecondsEmbedder(secs_embedder.W, secs_embedder.b)
+            inject_from_lora_config(secs_module, lora_config, checkpoint_prefix="conditioners.seconds_total.")
     bundle = TrainBundle(dit_model, secs_module)
-    load_trainable_lora_state(bundle, sd)
-    lac_const = mx.array(np.concatenate([np.ones((1, 1, t_lat), np.float32), np.zeros((1, 256, t_lat), np.float32)],
-                                        axis=1).transpose(0, 2, 1)).astype(mx.float16)
+    if req.get("adapter"):
+        load_trainable_lora_state(bundle, sd)
+    # The generation mask, as the renderer and Khaos's patched trainer condition.
+    lac_const = mx.array(np.zeros((1, 257, t_lat), np.float32).transpose(0, 2, 1)).astype(mx.float16)
     timesteps = [float(t) for t in req["timesteps"]]
     per_sample = {}
     for npy, meta, arr in items:

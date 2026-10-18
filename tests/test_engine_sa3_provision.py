@@ -124,6 +124,14 @@ def test_the_mlx_runtime_wants_the_exported_base_weights(tmp_path, monkeypatch):
     weights = tmp_path / "w"
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
     mlx = root / "optimized" / "mlx"
+    monkeypatch.setattr(P, "contract_present", lambda python: False)
+    assert "lacks this contract's version" in P.provision(root, weights, device="mps", check_only=True).text(), \
+        "the MLX measure worker projects with the contract, so an MLX environment without it is not ready"
+    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    (root / P.MLX_TRAINER).parent.mkdir(parents=True, exist_ok=True)
+    (root / P.MLX_TRAINER).write_text("lac = mx.array(\n    " + P.TRAINER_MASK_ONES + "\n    np.zeros((1, 256, crop_len)))\n")
+    assert "all-ones inpaint mask" in P.provision(root, weights, device="mps", check_only=True).text()
+    P.mlx_trainer_patch(root)
     report = P.provision(root, weights, device="mps", check_only=True)
     text = report.text()
     assert "stable-audio-3-optimized missing" in text and "MLX base weights missing" in text and not report.passed
@@ -134,8 +142,10 @@ def test_the_mlx_runtime_wants_the_exported_base_weights(tmp_path, monkeypatch):
         (mlx / rel).write_bytes(b"npz")
     assert not P.installed(root, "mlx", weights)
     # An install links the port's ready-made base file where the trainer looks; no model repository is pulled on MLX.
+    (root / P.MLX_TRAINER).write_text("lac = mx.array(\n    " + P.TRAINER_MASK_ONES + "\n    np.zeros((1, 256, crop_len)))\n")
     report = P.provision(root, weights, device="mps")
     assert report.passed and (weights / P.BASE_NPZ).resolve() == (mlx / "models/mlx/dit_medium-base_f16.npz").resolve()
+    assert P.trainer_mask(root) == "zeros", "an install leaves the MLX trainer on the generation mask"
     assert P.installed(root, "mlx", weights) and P.provision(root, weights, device="mps", check_only=True).passed
     (mlx / "models/mlx/t5gemma_f16.npz").unlink()
     (mlx / "models/mlx/t5gemma_f16.npz").symlink_to(tmp_path / "gone")

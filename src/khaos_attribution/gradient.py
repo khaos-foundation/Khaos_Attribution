@@ -44,6 +44,30 @@ def track_of_pair(pair_id: str) -> str:
     return head if sep else str(pair_id)
 
 
+def pair_noise(seed: int, shape: Sequence[int]) -> np.ndarray:
+    """A pair's noise drawn by NumPy's PCG64, so every runtime of an engine takes its feature on the same draw."""
+    return np.random.default_rng(int(seed)).standard_normal(tuple(int(s) for s in shape)).astype(np.float32)
+
+
+def checkpoint_order(names: Sequence[str], checkpoint_keys: Sequence[str]) -> list:
+    """The positions of a runtime's adapter parameters sorted by the adapter file's own keys, so every runtime
+    flattens one adapter in one order; a parameter the file lacks, or a key no parameter carries, is refused."""
+    keys = set(checkpoint_keys)
+    matched = {}
+    for i, name in enumerate(names):
+        hits = [k for k in keys if name == k or name.endswith("." + k)]
+        if not hits:
+            raise GradientUnavailable(f"adapter parameter {name} has no key in the adapter file")
+        key = max(hits, key=len)
+        if key in matched:
+            raise GradientUnavailable(f"two adapter parameters claim the file's key {key}")
+        matched[key] = i
+    missing = sorted(keys - set(matched))
+    if missing:
+        raise GradientUnavailable(f"the adapter file holds {len(missing)} key(s) no parameter carries, e.g. {missing[0]}")
+    return [matched[k] for k in sorted(matched)]
+
+
 @dataclass
 class SketchProjection:
     """A seeded count-sketch from ``n_params`` to ``dim``, reproducible from

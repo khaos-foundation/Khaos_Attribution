@@ -138,6 +138,13 @@
       "checkpointed_gb": 8.7,
       "checkpointed_gb_per_sec": 0.0,
       "process_gb": 0.5
+    },
+    "scorer_mps": {
+      "base_gb": 15.0,
+      "gb_per_sec": 0.0,
+      "checkpointed_gb": 15.0,
+      "checkpointed_gb_per_sec": 0.0,
+      "process_gb": 6.9
     }
   }
 }

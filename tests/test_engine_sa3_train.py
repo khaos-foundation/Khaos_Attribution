@@ -116,6 +116,10 @@ def test_the_mlx_runtime_reads_the_telemetry_and_needs_the_base_npz(api, tmp_pat
                        device="mps", precision="bf16", seed=1)
     (tmp_path / "ck").mkdir()
     (tmp_path / "ck" / "medium-base.npz").write_bytes(b"npz")
+    from khaos_attribution.engines.sa3 import provision as P
+    trainer = api.root / P.MLX_TRAINER
+    trainer.parent.mkdir(parents=True, exist_ok=True)
+    trainer.write_text((trainer.read_text() if trainer.exists() else "") + "\n# " + P.TRAINER_MASK_ZEROS + "\n")
     session = T.open_session(mlx, RECIPE, checkpoint_root=tmp_path / "ck", tensor_dir=tensors, output_dir=tmp_path / "run",
                              device="mps", precision="bf16", seed=1)
     cmd = session.command()
@@ -128,6 +132,7 @@ def test_the_mlx_runtime_reads_the_telemetry_and_needs_the_base_npz(api, tmp_pat
     assert [u.kind for u in updates if u.kind in ("epoch", "checkpoint")] == ["epoch", "checkpoint", "epoch", "checkpoint"]
     laid = sorted((tmp_path / "run" / "checkpoints").glob("epoch_*/adapter_model.safetensors"))
     assert len(laid) == 2 and laid[0].read_bytes() == b"st", "a safetensors checkpoint is copied, not converted"
+    assert T.trained_mask(tmp_path / "run") == "zeros", "the run records the mask it trained under"
 
 
 def test_a_trainer_that_dies_is_a_fail_update_with_its_last_lines(api, tmp_path):

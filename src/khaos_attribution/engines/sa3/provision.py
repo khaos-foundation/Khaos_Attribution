@@ -109,6 +109,41 @@ def unpack_archive(url: str, root: Path, commit: str) -> None:
     shutil.rmtree(old, ignore_errors=True)
 
 
+MLX_TRAINER = Path("optimized") / "mlx" / "scripts" / "lora_train_mlx.py"
+# Stability's MLX trainer conditions every step on an all-ones inpaint mask ("keep everything, the context is
+# silence") while its renderer and the torch trainer generate under all zeros; the base model's loss under ones is
+# tens of times its loss under zeros, so a Mac adapter would learn to undo the mask. Khaos trains under zeros.
+TRAINER_MASK_ONES = "np.concatenate([np.ones((1, 1, crop_len), np.float32),"
+TRAINER_MASK_ZEROS = "np.concatenate([np.zeros((1, 1, crop_len), np.float32),"
+
+
+def trainer_mask(root: Path) -> str | None:
+    """"zeros" or "ones": the inpaint mask the MLX trainer at ``root`` conditions on, or None when it is not found."""
+    try:
+        text = (Path(root) / MLX_TRAINER).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if text.count(TRAINER_MASK_ZEROS) == 1 and TRAINER_MASK_ONES not in text:
+        return "zeros"
+    if text.count(TRAINER_MASK_ONES) == 1:
+        return "ones"
+    return None
+
+
+def mlx_trainer_patch(root: Path, *, check_only: bool = False) -> tuple:
+    """The MLX trainer conditioned on the generation mask; (ok, note)."""
+    mask = trainer_mask(root)
+    if mask == "zeros":
+        return True, "the MLX trainer conditions on the generation mask, as the renderer does"
+    if mask is None:
+        return False, f"the MLX trainer's inpaint conditioning was not found in {MLX_TRAINER}; the patch needs review at this pin"
+    if check_only:
+        return False, "the MLX trainer still conditions on the all-ones inpaint mask; provision to patch it"
+    path = Path(root) / MLX_TRAINER
+    path.write_text(path.read_text(encoding="utf-8").replace(TRAINER_MASK_ONES, TRAINER_MASK_ZEROS), encoding="utf-8")
+    return trainer_mask(root) == "zeros", "the MLX trainer patched to condition on the generation mask"
+
+
 def checkout(root: Path, *, check_only: bool = False) -> tuple:
     """Stability's code at the descriptor's commit; (ok, note)."""
     from khaos_attribution.engines.pins import checkout_commit  # noqa: PLC0415
@@ -139,6 +174,8 @@ def checkout(root: Path, *, check_only: bool = False) -> tuple:
             return False, f"the code archive could not be fetched: {exc}"
         return True, f"Stable Audio 3 code moved to the pin {commit[:12]}"
     _run(["git", "-C", root, "fetch", "-q", "origin", commit])
+    # Khaos's own patch comes off before the move and goes back on at the new pin.
+    _run(["git", "-C", root, "checkout", "-q", "--", str(MLX_TRAINER)])
     done = _run(["git", "-C", root, "checkout", "-q", "--detach", commit])
     return (done.returncode == 0), (f"checked out {commit[:12]}" if done.returncode == 0 else f"checkout failed: {done.stderr.strip()[-300:]}")
 
@@ -151,14 +188,22 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         if python.is_file():
             probe = _run([python, "-c", "import mlx.core, safetensors; print('ok')"], cwd=mlx)
             if probe.returncode == 0:
-                return True, "the MLX runtime imports"
+                # The MLX measure worker projects its features with the contract, as the torch one does.
+                if contract_present(python):
+                    return True, "the MLX runtime imports"
+                if check_only:
+                    return False, f"the MLX environment at {python} runs the engine but lacks this contract's version"
+                return contract_into(python, root)
         if check_only:
             return False, f"no MLX environment at {python}"
         done = _run(["bash", "install.sh", "-y"], cwd=mlx, env={**os.environ, "UV": uv_path()})
         if done.returncode != 0:
             return False, f"the MLX installer failed: {done.stderr.strip()[-300:]}"
         _run([uv_path(), "pip", "install", "-q", "--python", python, "safetensors"])
-        return python.is_file(), "the MLX runtime installed"
+        if not python.is_file():
+            return False, "the MLX runtime did not install"
+        ok, note = contract_into(python, root)
+        return ok, ("the MLX runtime installed; " + note) if ok else note
     python = venv_python(root, "torch")
     # Flash Attention has no Windows build; Stability's model falls back to PyTorch's own attention without it.
     probe_code = ("import torch, stable_audio_3" + ("" if WINDOWS else ", flash_attn")
@@ -380,6 +425,9 @@ def provision(repo_dir=None, weights_dir=None, *, device: str = "auto", check_on
     (report.ok if ok else report.bad)(note)
     if ok:
         ok, note = environment(root, runtime, check_only=check_only)
+        (report.ok if ok else report.bad)(note)
+    if ok and runtime == "mlx":
+        ok, note = mlx_trainer_patch(root, check_only=check_only)
         (report.ok if ok else report.bad)(note)
     if ok:
         for good, line in weights(root, runtime, weights_dir, check_only=check_only):

@@ -293,7 +293,7 @@
         "yielded_gb",
         "scorer"
       ],
-      "description": "Measured on the engine: what it holds while serving, what it holds with its models released, and the scorer's peak by output length.",
+      "description": "Measured on the engine: what it holds while serving, what it holds with its models released, and the scorer's peak by output length; the scorer on another device type under scorer_<device>.",
       "properties": {
         "resident_gb": {
           "type": "number"
@@ -302,6 +302,36 @@
           "type": "number"
         },
         "scorer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "base_gb",
+            "gb_per_sec",
+            "checkpointed_gb",
+            "checkpointed_gb_per_sec",
+            "process_gb"
+          ],
+          "properties": {
+            "base_gb": {
+              "type": "number"
+            },
+            "gb_per_sec": {
+              "type": "number"
+            },
+            "checkpointed_gb": {
+              "type": "number"
+            },
+            "checkpointed_gb_per_sec": {
+              "type": "number"
+            },
+            "process_gb": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "patternProperties": {
+        "^scorer_(mps|cpu|xpu)$": {
           "type": "object",
           "additionalProperties": false,
           "required": [

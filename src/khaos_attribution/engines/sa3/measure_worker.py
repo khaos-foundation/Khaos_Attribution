@@ -16,6 +16,9 @@ def _load(req: dict):
     from khaos_attribution.engines.sa3.loading import load_model  # noqa: PLC0415
     from stable_audio_3.models.lora.utils import get_lora_params  # noqa: PLC0415
 
+    from khaos_attribution import gradient as G  # noqa: PLC0415
+    from stable_audio_3.models.lora.utils import load_lora_checkpoint, name_is_lora  # noqa: PLC0415
+
     wrapped = load_model(req["model"])
     if not req.get("adapter"):
         raise RuntimeError("a feature needs the adapter; none was named")
@@ -23,11 +26,15 @@ def _load(req: dict):
     wrapped.set_lora_strength(1.0)
     model = wrapped.model
     model.eval()
-    params = [p for p in get_lora_params(model) if p.requires_grad or True]
+    named = [(n, p) for n, p in model.named_parameters() if name_is_lora(n)]
+    if not named or len(named) != len(list(get_lora_params(model))):
+        raise RuntimeError("the adapter's parameters could not be named")
+    state, _cfg = load_lora_checkpoint(str(req["adapter"]))
+    # The adapter file's key order, shared with the MLX worker, so one adapter projects alike on either runtime.
+    order = G.checkpoint_order([n for n, _p in named], list(state))
+    params = [named[i][1] for i in order]
     for p in params:
         p.requires_grad_(True)
-    if not params:
-        raise RuntimeError("the adapter has no parameters to take a gradient of")
     return wrapped, model, params, torch
 
 
@@ -60,8 +67,8 @@ def _clip(model, torch, wav: Path, device, pair_seed: int):
     valid = max(1, min(int(round(n / ratio)), latents.shape[-1]))
     mask = torch.zeros(1, latents.shape[-1], dtype=torch.bool, device=latents.device)
     mask[:, :valid] = True
-    gen = torch.Generator(device="cpu").manual_seed(int(pair_seed))
-    noise = torch.randn(latents.shape, generator=gen, dtype=torch.float32).to(latents.device)
+    from khaos_attribution import gradient as G  # noqa: PLC0415
+    noise = torch.from_numpy(G.pair_noise(pair_seed, latents.shape)).to(latents.device)
     return latents, cond, mask, noise
 
 
@@ -153,27 +160,35 @@ def run(req: dict) -> dict:
                       if command == "index" else G.projection_from_meta(req["index_meta"]))
         if projection.n_params != n_params:
             raise RuntimeError(f"the index was built on {projection.n_params} adapter parameters; this adapter has {n_params}")
-        rows, vectors = [], []
+        rows, vectors, raw = [], [], []
         for i, wav in enumerate(files):
             clip = _clip(model, torch, wav, device, G.pair_noise_seed(noise_seed, wav.name))
             flat = _gradient(model, torch, params, clip, timesteps, target)
+            if req.get("keep_flat"):
+                raw.append(flat)
             projected = G.project(flat, projection)
             if command == "index":
                 norm = float(np.linalg.norm(projected))
                 vectors.append(G.l2_normalise(projected))
                 rows.append({"row": i, "pair_id": wav.stem, "track_id": G.track_of_pair(wav.stem), "gradient_norm": round(norm, 8)})
+                sys.stdout.write("khaos-row " + json.dumps(rows[-1]) + "\n")
+                sys.stdout.flush()
             else:
                 vectors.append(projected)
             del clip
             if str(device).startswith("cuda"):
                 torch.cuda.empty_cache()
+        extra = {}
+        if raw:
+            np.save(str(req["keep_flat"]), np.stack(raw).astype(np.float32))
+            extra = {"flat": str(req["keep_flat"])}
         if command == "index":
             out = Path(req["out"])
             out.parent.mkdir(parents=True, exist_ok=True)
             np.save(str(out), np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, projection.dim), np.float32))
-            return {"rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(params), "signature": signature,
-                    "device": str(device).split(":")[0], "compute_dtype": "fp32"}
-        return {"feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors)}
+            return {**extra, "rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(params),
+                    "signature": signature, "device": str(device).split(":")[0], "compute_dtype": "fp32"}
+        return {**extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors)}
     if command == "loss":
         # A weight-decomposed adapter at strength 0 is still not the base model: the reading is refused, never faked.
         from stable_audio_3.models.lora.utils import load_lora_checkpoint  # noqa: PLC0415

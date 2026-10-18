@@ -81,20 +81,41 @@ def adapter_file_in(directory: Path | str) -> Path | None:
     return files[0] if files else None
 
 
+def trained_mask(run_dir: Path | str) -> str | None:
+    """The inpaint mask a run's MLX trainer conditioned on ("ones" for a Mac run from before Khaos recorded it), or
+    None for a run not trained by the MLX trainer here."""
+    path = Path(run_dir) / TRAINER_DIRNAME / "train_command.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not any("lora_train_mlx.py" in str(part) for part in record.get("command") or []):
+        return None
+    return record.get("mlx_inpaint_mask") or "ones"
+
+
 def pair_files(tensor_dir: Path | str) -> list:
     return sorted(Path(tensor_dir).glob(f"*{PAIR_SUFFIX}"))
 
 
 def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=None, device: str = "cuda",
                 dataset_dir=None, output_dir=None, precision: str | None = None):
-    """What a feature is taken on: a handle naming the engine's environment and the adapter, which the measure
-    worker loads per call; the torch runtime only (the MLX port takes no gradient for Khaos yet)."""
+    """What a feature is taken on: a handle naming the engine's environment, its runtime and the adapter, which the
+    measure worker of that runtime loads per call."""
     from khaos_attribution.engines.sa3.measure import Handle  # noqa: PLC0415
-    if api.runtime != "torch":
-        raise TrainingUnavailable("Stable Audio 3's gradient features are taken on the torch runtime (CUDA) only")
     adapter_file = Path(adapter_file)
     if not adapter_file.is_file():
         raise TrainingUnavailable(f"no adapter file at {adapter_file}")
+    if output_dir is not None and trained_mask(output_dir) == "ones":
+        raise TrainingUnavailable("this adapter was trained on a Mac under the all-ones inpaint mask the renderer never "
+                                  "uses; its gradients describe that mask, not the music. Retrain it, then index it")
+    if api.runtime == "mlx":
+        base_npz = Path(checkpoint_root or "") / BASE_NPZ
+        if not base_npz.is_file():
+            raise TrainingUnavailable(f"the MLX measure needs the base weights as {BASE_NPZ} under {checkpoint_root}; "
+                                      "provision the engine first")
+        return Handle(root=api.root, python=api.python, adapter=adapter_file.resolve(), device_type="mps",
+                      dtype="float16", runtime="mlx", base_npz=base_npz.absolute())
     return Handle(root=api.root, python=api.python, adapter=adapter_file.resolve(), device_type=str(device).split(":")[0])
 
 
@@ -394,8 +415,11 @@ class Session:
         self._sizes = {}
         offset = self.start_epoch
         cmd = self.command()
-        (self.save_dir / "train_command.json").write_text(json.dumps({"command": cmd, "steps": self.run_steps(),
-                                                                      "window_seconds": self.window_seconds}, indent=1) + "\n")
+        record = {"command": cmd, "steps": self.run_steps(), "window_seconds": self.window_seconds}
+        if self.api.runtime == "mlx":
+            from khaos_attribution.engines.sa3.provision import trainer_mask  # noqa: PLC0415
+            record["mlx_inpaint_mask"] = trainer_mask(self.api.root)
+        (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
         log_file = (self.save_dir / "trainer_stdout.log").open("ab")
         # In the job's own process group, so the room's Stop and Pause signals reach the trainer as they do the job.
         self.process = subprocess.Popen(cmd, cwd=str(self.save_dir), env=_env(self.api), stdout=log_file,
@@ -487,6 +511,11 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
     if api.runtime == "mlx" and not (Path(checkpoint_root) / BASE_NPZ).is_file():
         raise TrainingUnavailable(f"the MLX trainer needs the base weights as {BASE_NPZ} under {checkpoint_root}; "
                                   "provision the engine first")
+    if api.runtime == "mlx":
+        from khaos_attribution.engines.sa3.provision import trainer_mask  # noqa: PLC0415
+        if trainer_mask(api.root) != "zeros":
+            raise TrainingUnavailable("the MLX trainer here still conditions on the all-ones inpaint mask, which the "
+                                      "renderer never uses; provision the engine to patch it before training")
     if on_model_loaded is not None:
         on_model_loaded(None)
     return Session(api, cfg, checkpoint_root=checkpoint_root, tensor_dir=tensor_dir, output_dir=output_dir,
