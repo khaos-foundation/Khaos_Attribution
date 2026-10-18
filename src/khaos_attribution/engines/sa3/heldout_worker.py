@@ -102,7 +102,8 @@ def heldout_mlx(req: dict) -> dict:
     if req.get("adapter"):
         sd, ckpt_cfg = load_lora_checkpoint(str(req["adapter"]))
         lora_config = underfit_lora_config()
-        lora_config.update({k: ckpt_cfg[k] for k in ("adapter_type", "rank", "alpha") if k in (ckpt_cfg or {})})
+        lora_config.update({k: ckpt_cfg[k] for k in ("adapter_type", "rank", "alpha", "include", "exclude")
+                            if (ckpt_cfg or {}).get(k) is not None})
         inject_from_lora_config(dit_model, lora_config, checkpoint_prefix="model.")
         if any(str(k).startswith("conditioners.seconds_total.") for k in sd):
             secs_module = TrainableSecondsEmbedder(secs_embedder.W, secs_embedder.b)

@@ -120,18 +120,27 @@ def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
                                     stderr=err, cwd=str(handle.root), text=True, errors="replace", env=_env(handle))
         except OSError as exc:
             raise GradientUnavailable(f"the Stable Audio 3 measure worker could not start: {exc}") from exc
-        proc.stdin.write(json.dumps(request))
-        proc.stdin.close()
-        for line in proc.stdout:
-            if line.startswith(ROW_PREFIX):
-                if on_progress is not None:
-                    try:
-                        on_progress(json.loads(line[len(ROW_PREFIX):]))
-                    except ValueError:
-                        pass
-                continue
-            lines.append(line)
-        returncode = proc.wait()
+        try:
+            try:
+                proc.stdin.write(json.dumps(request))
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            for line in proc.stdout:
+                if line.startswith(ROW_PREFIX):
+                    if on_progress is not None:
+                        try:
+                            on_progress(json.loads(line[len(ROW_PREFIX):]))
+                        except ValueError:
+                            pass
+                    continue
+                lines.append(line)
+            returncode = proc.wait()
+        finally:
+            # A worker left running would hold the device's memory after its caller has gone.
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
         err.seek(0)
         stderr = err.read()
     last = "".join(lines).strip().splitlines()[-1:] or [""]
@@ -192,9 +201,26 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
     return matrix.astype(np.float32), r["rows"]
 
 
+def _index_refusal(index_meta: dict) -> str | None:
+    """Why an index cannot be read against this measure's features, or None: it must have been built by this
+    feature version, since the noise and the parameter order are part of what a row means."""
+    built = index_meta.get("feature_version")
+    if built != DESCRIPTOR.feature_version:
+        return (f"the influence index was built by {DESCRIPTOR.name}'s measure {built or 'before it was versioned'}, "
+                f"and this one is {DESCRIPTOR.feature_version}; rebuild the index")
+    return None
+
+
 def output_feature(handle: Handle, index_meta: dict, files):
     import numpy as np  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    why = _index_refusal(index_meta)
+    if why:
+        raise GradientUnavailable(why)
     r = _ask(handle, _base(handle, index_meta, files, "feature"))
+    built_on = (index_meta.get("projection") or {}).get("parameter_signature")
+    if built_on and r.get("signature") and r["signature"] != built_on:
+        raise GradientUnavailable("this adapter's parameters are not laid out as the index's were; rebuild the index")
     return np.asarray(r["feature"], dtype=np.float32)
 
 

@@ -261,7 +261,8 @@ def run(req: dict) -> dict:
             np.save(str(out), np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, projection.dim), np.float32))
             return {**base, **extra, "rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(paths),
                     "signature": signature}
-        return {**base, **extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors)}
+        return {**base, **extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors),
+                "signature": signature}
     if command == "loss":
         if any(str(k).endswith((".magnitude", ".magnitude_r", ".magnitude_c")) for k in state):
             raise RuntimeError("a weight-decomposed adapter cannot be switched off for a measurement")

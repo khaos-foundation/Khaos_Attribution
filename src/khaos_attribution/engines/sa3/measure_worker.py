@@ -188,7 +188,8 @@ def run(req: dict) -> dict:
             np.save(str(out), np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, projection.dim), np.float32))
             return {**extra, "rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(params),
                     "signature": signature, "device": str(device).split(":")[0], "compute_dtype": "fp32"}
-        return {**extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors)}
+        return {**extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors),
+                "signature": signature}
     if command == "loss":
         # A weight-decomposed adapter at strength 0 is still not the base model: the reading is refused, never faked.
         from stable_audio_3.models.lora.utils import load_lora_checkpoint  # noqa: PLC0415

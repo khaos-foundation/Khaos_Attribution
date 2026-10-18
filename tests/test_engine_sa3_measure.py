@@ -87,7 +87,8 @@ def test_the_index_rows_and_features_come_back_in_the_contracts_shapes(handle, t
     assert matrix.shape == (3, 8) and matrix.dtype == np.float32 and rows[1]["pair_id"] == "t_seg_001"
     assert seen == [(0, "t_seg_000.wav", 2.0), (1, "t_seg_001.wav", 2.0), (2, "t_seg_002.wav", 2.0)]
     assert not (tmp_path / ".khaos_index_rows.tmp.npy").exists(), "the worker's matrix is read and removed"
-    meta = {"timesteps": [0.5], "noise_seed": 7, "target": "vnorm", "projection": {"kind": "count_sketch", "dim": 8, "seed": 1, "n_params": 12}}
+    meta = {"timesteps": [0.5], "noise_seed": 7, "target": "vnorm", "feature_version": M.DESCRIPTOR.feature_version,
+            "projection": {"kind": "count_sketch", "dim": 8, "seed": 1, "n_params": 12}}
     feat = M.output_feature(handle, meta, files[:1])
     assert feat.shape == (8,) and feat.dtype == np.float32 and float(feat[0]) == 0.5
     assert M.paired_loss(handle, meta, files) == {"with": 0.3, "without": 0.9} and M.output_loss(handle, meta, files) == 0.3
@@ -129,3 +130,32 @@ def test_a_workers_refusal_is_the_sockets(handle, tmp_path):
     assert M.memory_plan("mps", 56.0, total_gb=16.0, env={})["fits"] is None
     assert M.scorer_need_gb(56, device_type="mps") == 21.9
     assert M.scorer_need_gb(300) == M.scorer_need_gb(5) == 9.2, "one measured number, not fitted by length"
+
+
+def test_an_index_from_another_measure_version_or_layout_is_refused(handle, tmp_path):
+    """Noise and parameter order are part of what a row means: an index built by another version of the measure,
+    or on another layout of the adapter's parameters, is never read against today's features."""
+    f = tmp_path / "t_seg_000.wav"
+    f.write_bytes(b"x")
+    meta = {"timesteps": [0.5], "noise_seed": 7, "projection": {"kind": "count_sketch", "dim": 8, "seed": 1, "n_params": 12}}
+    with pytest.raises(GradientUnavailable, match="before it was versioned"):
+        M.output_feature(handle, meta, [f])
+    with pytest.raises(GradientUnavailable, match="rebuild the index"):
+        M.output_feature(handle, {**meta, "feature_version": "sa3-vnorm/1"}, [f])
+    ok = {**meta, "feature_version": M.DESCRIPTOR.feature_version}
+    assert M.output_feature(handle, ok, [f]).shape == (8,), "a worker that names no signature is read"
+
+
+def test_a_worker_left_behind_is_stopped_when_its_caller_fails(handle, tmp_path, monkeypatch):
+    import time
+    worker = tmp_path / "slow.py"
+    worker.write_text("import json, sys, time\nsys.stdin.read()\n"
+                      "print('khaos-row ' + json.dumps({'row': 0, 'gradient_norm': 1.0}), flush=True)\ntime.sleep(60)\n")
+    monkeypatch.setattr(M, "MEASURE_WORKER", worker)
+
+    def boom(row):
+        raise RuntimeError("the caller stopped")
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="caller stopped"):
+        M._ask(handle, {"command": "index"}, on_progress=boom)
+    assert time.monotonic() - start < 10, "the worker is killed, not waited on for its minute"

@@ -164,6 +164,22 @@ def calibrated_shares(totals: Mapping[str, float], factors: Mapping[str, float])
     return {t: v / total for t, v in sorted(scaled.items())}
 
 
+def calibration_of(meta: Mapping | None) -> dict | None:
+    """The calibration an index's record carries, when it was measured on the index's own engine; else None, since
+    one engine's subset adapters say nothing about another's. A block from before engines were named is ACE-Step's."""
+    from khaos_attribution.base_model import ACESTEP_ENGINE, engine_of  # noqa: PLC0415
+    block = (meta or {}).get("calibration")
+    if not isinstance(block, Mapping) or not block.get("factors"):
+        return None
+    base = (meta or {}).get("base_model_id")
+    try:
+        index_engine = engine_of(str(base)) if base else ACESTEP_ENGINE
+    except ValueError:
+        return None
+    fitted = str((block.get("fitted_on") or {}).get("engine") or ACESTEP_ENGINE)
+    return dict(block) if fitted == index_engine else None
+
+
 def calibration_sha256(block: Mapping | None) -> str | None:
     """The identity of a calibration block as written, so a document can say which one it was read with."""
     if not block:

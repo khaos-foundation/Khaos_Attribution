@@ -81,6 +81,14 @@ def adapter_file_in(directory: Path | str) -> Path | None:
     return files[0] if files else None
 
 
+def mask_to_record(trainer_now: str | None, run_dir: Path | str, *, resuming: bool) -> str | None:
+    """The mask a Mac run records: the trainer's today, except that a resumed run is only as clean as its first
+    steps, so an earlier all-ones stretch stays on the record."""
+    if resuming and trained_mask(run_dir) == "ones":
+        return "ones"
+    return trainer_now
+
+
 def trained_mask(run_dir: Path | str) -> str | None:
     """The inpaint mask a run's MLX trainer conditioned on ("ones" for a Mac run from before Khaos recorded it), or
     None for a run not trained by the MLX trainer here."""
@@ -106,6 +114,10 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
     adapter_file = Path(adapter_file)
     if not adapter_file.is_file():
         raise TrainingUnavailable(f"no adapter file at {adapter_file}")
+    if output_dir is not None and (Path(output_dir) / "training_config.yaml").is_file() \
+            and not (Path(output_dir) / TRAINER_DIRNAME / "train_command.json").is_file():
+        raise TrainingUnavailable("this run's trainer record is missing, so the inpaint mask it trained under is "
+                                  "unknown; it cannot be indexed")
     if output_dir is not None and trained_mask(output_dir) == "ones":
         raise TrainingUnavailable("this adapter was trained on a Mac under the all-ones inpaint mask the renderer never "
                                   "uses; its gradients describe that mask, not the music. Retrain it, then index it")
@@ -418,7 +430,8 @@ class Session:
         record = {"command": cmd, "steps": self.run_steps(), "window_seconds": self.window_seconds}
         if self.api.runtime == "mlx":
             from khaos_attribution.engines.sa3.provision import trainer_mask  # noqa: PLC0415
-            record["mlx_inpaint_mask"] = trainer_mask(self.api.root)
+            record["mlx_inpaint_mask"] = mask_to_record(trainer_mask(self.api.root), self.output_dir,
+                                                        resuming=self.resume_from is not None)
         (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
         log_file = (self.save_dir / "trainer_stdout.log").open("ab")
         # In the job's own process group, so the room's Stop and Pause signals reach the trainer as they do the job.
