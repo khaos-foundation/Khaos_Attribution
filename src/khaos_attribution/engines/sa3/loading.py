@@ -56,6 +56,10 @@ def load_measured(model_name: str):
     wrapped = load_model(model_name, model_half=False)
     if str(wrapped.device).startswith("cuda"):
         wrapped.model.to(dtype=torch.bfloat16)
+        # Stability's inference wrapper turns these off process-wide; its trainer runs with them as below.
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
     return wrapped
 
 

@@ -33,6 +33,8 @@ def _load(req: dict):
     # The adapter file's key order, shared with the MLX worker, so one adapter projects alike on either runtime.
     order = G.checkpoint_order([n for n, _p in named], list(state))
     params = [named[i][1] for i in order]
+    if any(p.dtype != torch.float32 for p in params):
+        raise RuntimeError("the adapter's parameters are not float32, the precision they trained at")
     for p in params:
         p.requires_grad_(True)
     return wrapped, model, params, torch, sorted(state)

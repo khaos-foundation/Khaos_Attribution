@@ -42,13 +42,18 @@ def _fake_torch(monkeypatch):
     import types
     calls = []
     fake = types.SimpleNamespace(bfloat16="bf16", float32="fp32",
-                                 autocast=lambda **kw: calls.append(kw) or kw)
+                                 autocast=lambda **kw: calls.append(kw) or kw,
+                                 set_float32_matmul_precision=lambda p: calls.append({"matmul": p}),
+                                 backends=types.SimpleNamespace(cudnn=types.SimpleNamespace(allow_tf32=False),
+                                                                cuda=types.SimpleNamespace(matmul=types.SimpleNamespace(
+                                                                    allow_fp16_reduced_precision_reduction=False))))
     monkeypatch.setitem(sys.modules, "torch", fake)
     return calls
 
 
 def test_a_measurement_on_cuda_holds_the_base_at_the_trainers_bfloat16(monkeypatch):
-    _fake_torch(monkeypatch)
+    import sys
+    calls = _fake_torch(monkeypatch)
     moved = []
 
     class Model:
@@ -65,6 +70,9 @@ def test_a_measurement_on_cuda_holds_the_base_at_the_trainers_bfloat16(monkeypat
     device = "cuda"
     L.load_measured("medium-base")
     assert asked == [False] and moved == [{"dtype": "bf16"}], "full precision loaded, then cast as the trainer casts"
+    torch = sys.modules["torch"]
+    assert {"matmul": "high"} in calls and torch.backends.cudnn.allow_tf32
+    assert torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction, "the trainer's settings, not the wrapper's"
     moved.clear()
     device = "mps"
     L.load_measured("medium-base")

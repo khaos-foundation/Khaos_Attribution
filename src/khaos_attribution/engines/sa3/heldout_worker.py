@@ -22,8 +22,11 @@ def heldout_torch(req: dict) -> dict:
 
     wrapped = load_measured(req["model"])
     if req.get("adapter"):
+        from stable_audio_3.models.lora.utils import name_is_lora  # noqa: PLC0415
         wrapped.load_lora([str(req["adapter"])])
         wrapped.set_lora_strength(1.0)
+        if any(p.dtype != torch.float32 for n, p in wrapped.model.named_parameters() if name_is_lora(n)):
+            raise RuntimeError("the adapter's parameters are not float32, the precision they trained at")
     model = wrapped.model
     model.eval()
     device = wrapped.device
