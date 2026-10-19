@@ -13,13 +13,13 @@ from pathlib import Path
 
 def _load(req: dict):
     import torch  # noqa: PLC0415
-    from khaos_attribution.engines.sa3.loading import load_model  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.loading import load_measured  # noqa: PLC0415
     from stable_audio_3.models.lora.utils import get_lora_params  # noqa: PLC0415
 
     from khaos_attribution import gradient as G  # noqa: PLC0415
     from stable_audio_3.models.lora.utils import load_lora_checkpoint, name_is_lora  # noqa: PLC0415
 
-    wrapped = load_model(req["model"])
+    wrapped = load_measured(req["model"])
     if not req.get("adapter"):
         raise RuntimeError("a feature needs the adapter; none was named")
     wrapped.load_lora([str(req["adapter"])])
@@ -59,7 +59,8 @@ def _clip(model, torch, wav: Path, device, pair_seed: int):
     latents = latents.float().detach()
     # The conditioning is taken once and detached: the feature is the DiT adapter's gradient, and a conditioner
     # graph reused across timesteps would be walked twice.
-    with torch.no_grad():
+    from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
+    with torch.no_grad(), measure_autocast(device):
         cond = model.conditioner([{"prompt": caption, "seconds_total": n / sr}], device)
     cond = _detached(cond, torch)
     cond["inpaint_mask"] = [torch.zeros(1, 1, latents.shape[-1], dtype=torch.bool, device=latents.device)]
@@ -83,9 +84,11 @@ def _detached(value, torch):
 
 
 def _forward(model, torch, latents, cond, mask, noise, t: float):
+    from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
     tt = torch.full((1,), t, device=latents.device, dtype=torch.float32)
     noised = latents * (1.0 - t) + noise * t
-    return model(noised, tt, cond=cond, cfg_dropout_prob=0.0, padding_mask=mask).float()
+    with measure_autocast(latents.device):
+        return model(noised, tt, cond=cond, cfg_dropout_prob=0.0, padding_mask=mask).float()
 
 
 def _gradient(model, torch, params, clip, timesteps, target: str):

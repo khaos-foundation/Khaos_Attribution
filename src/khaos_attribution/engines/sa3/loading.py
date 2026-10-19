@@ -49,6 +49,23 @@ def load_model(model_name: str, device=None, model_half: bool = True):
     return StableAudioModel(model, model_config, device, model_half)
 
 
+def load_measured(model_name: str):
+    """The base as the trainer holds it, for a measurement: bfloat16 on CUDA (an adapter loaded after stays float32),
+    full precision elsewhere."""
+    import torch  # noqa: PLC0415
+    wrapped = load_model(model_name, model_half=False)
+    if str(wrapped.device).startswith("cuda"):
+        wrapped.model.to(dtype=torch.bfloat16)
+    return wrapped
+
+
+def measure_autocast(device):
+    """The forward's autocast as the trainer's bf16-mixed runs it on CUDA; none elsewhere."""
+    import torch  # noqa: PLC0415
+    on = str(device).startswith("cuda")
+    return torch.autocast(device_type="cuda" if on else "cpu", dtype=torch.bfloat16, enabled=on)
+
+
 def load_for_training(model_name: str, device):
     """Stability's trainer's load_model, step for step, on the rewritten config."""
     import torch  # noqa: PLC0415

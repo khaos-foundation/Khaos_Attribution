@@ -121,7 +121,7 @@
     "resumable": true
   },
   "measure": {
-    "feature_version": "sa3-vnorm/2"
+    "feature_version": "sa3-vnorm/3"
   },
   "train": {
     "learning_rate": 0.0001,

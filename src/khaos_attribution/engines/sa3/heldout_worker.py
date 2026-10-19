@@ -18,9 +18,9 @@ def pair_noise_seed(seed: int, name: str) -> int:
 def heldout_torch(req: dict) -> dict:
     import soundfile as sf  # noqa: PLC0415
     import torch  # noqa: PLC0415
-    from khaos_attribution.engines.sa3.loading import load_model  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.loading import load_measured, measure_autocast  # noqa: PLC0415
 
-    wrapped = load_model(req["model"])
+    wrapped = load_measured(req["model"])
     if req.get("adapter"):
         wrapped.load_lora([str(req["adapter"])])
         wrapped.set_lora_strength(1.0)
@@ -47,7 +47,8 @@ def heldout_torch(req: dict) -> dict:
             with torch.autocast(device_type=device if isinstance(device, str) else device.type, enabled=str(device).startswith("cuda")):
                 latents = model.pretransform.encode(x)
             latents = latents.float()
-            cond = model.conditioner([{"prompt": caption, "seconds_total": seconds}], device)
+            with measure_autocast(device):
+                cond = model.conditioner([{"prompt": caption, "seconds_total": seconds}], device)
             # The trainer always conditions on an inpaint mask (0 = generate, 1 = keep); a held-out clip is
             # generated whole, so the mask is all zeros and the masked input empty.
             cond["inpaint_mask"] = [torch.zeros(1, 1, latents.shape[-1], dtype=torch.bool, device=latents.device)]
@@ -62,8 +63,9 @@ def heldout_torch(req: dict) -> dict:
             for t in timesteps:
                 tt = torch.full((1,), t, device=latents.device, dtype=torch.float32)
                 noised = latents * (1.0 - t) + noise * t
-                out = model(noised.to(model.dtype if hasattr(model, "dtype") else noised.dtype), tt, cond=cond,
-                            cfg_dropout_prob=0.0, padding_mask=mask).float()
+                with measure_autocast(device):
+                    out = model(noised.to(model.dtype if hasattr(model, "dtype") else noised.dtype), tt, cond=cond,
+                                cfg_dropout_prob=0.0, padding_mask=mask).float()
                 mse = ((out - target) ** 2).mean(dim=1)
                 row[f"{t:.2f}"] = float(mse[mask].mean())
             per_sample[wav.name] = row

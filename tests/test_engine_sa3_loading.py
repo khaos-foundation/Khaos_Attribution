@@ -35,3 +35,45 @@ def test_the_descriptor_asks_for_no_gated_set():
     torch_set = [w for w in DESCRIPTOR.weights if w.get("runtime") == "torch"]
     assert [w["repo"] for w in torch_set] == [L.OPEN_ENCODER_REPO]
     assert "t5gemma-b-b-ul2/*" in torch_set[0]["patterns"] and "svd_bases.pt" not in " ".join(torch_set[0]["patterns"])
+
+
+def _fake_torch(monkeypatch):
+    import sys
+    import types
+    calls = []
+    fake = types.SimpleNamespace(bfloat16="bf16", float32="fp32",
+                                 autocast=lambda **kw: calls.append(kw) or kw)
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    return calls
+
+
+def test_a_measurement_on_cuda_holds_the_base_at_the_trainers_bfloat16(monkeypatch):
+    _fake_torch(monkeypatch)
+    moved = []
+
+    class Model:
+        def to(self, **kw):
+            moved.append(kw)
+            return self
+
+    class Wrapped:
+        def __init__(self, device):
+            self.device, self.model = device, Model()
+
+    asked = []
+    monkeypatch.setattr(L, "load_model", lambda name, model_half=True: asked.append(model_half) or Wrapped(device))
+    device = "cuda"
+    L.load_measured("medium-base")
+    assert asked == [False] and moved == [{"dtype": "bf16"}], "full precision loaded, then cast as the trainer casts"
+    moved.clear()
+    device = "mps"
+    L.load_measured("medium-base")
+    assert moved == [], "off CUDA the base stays at full precision"
+
+
+def test_the_forward_runs_under_bfloat16_autocast_on_cuda_only(monkeypatch):
+    calls = _fake_torch(monkeypatch)
+    L.measure_autocast("cuda:0")
+    L.measure_autocast("mps")
+    assert calls[0] == {"device_type": "cuda", "dtype": "bf16", "enabled": True}
+    assert calls[1]["enabled"] is False

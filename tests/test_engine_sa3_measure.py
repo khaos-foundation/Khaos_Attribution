@@ -52,7 +52,7 @@ def test_open_module_gives_a_handle_for_each_runtime(tmp_path):
     adapter.write_bytes(b"w")
     h = T.open_module(api, {}, adapter, device="cuda:0")
     assert isinstance(h, M.Handle) and h.device_type == "cuda" and h.adapter == adapter.resolve()
-    assert h.dtype == "float16", "on CUDA the torch worker's base is half precision, and the index says so"
+    assert h.dtype == "bfloat16", "on CUDA the torch worker holds the base as the trainer does, and the index says so"
     assert T.open_module(api, {}, adapter, device="cpu").dtype == "float32"
     assert h.runtime == "torch" and h.base_npz is None
     mlx = T.TrainingApi(root=tmp_path, runtime="mlx", python=sys.executable)
@@ -183,4 +183,4 @@ def test_a_worker_that_ran_at_another_precision_than_the_handle_names_is_refused
 
 
 def test_the_precision_a_device_measures_at():
-    assert M.expected_dtype("cuda") == M.expected_dtype("mps") == "fp16" and M.expected_dtype("cpu") == "fp32"
+    assert (M.expected_dtype("cuda"), M.expected_dtype("mps"), M.expected_dtype("cpu")) == ("bf16", "fp16", "fp32")

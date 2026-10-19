@@ -18,9 +18,9 @@ _SCORER = DESCRIPTOR.memory.get("scorer") or {}
 
 
 def expected_dtype(device_type: str) -> str:
-    """The precision this measure takes features at on a device type: the base at half on CUDA (Stability's loader)
-    and on a Mac (the MLX port), at full precision elsewhere."""
-    return "fp16" if device_type in ("cuda", "mps") else "fp32"
+    """The precision this measure takes features at on a device type: the base as each runtime's trainer holds it,
+    bfloat16 on CUDA and float16 on a Mac (the MLX port), full precision elsewhere."""
+    return {"cuda": "bf16", "mps": "fp16"}.get(device_type, "fp32")
 
 
 def _scorer(device_type: str) -> dict:
