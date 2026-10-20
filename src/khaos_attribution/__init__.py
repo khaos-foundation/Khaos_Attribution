@@ -37,4 +37,4 @@ try:
 
     __version__ = _dist_version("khaos_attribution")
 except Exception:  # pragma: no cover - package not installed (e.g. run from a checkout)
-    __version__ = "0.40.7"  # tests/test_version.py pins this to pyproject.toml
+    __version__ = "0.40.8"  # tests/test_version.py pins this to pyproject.toml
