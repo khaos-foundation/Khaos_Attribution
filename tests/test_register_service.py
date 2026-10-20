@@ -419,3 +419,34 @@ def test_a_development_key_serves_behind_a_proxy_only_by_decision():
         check_dev_key_exposure(fronted, "127.0.0.1")
     check_dev_key_exposure({**fronted, "dev_key_public": True}, "127.0.0.1")
     check_dev_key_exposure({**fronted, "dev_key": False}, "0.0.0.0")
+
+
+def test_search_engines_and_link_previews_find_a_description_a_card_and_every_model(register):
+    """The pages carry a description, a canonical address and a share card; robots.txt and the sitemap name every model."""
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    serial = client.publish(_signed(key))["serial"]
+    home = http.get("/").text
+    assert '<meta name="description"' in home and '<link rel="canonical" href="https://register.example/">' in home
+    assert '<meta property="og:image" content="https://register.example/card.png">' in home and "application/ld+json" in home
+    page = http.get(f"/models/{serial}").text
+    assert f'<link rel="canonical" href="https://register.example/models/{serial}">' in page
+    assert f'<meta name="description" content="Register No. {serial}: ' in page and "fine-tuned model on" in page
+    robots = http.get("/robots.txt")
+    assert robots.status_code == 200 and "Disallow: /api/" in robots.text and "Sitemap: https://register.example/sitemap.xml" in robots.text
+    sitemap = http.get("/sitemap.xml")
+    assert sitemap.headers["content-type"].startswith("application/xml")
+    assert f"<loc>https://register.example/models/{serial}</loc>" in sitemap.text
+    for path, kind in (("/card.png", "image/png"), ("/favicon.ico", "image/png"), ("/apple-touch-icon.png", "image/png"),
+                       ("/favicon.svg", "image/svg+xml")):
+        answer = http.get(path)
+        assert answer.status_code == 200 and answer.headers["content-type"].startswith(kind) and answer.content
+
+
+def test_link_checkers_asking_with_head_get_an_answer_not_a_405(register):
+    """A HEAD request to a public page answers 200, as a GET would."""
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    serial = client.publish(_signed(key))["serial"]
+    for path in ("/", f"/models/{serial}", "/robots.txt", "/sitemap.xml", "/card.png"):
+        assert http.head(path).status_code == 200, path

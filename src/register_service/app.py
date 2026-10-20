@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from importlib import resources
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -28,6 +29,7 @@ MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few me
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
 CLAIM_MAX_BODY = 24_000_000   # a twelve-minute track's four phases, with room
 DEFAULT_PORT = 8912   # 8900 is the Engine Room's
+STATIC_CACHE = {"Cache-Control": "public, max-age=86400"}
 log = logging.getLogger("register_service")
 
 
@@ -497,7 +499,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         return PlainTextResponse("\n".join(json.dumps(e, sort_keys=True) for e in store.ledger(since)) + "\n",
                                  media_type="application/x-ndjson")
 
-    @app.get("/models/{serial}", response_class=HTMLResponse)
+    @app.api_route("/models/{serial}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def model_page(serial: int):
         from register_service import pages as P  # noqa: PLC0415
         rec = store.record(serial)
@@ -540,9 +542,15 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                             [[(f'<a href="{P.esc(s_["space_url"])}">{P.esc(s_["space_url"])}</a>', "wrap"), (P.esc(s_["state"]), "muted"), (P.esc(P.day(s_["at"])), "muted")]
                              for s_ in rec["served"]])
         body += f'<div class="stage-pill-row"><a class="k-btn k-btn--pill" href="/api/models/{serial}">The record as JSON</a></div>'
-        return P.page(f"Register No. {serial} · {r['artist_name']}", body, dev=bool(cfg["dev_key"]))
+        n_tracks = len(tracks) or ts.get("track_count", 0)
+        withdrawn = " It has since been withdrawn." if rec["state"] == "withdrawn" else ""
+        description = (f"Register No. {serial}: {r['artist_name']}'s fine-tuned model on {m['base_model']}, trained on "
+                       f"{P.count(n_tracks, 'track')} and registered {P.day(rec['published_at'])}.{withdrawn} The record as the "
+                       "artist's Workshop attested it, countersigned by the Guild Register.")
+        return P.page(f"Register No. {serial} · {r['artist_name']} · Guild Register", body, dev=bool(cfg["dev_key"]),
+                      description=description, path=f"/models/{serial}", base=cfg["public_url"])
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def home():
         from register_service import pages as P  # noqa: PLC0415
         serials = store.serials()
@@ -562,7 +570,33 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         body += P.section("Registered models", "newest first")
         body += (P.table("80px minmax(0, 1fr) 120px 120px", ["No.", "Artist", "Registered", "State"], rows) if rows
                  else '<div class="empty">No model is registered yet.</div>')
-        return P.page("Guild Register", body, dev=bool(cfg["dev_key"]))
+        return P.page("The Guild Register · the public ledger of fine-tuned music models", body, dev=bool(cfg["dev_key"]),
+                      base=cfg["public_url"], extra_head=P.site_json_ld(cfg["public_url"]))
+
+    @app.api_route("/robots.txt", methods=["GET", "HEAD"])
+    def robots():
+        from register_service import pages as P  # noqa: PLC0415
+        return PlainTextResponse(P.robots_txt(cfg["public_url"]))
+
+    @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
+    def sitemap():
+        from register_service import pages as P  # noqa: PLC0415
+        models = [(serial, P.day((store.record(serial) or {}).get("published_at"))) for serial in store.serials()]
+        return Response(P.sitemap_xml(cfg["public_url"], models), media_type="application/xml")
+
+    @app.api_route("/favicon.svg", methods=["GET", "HEAD"])
+    def favicon_svg():
+        from register_service import pages as P  # noqa: PLC0415
+        return Response(P.FAVICON_SVG, media_type="image/svg+xml", headers=STATIC_CACHE)
+
+    def static_png(name: str) -> Response:
+        return Response(resources.files("register_service").joinpath("static", name).read_bytes(), media_type="image/png",
+                        headers=STATIC_CACHE)
+
+    # Browsers ask for /favicon.ico whatever the page names; a PNG under that name is read the same.
+    app.add_api_route("/favicon.ico", lambda: static_png("icon.png"), methods=["GET", "HEAD"])
+    app.add_api_route("/apple-touch-icon.png", lambda: static_png("icon.png"), methods=["GET", "HEAD"])
+    app.add_api_route("/card.png", lambda: static_png("card.png"), methods=["GET", "HEAD"])
 
     @app.get("/health")
     def health():

@@ -95,15 +95,55 @@ def esc(value) -> str:
     return html.escape("" if value is None else str(value))
 
 
-def page(title: str, body: str, *, dev: bool) -> str:
+SITE_NAME = "Guild Register"
+DESCRIPTION = ("The public ledger of fine-tuned music models: what each was trained on, as its artist attested, "
+               "countersigned by the Guild Register and never edited. Kept by the Khaos Foundation.")
+FAVICON_SVG = STAR_SVG.replace("<svg ", '<svg fill="#2ee5d2" stroke="#2ee5d2" stroke-width="6" ', 1)
+
+
+def head_tags(title: str, description: str, url: str, base: str, extra: str = "") -> str:
+    """What search engines and link previews read: the description, the canonical address, the icons and the share card."""
+    t, d, u = esc(title), esc(description), esc(url)
+    return (f'<meta name="description" content="{d}"><link rel="canonical" href="{u}">'
+            f'<link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+            f'<meta name="theme-color" content="#030809">'
+            f'<meta property="og:type" content="website"><meta property="og:site_name" content="{SITE_NAME}">'
+            f'<meta property="og:title" content="{t}"><meta property="og:description" content="{d}"><meta property="og:url" content="{u}">'
+            f'<meta property="og:image" content="{esc(base)}/card.png"><meta property="og:image:width" content="1200">'
+            f'<meta property="og:image:height" content="630"><meta property="og:image:alt" content="The Guild Register, with the Khaos star">'
+            f'<meta name="twitter:card" content="summary_large_image">{extra}')
+
+
+def page(title: str, body: str, *, dev: bool, description: str = DESCRIPTION, path: str = "/", base: str = "", extra_head: str = "") -> str:
     dev_line = f'<div class="dev"><span>{esc(DEV_NOTE)}</span></div>' if dev else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{esc(title)}</title><style>{CSS}</style></head><body><main>'
+            f'<title>{esc(title)}</title>{head_tags(title, description, base + path, base, extra_head)}<style>{CSS}</style></head><body><main>'
             f'<a class="brand" href="/">{STAR_SVG}<span>Guild Register</span><small>of Fine Tuners</small></a>'
             f'{dev_line}{body}'
             f'<div class="foot"><a href="/api/ledger">The ledger</a><a href="/api/public-key">The register\'s public key</a>'
             f'<a href="https://github.com/guild-register/ledger">The public mirror</a><span>Kept by the Khaos Foundation Limited</span></div>'
             f'</main></body></html>')
+
+
+def site_json_ld(base: str) -> str:
+    """The home page as a WebSite kept by the Foundation, for search engines; data, never run."""
+    import json  # noqa: PLC0415
+    doc = {"@context": "https://schema.org", "@type": "WebSite", "name": "The Guild Register", "url": base + "/",
+           "description": DESCRIPTION, "publisher": {"@type": "Organization", "name": "Khaos Foundation Limited"}}
+    return '<script type="application/ld+json">' + json.dumps(doc).replace("<", "\\u003c") + "</script>"
+
+
+def robots_txt(base: str) -> str:
+    return f"User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: {base}/sitemap.xml\n"
+
+
+def sitemap_xml(base: str, models: list) -> str:
+    """The home page and every model page; ``models`` is (serial, last-changed day) pairs."""
+    urls = [f"<url><loc>{esc(base)}/</loc></url>"] + [
+        f"<url><loc>{esc(base)}/models/{int(serial)}</loc>" + (f"<lastmod>{esc(day)}</lastmod>" if day else "") + "</url>"
+        for serial, day in models]
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            + "".join(urls) + "</urlset>\n")
 
 
 def hero(eyebrow: str, title: str, para: str, facts: list, seal_svg: str = "") -> str:
