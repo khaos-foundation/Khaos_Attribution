@@ -229,3 +229,13 @@ def test_the_contract_comes_from_the_nearest_source(tmp_path, monkeypatch):
     assert P.contract_spec(root) == str(tmp_path / "k.whl")
     monkeypatch.setenv(P.CONTRACT_SRC_ENV, str(tmp_path / "src"))
     assert P.contract_spec(root) == str(tmp_path / "src")
+
+
+def test_the_contract_counts_as_present_only_when_its_code_is_the_same(tmp_path, monkeypatch):
+    """A version string alone would pass an engine environment holding older code of the same version."""
+    here = P.contract_fingerprint()
+    assert here and here.split()[0] == __import__("khaos_attribution").__version__
+    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: here if python is None else here.split()[0] + " other")
+    assert not P.contract_present(tmp_path / "python")
+    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: here)
+    assert P.contract_present(tmp_path / "python")

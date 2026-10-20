@@ -36,6 +36,11 @@ BASE_MODEL_LICENCE_SUMMARIES = {
         "the time of writing); above it a separate licence from Stability is needed, and 'Powered by Stability AI' "
         "travels with the model. Its text encoder is Google's and carries the Gemma terms of use. It says nothing "
         "about the artist's music — those rights come from the artist's consent and rights records."),
+    "MIT License": ("The MIT License is permissive: the base model, and anything you make with it, can be used, changed, "
+                    "shared and sold commercially without asking, provided the model's copyright notices travel with any "
+                    "copy of it. The model's own notice still applies: mimetic-a0's says some of the synthetic audio it "
+                    "learned from was rendered with a sound font whose samples' origin is uncertain. It says nothing "
+                    "about the artist's music — those rights come from the artist's consent and rights records."),
 }
 
 # A licence this module has no reading of: say so, name it, and send the

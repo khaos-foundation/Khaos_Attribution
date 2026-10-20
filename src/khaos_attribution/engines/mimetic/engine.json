@@ -1,0 +1,144 @@
+{
+  "schema_version": "1",
+  "id": "mimetic-a0",
+  "name": "mimetic-a0",
+  "version": "0.1",
+  "status": "experimental",
+  "status_note": "offered for trial; its training and attribution are not yet measured in Khaos",
+  "code": {
+    "repo": "https://github.com/micknoise/mimetic-a0.git",
+    "commit": "9f91b67cba7b50b6b05e619d649b965666882f7f",
+    "commit_note": "Mick Grierson's release 0.1 (cc0-sampler v4). Its lock pins stable-audio-tools at 3241adba, whose train.py trains the adapters."
+  },
+  "licence": {
+    "name": "MIT License",
+    "notice": "mimetic-a0 by Mick Grierson is released under the MIT License, code and weights. It uses ACE-Step 1.5's autoencoder (MIT), Google's T5-base text encoder (Apache 2.0) and stable-audio-tools (MIT). It was trained only on Freesound clips released as CC0 and on synthetic music, partly rendered through the GeneralUser GS SoundFont, whose author notes that the origin of some of its samples is uncertain. Khaos serves the weights from its own mirror.",
+    "obligations": [
+      "MIT: the copyright notice and licence travel with every copy of the weights and code.",
+      "Apache 2.0 for T5-base: its licence and notice travel with the text encoder."
+    ]
+  },
+  "weights": [
+    {
+      "name": "mimetic-a0",
+      "repo": "micknoisemachine/mimetic-a0",
+      "revision": "5f21e1807517cda2e6d72051cdb81dafc3931077",
+      "required": true,
+      "runtime": "torch",
+      "patterns": [
+        "model.safetensors",
+        "model_config.json"
+      ],
+      "components": [
+        "model.safetensors",
+        "model_config.json"
+      ],
+      "size_gb": 2.0
+    },
+    {
+      "name": "t5-base",
+      "repo": "t5-base",
+      "revision": "a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1",
+      "required": true,
+      "runtime": "torch",
+      "patterns": [
+        "config.json",
+        "model.safetensors",
+        "spiece.model",
+        "tokenizer.json"
+      ],
+      "components": [
+        "config.json",
+        "model.safetensors",
+        "spiece.model",
+        "tokenizer.json"
+      ],
+      "size_gb": 0.9
+    }
+  ],
+  "platforms": {
+    "cuda": [
+      "train",
+      "render"
+    ],
+    "mps": [
+      "train",
+      "render"
+    ]
+  },
+  "conditioning": {
+    "tempo": false,
+    "key": false,
+    "time_signature": false,
+    "lyrics": false,
+    "vocal_language": false,
+    "trigger": true,
+    "duration": true
+  },
+  "sings": false,
+  "sample_rate": 48000,
+  "latent_fps": 25,
+  "variants": {
+    "base": {
+      "config": "mimetic-a0",
+      "render": {
+        "steps": 50,
+        "guidance_scale": 6.0,
+        "apg_scale": 1.0
+      },
+      "note": "The one checkpoint, at the settings Mick tested it with (50 steps, CFG 6). Adapters train and render on it."
+    }
+  },
+  "default_variant": "base",
+  "render_setting_keys": [
+    "steps",
+    "guidance_scale",
+    "apg_scale"
+  ],
+  "bounds": {
+    "duration_seconds": [
+      1,
+      16
+    ],
+    "steps": [
+      1,
+      200
+    ],
+    "bpm": [
+      30,
+      300
+    ],
+    "takes": [
+      1,
+      16
+    ]
+  },
+  "rework_modes": [],
+  "adapter": {
+    "type": "lora",
+    "filenames": [
+      "adapter_model.safetensors"
+    ],
+    "resumable": false
+  },
+  "measure": {
+    "feature_version": "mimetic-vnorm/1"
+  },
+  "train": {
+    "learning_rate": 0.0001,
+    "adapter_rank": 16,
+    "adapter_alpha": 16,
+    "adapter_type": "lora"
+  },
+  "memory": {
+    "resident_gb": 0.0,
+    "yielded_gb": 0.0,
+    "scorer_mps": {
+      "base_gb": 5.6,
+      "gb_per_sec": 0.0,
+      "checkpointed_gb": 5.6,
+      "checkpointed_gb_per_sec": 0.0,
+      "process_gb": 5.2
+    }
+  }
+}

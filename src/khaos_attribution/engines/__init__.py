@@ -13,6 +13,7 @@ from khaos_attribution.engines.descriptor import Descriptor, DescriptorError, lo
 KNOWN_ENGINES = {
     "acestep-1.5": "khaos_attribution.engines.acestep",
     "stable-audio-3": "khaos_attribution.engines.sa3",
+    "mimetic-a0": "khaos_attribution.engines.mimetic",
     "mock": "khaos_attribution.engines.mock",
 }
 
@@ -91,6 +92,8 @@ def capabilities(engine_id: str) -> dict:
     return {
         "engine": d.id,
         "name": d.name,
+        "status": d.status,
+        "status_note": d.status_note,
         "sings": d.sings,
         "conditioning": c,
         # Any of tempo, key or time signature: the row the forms show them on.

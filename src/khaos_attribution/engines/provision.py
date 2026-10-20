@@ -21,6 +21,8 @@ def statement(engine_id: str) -> str:
     nobody looked at."""
     d = descriptor(engine_id)
     lines = [f"{d.name} is under the {d.licence['name']}."]
+    if d.status == "experimental":
+        lines.append(f"{d.name} is experimental: {d.status_note or 'not yet proven in Khaos'}.")
     if d.licence.get("notice"):
         lines.append(d.licence["notice"])
     for o in d.licence.get("obligations") or []:

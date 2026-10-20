@@ -290,10 +290,9 @@
       "additionalProperties": false,
       "required": [
         "resident_gb",
-        "yielded_gb",
-        "scorer"
+        "yielded_gb"
       ],
-      "description": "Measured on the engine: what it holds while serving, what it holds with its models released, and the scorer's peak by output length; the scorer on another device type under scorer_<device>.",
+      "description": "Measured on the engine: what it holds while serving, what it holds with its models released, and the scorer's peak by output length on CUDA under scorer, on another device type under scorer_<device>; a device with no block is refused, not guessed.",
       "properties": {
         "resident_gb": {
           "type": "number"
@@ -370,6 +369,17 @@
         ]
       },
       "description": "The engine's own training defaults, applied over a Khaos recipe when a run names this engine: learning_rate, adapter_rank, adapter_alpha, adapter_type and any other value its trainer takes."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "stable",
+        "experimental"
+      ],
+      "description": "experimental: offered for trial and labelled so wherever the base model is named"
+    },
+    "status_note": {
+      "type": "string"
     }
   }
 }

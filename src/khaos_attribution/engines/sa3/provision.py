@@ -77,7 +77,7 @@ def archive_url(repo: str, commit: str) -> str:
 KEPT_ACROSS_PINS = (".venv", "checkpoints", f"{MLX_SUBDIR}/.venv", f"{MLX_SUBDIR}/models/mlx")
 
 
-def unpack_archive(url: str, root: Path, commit: str) -> None:
+def unpack_archive(url: str, root: Path, commit: str, kept: tuple = KEPT_ACROSS_PINS) -> None:
     """Stability's code at the commit from its archive, when git is not usable here: the top folder stripped,
     the commit recorded in .khaos-commit so the pin can still be read; an earlier unpack's environments and
     weights carried across."""
@@ -96,7 +96,7 @@ def unpack_archive(url: str, root: Path, commit: str) -> None:
             m.name = m.name.split("/", 1)[1]
         tar.extractall(part, members=members, filter="data")
     (part / COMMIT_FILE).write_text(commit + "\n", encoding="utf-8")
-    for rel in KEPT_ACROSS_PINS:
+    for rel in kept:
         if (root / rel).exists():
             (part / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(part / rel, ignore_errors=True)
@@ -272,10 +272,30 @@ def contract_spec(root: Path) -> str:
     return f"khaos-attribution @ git+{CONTRACT_REPO}@v{__version__}"
 
 
+# The contract's version and a hash of its code, so an edit within one version still counts as a different contract.
+CONTRACT_FINGERPRINT = ("import hashlib, pathlib, khaos_attribution as k; root = pathlib.Path(k.__file__).parent; h = hashlib.sha256()\n"
+                        "for p in sorted(root.rglob('*')):\n"
+                        "    if p.suffix in ('.py', '.json') and '__pycache__' not in p.parts:\n"
+                        "        h.update(p.relative_to(root).as_posix().encode()); h.update(p.read_bytes())\n"
+                        "print(k.__version__, h.hexdigest())")
+
+
+def contract_fingerprint(python: Path | None = None) -> str | None:
+    """"<version> <hash>" of the contract an interpreter imports (this process's own when None), or None."""
+    if python is None:
+        import contextlib  # noqa: PLC0415
+        import io  # noqa: PLC0415
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(CONTRACT_FINGERPRINT, {})  # noqa: S102 — the module's own constant, so both sides hash alike
+        return out.getvalue().strip()
+    done = _run([python, "-c", CONTRACT_FINGERPRINT])
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
 def contract_present(python: Path) -> bool:
-    from khaos_attribution import __version__  # noqa: PLC0415
-    probe = _run([python, "-c", "import khaos_attribution as k; print(k.__version__)"])
-    return probe.returncode == 0 and probe.stdout.strip() == __version__
+    theirs = contract_fingerprint(python)
+    return theirs is not None and theirs == contract_fingerprint()
 
 
 def contract_into(python: Path, root: Path) -> tuple:

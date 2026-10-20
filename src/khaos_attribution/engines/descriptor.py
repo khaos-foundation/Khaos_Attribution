@@ -28,6 +28,15 @@ class Descriptor:
         return self.doc["name"]
 
     @property
+    def status(self) -> str:
+        """"stable", or "experimental": offered for trial and labelled so wherever the base model is named."""
+        return self.doc.get("status", "stable")
+
+    @property
+    def status_note(self) -> str | None:
+        return self.doc.get("status_note")
+
+    @property
     def commit(self) -> str | None:
         return (self.doc.get("code") or {}).get("commit")
 
