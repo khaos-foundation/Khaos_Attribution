@@ -16,6 +16,8 @@ which are descriptor agreement, never causal influence), `embedding`,
 `lyric_align`, `prompt_expansion` (Simple mode's rules and exemplars),
 and `catalogue` (the artist's usual tempo/key/time signature).
 
+Part of [Khaos](https://www.khaos.dev/), a free-to-use toolkit for music creators to train AI models on their own work. The method and its published results are at [khaos.dev/research](https://www.khaos.dev/research).
+
 This repo is the *data* contract of the Khaos ecosystem; the *visual*
 contract (shared design language for the toolkit and listening-space UIs)
 lives in the `Khaos_Platform` repo's `DESIGN.md`.
