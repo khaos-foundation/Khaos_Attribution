@@ -24,6 +24,9 @@ TORCH = "torch==2.7.1"
 TORCHAUDIO = "torchaudio==2.7.1"
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 FLASH_ATTN = "flash-attn==2.8.3"
+# Flash Attention's own build for this torch and Python: its installer needs a CUDA compiler even to fetch it.
+FLASH_ATTN_WHEEL = ("flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/"
+                    "flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl")
 PYTHON_VERSION = "3.11"
 
 
@@ -178,6 +181,13 @@ def checkout(root: Path, *, check_only: bool = False) -> tuple:
     return (done.returncode == 0), (f"checked out {commit[:12]}" if done.returncode == 0 else f"checkout failed: {done.stderr.strip()[-300:]}")
 
 
+def flash_attn_requirement(machine: str | None = None) -> str:
+    """The ready-made Flash Attention on Linux x86-64; elsewhere the source package, which builds with a CUDA compiler."""
+    import platform  # noqa: PLC0415
+    machine = machine or platform.machine()
+    return FLASH_ATTN_WHEEL if sys.platform.startswith("linux") and machine in ("x86_64", "AMD64") else FLASH_ATTN
+
+
 def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     """The engine's own interpreter: (ok, note)."""
     if runtime == "mlx":
@@ -236,7 +246,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
          f"{TORCHAUDIO}+cu128", "--extra-index-url", TORCH_INDEX, "--index-strategy", "unsafe-best-match"],
         [uv, "pip", "install", "-q", "--python", python, "--no-sources", "--no-deps", "-e", root],
         [uv, "pip", "install", "-q", "--python", python, "setuptools", "wheel", "ninja", "psutil", "matplotlib", "wandb"],
-        *([] if WINDOWS else [[uv, "pip", "install", "--python", python, "--no-build-isolation", FLASH_ATTN]]),
+        *([] if WINDOWS else [[uv, "pip", "install", "--python", python, "--no-build-isolation", flash_attn_requirement()]]),
     ]
     for cmd in steps:
         done = _run(cmd, cwd=root)

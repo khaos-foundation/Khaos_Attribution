@@ -253,3 +253,16 @@ def test_the_contract_hash_ignores_line_endings_and_names_a_same_version_mismatc
     assert "built from other code" in P.contract_mismatch(tmp_path / "python")
     monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: ours if python is None else None)
     assert "older than" in P.contract_mismatch(tmp_path / "python")
+
+
+def test_flash_attention_comes_ready_made_on_linux_and_matches_the_pins(monkeypatch):
+    """A server with no CUDA compiler still gets Flash Attention; the wheel names the torch, Python and version pinned."""
+    from khaos_attribution.engines.sa3 import provision as P
+    wheel = P.FLASH_ATTN_WHEEL
+    torch_minor = ".".join(P.TORCH.split("==")[1].split(".")[:2])
+    assert f"torch{torch_minor}" in wheel and "cu12" in wheel and P.TORCH_INDEX.endswith("cu128")
+    assert f"cp{P.PYTHON_VERSION.replace('.', '')}" in wheel
+    assert f"flash_attn-{P.FLASH_ATTN.split('==')[1]}+" in wheel and f"/v{P.FLASH_ATTN.split('==')[1]}/" in wheel
+    monkeypatch.setattr(P.sys, "platform", "linux")
+    assert P.flash_attn_requirement("x86_64") == wheel
+    assert P.flash_attn_requirement("aarch64") == P.FLASH_ATTN
