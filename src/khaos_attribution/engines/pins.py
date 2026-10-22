@@ -49,3 +49,19 @@ def checkout_commit(root) -> str | None:
 
 def is_sha(value) -> bool:
     return isinstance(value, str) and bool(_SHA_RE.match(value))
+
+
+def contract_code_hash(root=None) -> str:
+    """"<version> <sha256>" of the khaos_attribution package this interpreter imports (or the package folder given):
+    every .py and .json file by its path, line endings normalised so a Windows checkout and a wheel agree."""
+    import hashlib  # noqa: PLC0415
+
+    import khaos_attribution  # noqa: PLC0415
+    root = Path(root) if root is not None else Path(khaos_attribution.__file__).parent
+    h = hashlib.sha256()
+    for p in sorted(root.rglob("*")):
+        if p.suffix in (".py", ".json") and "__pycache__" not in p.parts:
+            h.update(p.relative_to(root).as_posix().encode())
+            h.update(p.read_bytes().replace(b"\r\n", b"\n"))
+    return f"{khaos_attribution.__version__} {h.hexdigest()}"
+

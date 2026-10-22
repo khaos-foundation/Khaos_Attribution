@@ -504,7 +504,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         from register_service import pages as P  # noqa: PLC0415
         rec = store.record(serial)
         if not rec:
-            raise HTTPException(404, "no such model")
+            return HTMLResponse(P.page("No such model · Guild Register", P.hero("Guild Register", "No such model.",
+                                f"No model is registered as No. {serial}.", []), dev=bool(cfg["dev_key"]),
+                                path=f"/models/{serial}", base=cfg["public_url"],
+                                extra_head='<meta name="robots" content="noindex">'), status_code=404)
         r = public_view(rec["signed"]["record"])
         m, ts = r["model"], r["training_set"]
         tracks = ts.get("tracks") or []
@@ -547,8 +550,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         description = (f"Register No. {serial}: {r['artist_name']}'s fine-tuned model on {m['base_model']}, trained on "
                        f"{P.count(n_tracks, 'track')} and registered {P.day(rec['published_at'])}.{withdrawn} The record as the "
                        "artist's Workshop attested it, countersigned by the Guild Register.")
+        # A withdrawn record stays readable as the ledger's history, but search engines are asked to drop it.
+        noindex = '<meta name="robots" content="noindex">' if rec["state"] == "withdrawn" else ""
         return P.page(f"Register No. {serial} · {r['artist_name']} · Guild Register", body, dev=bool(cfg["dev_key"]),
-                      description=description, path=f"/models/{serial}", base=cfg["public_url"])
+                      description=description, path=f"/models/{serial}", base=cfg["public_url"], extra_head=noindex)
 
     @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def home():
@@ -581,7 +586,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap():
         from register_service import pages as P  # noqa: PLC0415
-        models = [(serial, P.day((store.record(serial) or {}).get("published_at"))) for serial in store.serials()]
+        records = [(serial, store.record(serial) or {}) for serial in store.serials()]
+        models = [(serial, P.day(rec.get("published_at"))) for serial, rec in records if rec.get("state") != "withdrawn"]
         return Response(P.sitemap_xml(cfg["public_url"], models), media_type="application/xml")
 
     @app.api_route("/favicon.svg", methods=["GET", "HEAD"])

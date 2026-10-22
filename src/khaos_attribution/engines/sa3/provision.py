@@ -190,7 +190,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
                 if contract_present(python):
                     return True, "the MLX runtime imports"
                 if check_only:
-                    return False, f"the MLX environment at {python} runs the engine but lacks this contract's version"
+                    return False, f"the MLX environment at {python} runs the engine but {contract_mismatch(python)}"
                 return contract_into(python, root)
         if check_only:
             return False, f"no MLX environment at {python}"
@@ -213,7 +213,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
             if contract_present(python):
                 return True, probe_note
             if check_only:
-                return False, f"the environment at {python} runs the engine but lacks this contract's version"
+                return False, f"the environment at {python} runs the engine but {contract_mismatch(python)}"
             ok, note = contract_into(python, root)
             return ok, (probe_note + "; " + note) if ok else note
         if check_only:
@@ -272,25 +272,27 @@ def contract_spec(root: Path) -> str:
     return f"khaos-attribution @ git+{CONTRACT_REPO}@v{__version__}"
 
 
-# The contract's version and a hash of its code, so an edit within one version still counts as a different contract.
-CONTRACT_FINGERPRINT = ("import hashlib, pathlib, khaos_attribution as k; root = pathlib.Path(k.__file__).parent; h = hashlib.sha256()\n"
-                        "for p in sorted(root.rglob('*')):\n"
-                        "    if p.suffix in ('.py', '.json') and '__pycache__' not in p.parts:\n"
-                        "        h.update(p.relative_to(root).as_posix().encode()); h.update(p.read_bytes())\n"
-                        "print(k.__version__, h.hexdigest())")
+CONTRACT_FINGERPRINT = "from khaos_attribution.engines.pins import contract_code_hash; print(contract_code_hash())"
 
 
 def contract_fingerprint(python: Path | None = None) -> str | None:
-    """"<version> <hash>" of the contract an interpreter imports (this process's own when None), or None."""
+    """"<version> <hash>" of the contract an interpreter imports (this process's own when None), or None when it
+    imports none or one too old to say."""
     if python is None:
-        import contextlib  # noqa: PLC0415
-        import io  # noqa: PLC0415
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            exec(CONTRACT_FINGERPRINT, {})  # noqa: S102 — the module's own constant, so both sides hash alike
-        return out.getvalue().strip()
+        from khaos_attribution.engines.pins import contract_code_hash  # noqa: PLC0415
+        return contract_code_hash()
     done = _run([python, "-c", CONTRACT_FINGERPRINT])
     return done.stdout.strip() if done.returncode == 0 else None
+
+
+def contract_mismatch(python: Path) -> str:
+    """Why the engine's environment does not hold this contract, in words."""
+    theirs, ours = contract_fingerprint(python), contract_fingerprint()
+    if not theirs:
+        return "holds no contract, or one older than 0.41.1"
+    if theirs.split()[0] == ours.split()[0]:
+        return f"holds contract {theirs.split()[0]} built from other code than this room's"
+    return f"holds contract {theirs.split()[0]}, this room runs {ours.split()[0]}"
 
 
 def contract_present(python: Path) -> bool:

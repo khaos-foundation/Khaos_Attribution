@@ -124,7 +124,7 @@ def test_the_mlx_runtime_wants_the_exported_base_weights(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
     mlx = root / "optimized" / "mlx"
     monkeypatch.setattr(P, "contract_present", lambda python: False)
-    assert "lacks this contract's version" in P.provision(root, weights, device="mps", check_only=True).text(), \
+    assert "runs the engine but holds" in P.provision(root, weights, device="mps", check_only=True).text(), \
         "the MLX measure worker projects with the contract, so an MLX environment without it is not ready"
     monkeypatch.setattr(P, "contract_present", lambda python: True)
     (root / P.MLX_TRAINER).parent.mkdir(parents=True, exist_ok=True)
@@ -239,3 +239,17 @@ def test_the_contract_counts_as_present_only_when_its_code_is_the_same(tmp_path,
     assert not P.contract_present(tmp_path / "python")
     monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: here)
     assert P.contract_present(tmp_path / "python")
+
+
+def test_the_contract_hash_ignores_line_endings_and_names_a_same_version_mismatch(tmp_path, monkeypatch):
+    """A Windows checkout and a wheel of the same code hash alike; the same version with other code is said so."""
+    from khaos_attribution.engines.pins import contract_code_hash
+    for name, text in (("lf", b"x = 1\ny = 2\n"), ("crlf", b"x = 1\r\ny = 2\r\n")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "m.py").write_bytes(text)
+    assert contract_code_hash(tmp_path / "lf").split()[1] == contract_code_hash(tmp_path / "crlf").split()[1]
+    ours = P.contract_fingerprint()
+    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: ours if python is None else ours.split()[0] + " other")
+    assert "built from other code" in P.contract_mismatch(tmp_path / "python")
+    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: ours if python is None else None)
+    assert "older than" in P.contract_mismatch(tmp_path / "python")

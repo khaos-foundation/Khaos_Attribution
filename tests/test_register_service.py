@@ -450,3 +450,18 @@ def test_link_checkers_asking_with_head_get_an_answer_not_a_405(register):
     serial = client.publish(_signed(key))["serial"]
     for path in ("/", f"/models/{serial}", "/robots.txt", "/sitemap.xml", "/card.png"):
         assert http.head(path).status_code == 200, path
+
+
+def test_a_withdrawn_model_leaves_the_sitemap_and_asks_not_to_be_indexed(register):
+    """The ledger keeps a withdrawn record's page; search engines are told to drop it, and a missing one is a page."""
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    signed = _signed(key)
+    serial = client.publish(signed)["serial"]
+    assert f"/models/{serial}<" in http.get("/sitemap.xml").text
+    client.withdraw(serial, "test")
+    page = http.get(f"/models/{serial}").text
+    assert '<meta name="robots" content="noindex">' in page
+    assert f"/models/{serial}<" not in http.get("/sitemap.xml").text
+    missing = http.get("/models/99999")
+    assert missing.status_code == 404 and "No such model" in missing.text and "noindex" in missing.text

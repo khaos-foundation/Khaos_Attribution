@@ -71,7 +71,7 @@ def forward(model, latents, cond, mask, noise, t: float):
     return model(noised, tt, cond=cond, cfg_dropout_prob=0.0, padding_mask=mask).float()
 
 
-def velocity_mse(out, latents, noise, mask) -> "torch.Tensor":
+def velocity_mse(out, latents, noise, mask):
     """The trainer's loss: the velocity's squared error over the clip's real frames."""
     target = noise - latents
     return ((out - target) ** 2)[mask.unsqueeze(1).expand_as(out)].mean()

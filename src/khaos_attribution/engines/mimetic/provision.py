@@ -12,8 +12,8 @@ from pathlib import Path
 from khaos_attribution import weights as mirror
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import find_root, venv_python
-from khaos_attribution.engines.sa3.provision import (Report, _from_mirror, _run, archive_url, contract_into, contract_present,
-                                                     git_usable, unpack_archive, uv_path)
+from khaos_attribution.engines.sa3.provision import (Report, _from_mirror, _run, archive_url, contract_into, contract_mismatch,
+                                                     contract_present, git_usable, unpack_archive, uv_path)
 
 PYTHON_VERSION = "3.11"
 # Mick's lock takes torch from the CUDA 12.6 index on Linux, which cannot drive a Blackwell card; 12.8 can.
@@ -102,7 +102,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
             if contract_present(python):
                 return True, note
             if check_only:
-                return False, f"the environment at {python} runs the engine but lacks this contract's version"
+                return False, f"the environment at {python} runs the engine but {contract_mismatch(python)}"
             ok, cnote = contract_into(python, root)
             return ok, (note + "; " + cnote) if ok else cnote
         if check_only:
