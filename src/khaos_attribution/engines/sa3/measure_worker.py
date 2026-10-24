@@ -38,7 +38,9 @@ def _load(req: dict):
     for p in params:
         p.requires_grad_(True)
     names = [named[i][0] for i in order]
-    return wrapped, model, params, torch, sorted(state), names
+    # Any magnitude tensor means weight decomposition: at strength 0 such an adapter is still not the base model.
+    decomposed = any(str(k).endswith(".magnitude") for k in state)
+    return wrapped, model, params, torch, sorted(state), names, decomposed
 
 
 def _clip(model, torch, wav: Path, device, pair_seed: int):
@@ -180,11 +182,13 @@ def run(req: dict) -> dict:
     from khaos_attribution.engines.sa3.measure import ROW_PREFIX  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
 
-    wrapped, model, params, torch, keys, names = _load(req)
+    wrapped, model, params, torch, keys, names, decomposed = _load(req)
     device = wrapped.device
     timesteps = [float(t) for t in req["timesteps"]]
     noise_seed = int(req["noise_seed"])
     target = str(req.get("target") or "vnorm")
+    if target == "vdelta" and decomposed:
+        raise RuntimeError("a weight-decomposed adapter cannot be switched off for the adapter-delta target")
     timestep_norm = bool(req.get("timestep_norm", False))
     param_filter = req.get("param_filter") or None
     keep = G.param_filter_mask(names, param_filter) if param_filter else None
@@ -235,10 +239,7 @@ def run(req: dict) -> dict:
                 "signature": signature}
     if command == "loss":
         # A weight-decomposed adapter at strength 0 is still not the base model: the reading is refused, never faked.
-        from stable_audio_3.models.lora.utils import load_lora_checkpoint  # noqa: PLC0415
-        state, _cfg = load_lora_checkpoint(str(req["adapter"]))
-        # Any magnitude tensor means weight decomposition, whatever its axis (Stability's detector gives up on 1-D ones).
-        if any(str(k).endswith(".magnitude") for k in state):
+        if decomposed:
             raise RuntimeError("a weight-decomposed adapter cannot be switched off for a measurement")
         clips = [_clip(model, torch, wav, device, G.pair_noise_seed(noise_seed, wav.name)) for wav in files]
         wrapped.set_lora_strength(1.0)
