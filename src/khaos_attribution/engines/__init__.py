@@ -4,6 +4,7 @@ lazy, so reading a descriptor never loads a model."""
 
 from __future__ import annotations
 
+import functools
 import importlib
 from typing import Protocol, runtime_checkable
 
@@ -22,8 +23,9 @@ class EngineUnavailable(RuntimeError):
     """The engine is not installed here, or its package cannot import; the sentence says which."""
 
 
+@functools.lru_cache(maxsize=None)
 def descriptor(engine_id: str) -> Descriptor:
-    """An engine's descriptor by id, without importing its code."""
+    """An engine's descriptor by id, without importing its code; package data, so read and validated once."""
     package = KNOWN_ENGINES.get(engine_id)
     if package is None:
         raise EngineUnavailable(f"no engine is known as {engine_id!r}; known: {', '.join(sorted(KNOWN_ENGINES))}")

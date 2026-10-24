@@ -29,7 +29,8 @@ def test_a_file_is_settled_once_it_held_still_or_the_trainer_exited(tmp_path):
 
 
 def test_the_epoch_of_a_step_counts_from_where_a_resume_started():
-    assert PT.epoch_of(0, 10, 10) == 1 and PT.epoch_of(0, 10, 25) == 2 or PT.epoch_of(0, 10, 25) == 3
+    assert PT.epoch_of(0, 10, 10) == 1
+    assert PT.epoch_of(0, 10, 25) in (2, 3), "a step mid-epoch rounds to a neighbouring epoch, never beyond"
     assert PT.epoch_of(5, 10, 1) == 6, "a step inside the first epoch of a resume is that epoch, never the one before"
 
 

@@ -100,7 +100,8 @@ def engine_status(base_model_id) -> tuple:
         return "stable", None
     try:
         d = descriptor(engine_of(base_model_id))
-    except EngineUnavailable:
+    except (EngineUnavailable, ValueError, OSError):
+        # A missing or malformed descriptor (a packaging gap) must not fail every provenance page.
         return "stable", None
     return d.status, d.status_note
 
