@@ -1,7 +1,6 @@
 """The helpers every process-driven trainer shares: steps from epochs, the checkpoint a name carries, a settled
 file, the epoch of a step, and clips brought to two channels."""
 import numpy as np
-import pytest
 
 from khaos_attribution.engines import process_trainer as PT
 
