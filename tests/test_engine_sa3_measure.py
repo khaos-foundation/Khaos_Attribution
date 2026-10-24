@@ -78,7 +78,7 @@ def test_an_mlx_handle_asks_the_mlx_worker_and_names_the_base_weights(handle, tm
     assert req["runtime"] == "mlx" and req["base_npz"] == str(tmp_path / "base.npz")
 
 
-def test_the_index_rows_and_features_come_back_in_the_contracts_shapes(handle, tmp_path):
+def test_the_index_rows_and_features_come_back_in_the_contracts_shapes(handle, tmp_path, monkeypatch):
     assert M.parameter_count(handle) == (12, 3, "abc")
     files = [tmp_path / f"t_seg_00{i}.wav" for i in range(3)]
     for f in files:
@@ -94,8 +94,14 @@ def test_the_index_rows_and_features_come_back_in_the_contracts_shapes(handle, t
     feat = M.output_feature(handle, meta, files[:1])
     assert feat.shape == (8,) and feat.dtype == np.float32 and float(feat[0]) == 0.5
     assert M.paired_loss(handle, meta, files) == {"with": 0.3, "without": 0.9} and M.output_loss(handle, meta, files) == 0.3
-    with pytest.raises(NotImplementedError):
-        M.index_rows(handle, files, projection=make_projection(12, 8, 1), timesteps=[0.5], noise_seed=7, timestep_norm=True)
+    # The research settings travel to the worker and back: the index built with them reads as it was built.
+    asked, ask = [], M._ask
+    monkeypatch.setattr(M, "_ask", lambda h, req, on_progress=None: asked.append(req) or ask(h, req, on_progress))
+    M.index_rows(handle, files, projection=make_projection(12, 8, 1), timesteps=[0.5], noise_seed=7, timestep_norm=True,
+                 param_filter="to_out")
+    assert asked[-1]["timestep_norm"] is True and asked[-1]["param_filter"] == "to_out"
+    M.output_feature(handle, {**meta, "timestep_norm": True, "param_filter": "to_out"}, files)
+    assert asked[-1]["timestep_norm"] is True and asked[-1]["param_filter"] == "to_out"
 
 
 def test_the_rows_reach_the_room_while_the_worker_runs(handle, tmp_path, monkeypatch):

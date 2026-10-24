@@ -115,6 +115,28 @@ def project(values: Sequence[float] | np.ndarray, projection: SketchProjection) 
     return out.astype(np.float32)
 
 
+def param_filter_mask(names: Sequence[str], pattern: str | None) -> list:
+    """Which adapter tensors a research filter keeps: a regex over the parameter names, every tensor when None."""
+    import re  # noqa: PLC0415
+    if not pattern:
+        return [True] * len(names)
+    rx = re.compile(pattern)
+    kept = [bool(rx.search(str(n))) for n in names]
+    if not any(kept):
+        raise GradientUnavailable(f"the parameter filter {pattern!r} matches none of the adapter's {len(names)} tensors")
+    return kept
+
+
+def combine_timesteps(flats: Sequence[np.ndarray], *, timestep_norm: bool) -> np.ndarray:
+    """One gradient per pair from its timesteps' gradients: their mean, each first scaled to unit length when asked."""
+    if not flats:
+        raise ValueError("combine_timesteps needs at least one timestep")
+    rows = [np.asarray(f, dtype=np.float32) for f in flats]
+    if timestep_norm:
+        rows = [r / (float(np.linalg.norm(r)) + NORM_EPS) for r in rows]
+    return (np.sum(rows, axis=0) / float(len(rows))).astype(np.float32)
+
+
 def l2_normalise(vector: Sequence[float] | np.ndarray) -> np.ndarray:
     v = np.asarray(vector, dtype=np.float32).reshape(-1)
     norm = float(np.linalg.norm(v))
@@ -298,10 +320,14 @@ def output_feature(module: Any, meta: dict, files: Sequence[Path | str], *,
     timesteps = [float(t) for t in meta["timesteps"]]
     noise_seed = int(meta["noise_seed"])
     target = str(meta.get("target", "vnorm"))
+    if meta.get("param_filter"):
+        raise GradientUnavailable("a parameter filter is not built on this engine's measure; rebuild the index without it")
     params = list(params) if params is not None else adapter_parameters(module)
+    # The features are read as the index was built, normalisation included.
     vecs = [project(pair_gradient(module, load_sample(p), timesteps=timesteps,
                                   noise_seed=pair_noise_seed(noise_seed, Path(p).name),
-                                  params=params, target=target), proj) for p in files]
+                                  params=params, target=target, timestep_norm=bool(meta.get("timestep_norm", False))), proj)
+            for p in files]
     if not vecs:
         raise GradientUnavailable("an output needs at least one preprocessed window")
     return np.mean(np.stack(vecs), axis=0)

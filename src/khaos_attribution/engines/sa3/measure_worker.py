@@ -37,7 +37,8 @@ def _load(req: dict):
         raise RuntimeError("the adapter's parameters are not float32, the precision they trained at")
     for p in params:
         p.requires_grad_(True)
-    return wrapped, model, params, torch, sorted(state)
+    names = [named[i][0] for i in order]
+    return wrapped, model, params, torch, sorted(state), names
 
 
 def _clip(model, torch, wav: Path, device, pair_seed: int):
@@ -93,22 +94,41 @@ def _forward(model, torch, latents, cond, mask, noise, t: float):
         return model(noised, tt, cond=cond, cfg_dropout_prob=0.0, padding_mask=mask).float()
 
 
-def _gradient(model, torch, params, clip, timesteps, target: str):
-    """The mean adapter gradient over the timesteps, flat, float32, on the CPU."""
+TARGETS = ("vnorm", "loss", "vdelta")
+
+
+def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=None, timestep_norm: bool = False,
+              keep=None):
+    """The mean adapter gradient over the timesteps, flat, float32, on the CPU. ``vdelta`` differentiates the
+    squared norm of the velocity the adapter adds over the base's; ``keep`` zeroes the tensors a filter drops."""
+    from khaos_attribution import gradient as G  # noqa: PLC0415
+    if target not in TARGETS:
+        raise RuntimeError(f"target must be one of {TARGETS}, not {target!r}")
     latents, cond, mask, noise = clip
-    total = None
+    where = mask.unsqueeze(1)
+    flats = []
     for t in timesteps:
+        base = None
+        if target == "vdelta":
+            wrapped.set_lora_strength(0.0)
+            with torch.no_grad():
+                base = _forward(model, torch, latents, cond, mask, noise, float(t))
+            wrapped.set_lora_strength(1.0)
         with torch.enable_grad():
             out = _forward(model, torch, latents, cond, mask, noise, float(t))
             if target == "vnorm":
-                loss = out[mask.unsqueeze(1).expand_as(out)].pow(2).mean()
+                loss = out[where.expand_as(out)].pow(2).mean()
+            elif target == "vdelta":
+                loss = (out - base)[where.expand_as(out)].pow(2).mean()
             else:
-                loss = ((out - (noise - latents)) ** 2)[mask.unsqueeze(1).expand_as(out)].mean()
+                loss = ((out - (noise - latents)) ** 2)[where.expand_as(out)].mean()
         grads = torch.autograd.grad(loss, params, allow_unused=True)
-        flat = torch.cat([(g if g is not None else torch.zeros_like(p)).reshape(-1).detach().to("cpu", torch.float32)
-                          for g, p in zip(grads, params)])
-        total = flat if total is None else total + flat
-    return (total / float(len(timesteps))).numpy()
+        parts = [(g if g is not None else torch.zeros_like(p)).reshape(-1).detach().to("cpu", torch.float32)
+                 for g, p in zip(grads, params)]
+        if keep is not None:
+            parts = [part if ok else torch.zeros_like(part) for part, ok in zip(parts, keep)]
+        flats.append(torch.cat(parts).numpy())
+    return G.combine_timesteps(flats, timestep_norm=timestep_norm)
 
 
 def _loss(model, torch, clip, timesteps) -> float:
@@ -160,18 +180,23 @@ def run(req: dict) -> dict:
     from khaos_attribution.engines.sa3.measure import ROW_PREFIX  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
 
-    wrapped, model, params, torch, keys = _load(req)
+    wrapped, model, params, torch, keys, names = _load(req)
     device = wrapped.device
     timesteps = [float(t) for t in req["timesteps"]]
     noise_seed = int(req["noise_seed"])
     target = str(req.get("target") or "vnorm")
+    timestep_norm = bool(req.get("timestep_norm", False))
+    param_filter = req.get("param_filter") or None
+    keep = G.param_filter_mask(names, param_filter) if param_filter else None
     files = [Path(f) for f in req["files"]]
     n_params = int(sum(int(p.numel()) for p in params))
     signature = G.parameter_signature(params)
     command = req["command"]
+    filtered = {"param_filter": param_filter, "tensors_kept": int(sum(keep)) if keep else len(params),
+                "parameters_kept": int(sum(int(p.numel()) for p, ok in zip(params, keep) if ok)) if keep else n_params}
     if command == "parameters":
         return {"n_params": n_params, "n_tensors": len(params), "signature": signature, "device": str(device).split(":")[0],
-                "compute_dtype": _base_dtype(model)}
+                "compute_dtype": _base_dtype(model), "names": names}
     if command in ("index", "feature"):
         projection = (G.make_projection(n_params, int(req["projection"]["dim"]), int(req["projection"]["seed"]))
                       if command == "index" else G.projection_from_meta(req["index_meta"]))
@@ -180,7 +205,8 @@ def run(req: dict) -> dict:
         rows, vectors, raw = [], [], []
         for i, wav in enumerate(files):
             clip = _clip(model, torch, wav, device, G.pair_noise_seed(noise_seed, wav.name))
-            flat = _gradient(model, torch, params, clip, timesteps, target)
+            flat = _gradient(model, torch, params, clip, timesteps, target, wrapped=wrapped, timestep_norm=timestep_norm,
+                             keep=keep)
             if req.get("keep_flat"):
                 raw.append(flat)
             projected = G.project(flat, projection)
@@ -203,9 +229,9 @@ def run(req: dict) -> dict:
             out = Path(req["out"])
             out.parent.mkdir(parents=True, exist_ok=True)
             np.save(str(out), np.stack(vectors).astype(np.float32) if vectors else np.zeros((0, projection.dim), np.float32))
-            return {**extra, "rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(params),
+            return {**extra, **filtered, "rows": rows, "matrix": str(out), "n_params": n_params, "n_tensors": len(params),
                     "signature": signature, "device": str(device).split(":")[0], "compute_dtype": _base_dtype(model)}
-        return {**extra, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors),
+        return {**extra, **filtered, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors),
                 "signature": signature}
     if command == "loss":
         # A weight-decomposed adapter at strength 0 is still not the base model: the reading is refused, never faked.

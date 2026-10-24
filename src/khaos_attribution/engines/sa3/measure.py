@@ -167,6 +167,9 @@ def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:
             "runtime": handle.runtime, "base_npz": str(handle.base_npz) if handle.base_npz else None,
             "files": [str(Path(f).resolve()) for f in files], "timesteps": [float(t) for t in index_meta["timesteps"]],
             "noise_seed": int(index_meta["noise_seed"]), "target": str(index_meta.get("target") or "vnorm"),
+            # Research settings travel with the index, so an output's feature is taken as the rows were.
+            "timestep_norm": bool(index_meta.get("timestep_norm", False)),
+            "param_filter": index_meta.get("param_filter") or None,
             "index_meta": {k: index_meta[k] for k in ("projection",) if k in index_meta}}
 
 
@@ -176,11 +179,9 @@ def parameter_count(handle: Handle) -> tuple:
 
 
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
-               timestep_norm: bool = False, on_row=None) -> tuple:
+               timestep_norm: bool = False, param_filter: str | None = None, on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
-    if timestep_norm:
-        raise NotImplementedError("per-timestep normalisation is not built on the Stable Audio 3 worker")
     out = Path(files[0]).resolve().parent / ".khaos_index_rows.tmp.npy" if files else Path(".khaos_index_rows.tmp.npy")
     seen = set()
 
@@ -189,7 +190,8 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
             seen.add(row["row"])
             on_row(row["row"], Path(files[row["row"]]), row.get("gradient_norm"))
 
-    r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target}, files, "index"),
+    r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target,
+                                       "timestep_norm": timestep_norm, "param_filter": param_filter}, files, "index"),
                       "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
              on_progress=progress)
     from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415

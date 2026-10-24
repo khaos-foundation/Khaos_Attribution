@@ -115,11 +115,13 @@ def enable_checkpointing(module: Any) -> int:
 # ── the features: ACE-Step's live module through the contract's gradient maths ───────────────────────────────────
 
 def index_rows(handle: Any, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
-               timestep_norm: bool = False, on_row=None) -> tuple:
+               timestep_norm: bool = False, param_filter: str | None = None, on_row=None) -> tuple:
     """(matrix, rows) of an index: one L2-normalised projected gradient per pair file, in file order, with each
     row's pre-normalisation norm kept so a zero-gradient pair stays visible."""
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
+    if param_filter:
+        raise G.GradientUnavailable("a parameter filter is not built on ACE-Step's measure")
     params = G.adapter_parameters(handle)
     rows, vectors = [], []
     for i, path in enumerate(files):
