@@ -18,6 +18,7 @@ from khaos_attribution.engines.mimetic.render import WINDOWS, find_root, python_
 from khaos_attribution.engines.render import RenderFailed
 # The held-out record's arithmetic is the same for every engine whose worker returns per-sample bucket losses.
 from khaos_attribution.engines.sa3.train import bucket_timesteps, summarise  # noqa: F401
+from khaos_attribution.engines import process_trainer as PT
 from khaos_attribution.engines.train import TrainingUnavailable, TrainingUpdate
 from khaos_attribution.engines.worker_process import stop_tree
 
@@ -103,43 +104,13 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
 # ── preprocessing: Khaos's dataset into the trainer's clips ─────────────────────
 
 def _resample_stereo(audio, sr: int, target_sr: int):
-    import numpy as np  # noqa: PLC0415
-    if audio.shape[1] == 1:
-        audio = np.repeat(audio, 2, axis=1)
-    elif audio.shape[1] > 2:
-        audio = audio[:, :2]
-    if sr == target_sr:
-        return audio
-    try:
-        import librosa  # noqa: PLC0415
-    except ImportError as exc:
-        raise TrainingUnavailable("resampling a clip for mimetic-a0 needs librosa in this environment") from exc
-    return np.stack([librosa.resample(audio[:, c], orig_sr=sr, target_sr=target_sr, res_type="soxr_hq")
-                     for c in range(2)], axis=1)
+    return PT.resample_stereo(audio, sr, target_sr, engine_name="mimetic-a0", unavailable=TrainingUnavailable)
 
 
 def write_clips(dataset_json: Path | str, out_dir: Path | str) -> dict:
-    """Every sample of a Khaos dataset.json as ``<stem>.wav`` (48 kHz stereo, 16-bit) beside ``<stem>.txt``, its
-    caption; an empty sample is counted as failed, the engine's trainer would skip it."""
-    import soundfile as sf  # noqa: PLC0415
-    samples = json.loads(Path(dataset_json).read_text(encoding="utf-8"))
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    processed = failed = 0
-    for s in samples:
-        stem = Path(s["filename"]).stem
-        try:
-            audio, sr = sf.read(str(s["audio_path"]), dtype="float32", always_2d=True)
-            if not len(audio):
-                raise ValueError("no audio")
-            audio = _resample_stereo(audio, sr, DESCRIPTOR.sample_rate)
-            sf.write(str(out / f"{stem}{PAIR_SUFFIX}"), audio, DESCRIPTOR.sample_rate, subtype="PCM_16")
-            (out / f"{stem}.txt").write_text(str(s.get("caption") or "").strip() + "\n", encoding="utf-8")
-            processed += 1
-        except Exception as exc:  # noqa: BLE001 — one bad clip is counted, the rest go on
-            log.error("mimetic-a0 preprocess: %s failed: %s", stem, exc)
-            failed += 1
-    return {"processed": processed, "failed": failed}
+    """Every sample of a Khaos dataset.json as a clip beside its caption, at the engine's rate."""
+    return PT.write_clips(dataset_json, out_dir, sample_rate=DESCRIPTOR.sample_rate, pair_suffix=PAIR_SUFFIX,
+                          engine_name="mimetic-a0", unavailable=TrainingUnavailable, log=log, require_audio=True)
 
 
 def preprocess_pairs(api: TrainingApi, *, out_dir: Path | str, checkpoint_root: Path | str, variant: str = "base",
@@ -176,14 +147,7 @@ class LossHooks:
 
 
 def steps_for(cfg: dict, n_pairs: int) -> dict:
-    """Khaos's epochs as the trainer's steps: steps per epoch at the recipe's batch size, the total, and the
-    checkpoint cadence in steps."""
-    batch = max(1, int(cfg.get("batch_size") or 1))
-    per_epoch = max(1, -(-n_pairs // batch))
-    epochs = int(cfg["max_epochs"])
-    every_epochs = max(1, int(cfg.get("checkpoint_every_n_epochs") or 1))
-    return {"per_epoch": per_epoch, "total": per_epoch * epochs, "checkpoint_every": per_epoch * every_epochs,
-            "epochs": epochs}
+    return PT.steps_for(cfg, n_pairs)
 
 
 def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: Path, steps: dict, seed: int,
@@ -212,9 +176,7 @@ def losses_from_csv(save_dir: Path) -> list:
 
 
 def checkpoint_step(path: Path) -> int | None:
-    import re  # noqa: PLC0415
-    m = re.search(r"step=(\d+)", path.name)
-    return int(m.group(1)) if m else None
+    return PT.checkpoint_step(path)
 
 
 class Session:
@@ -252,17 +214,10 @@ class Session:
         return {step: f for f in self.save_dir.glob("*.ckpt") if (step := checkpoint_step(f))}
 
     def _settled(self, path: Path, final: bool) -> bool:
-        """A checkpoint is read once its size and mtime held still across two polls, or the trainer has exited."""
-        try:
-            st = path.stat()
-        except OSError:
-            return False
-        seen = self._sizes.get(path)
-        self._sizes[path] = (st.st_size, st.st_mtime_ns)
-        return final or seen == (st.st_size, st.st_mtime_ns)
+        return PT.settled(self._sizes, path, final)
 
     def _epoch_of(self, step: int) -> int:
-        return self.start_epoch + max(1, round(step / self.steps["per_epoch"]))
+        return PT.epoch_of(self.start_epoch, self.steps["per_epoch"], step)
 
     def _lay_out(self, step: int, source: Path, loss: float) -> Path:
         """The checkpoint in the Workshop's layout, as a float32 safetensors adapter."""

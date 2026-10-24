@@ -5,13 +5,13 @@ environment, hands it the request as JSON and reads the result back. Same seed, 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 
+from khaos_attribution.engines import worker_process as W
+from khaos_attribution.engines.worker_process import stop_tree  # noqa: F401 — sa3.train and the room still import it here
 from khaos_attribution.engines.render import RenderCancelled, RenderFailed, RenderRequest, RenderResult
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 
@@ -151,77 +151,17 @@ class Renderer:
 
 
 def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, timeout: float | None = None) -> dict:
-    """One worker process: the request on stdin, the reply's JSON on the last line of stdout; a stop request kills
-    it and nothing is kept."""
+    """One worker process through the contract's shared loop; a stop request kills it and nothing is kept."""
     python = python_for(root, runtime)
     env = {**os.environ, "PYTHONPATH": str(root), "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
            "WANDB_MODE": "disabled"}
     try:
-        proc = subprocess.Popen([str(python), str(WORKER)], cwd=str(root), env=env, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-    except OSError as exc:
-        raise RenderFailed(f"the Stable Audio 3 worker could not start: {exc}") from exc
-    try:
-        stdout, stderr = _communicate(proc, json.dumps(request), should_stop, timeout)
-    except (RenderCancelled, RenderFailed):
-        stop_tree(proc)
-        raise
-    last = (stdout or "").strip().splitlines()[-1:] or [""]
-    try:
-        reply = json.loads(last[0])
-    except ValueError:
-        reply = None
-    if isinstance(reply, dict) and reply.get("error"):
-        raise RenderFailed(str(reply["error"]))
-    if proc.returncode != 0 or not isinstance(reply, dict) or "seed" not in reply:
-        tail = "\n".join((stderr or "").strip().splitlines()[-8:]) or (stdout or "")[-300:]
-        raise RenderFailed(f"the Stable Audio 3 worker failed ({proc.returncode}): {tail}")
-    return reply
-
-
-def stop_tree(proc) -> None:
-    """The process and whatever it spawned: asked first, killed after a short grace, always reaped. A process
-    that leads its own group is signalled as a group; one inside the room's group is signalled itself and
-    forwards the signal to its child (the worker does)."""
-    import signal  # noqa: PLC0415
-    import time  # noqa: PLC0415
-    if proc.poll() is not None:
-        return
-    for ask in (proc.terminate, proc.kill):
-        try:
-            if hasattr(os, "getpgid") and os.getpgid(proc.pid) == proc.pid:
-                os.killpg(proc.pid, signal.SIGTERM if ask is proc.terminate else signal.SIGKILL)
-            else:
-                ask()   # on Windows a terminate is a kill; the room's own tree stop covers the children
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-        deadline = time.monotonic() + 3.0
-        while proc.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if proc.poll() is not None:
-            break
-    proc.wait()
-
-
-def _communicate(proc, stdin: str, should_stop, timeout):
-    """stdin written, then polled: a stop between polls cancels the render."""
-    try:
-        proc.stdin.write(stdin)
-        proc.stdin.close()
-    except (BrokenPipeError, OSError):
-        pass   # the worker died before reading; its exit code and stderr say why
-    proc.stdin = None   # communicate() would flush it again
-    import time  # noqa: PLC0415
-    deadline = time.monotonic() + timeout if timeout else None
-    while True:
-        try:
-            out, err = proc.communicate(timeout=2.0)
-            return out or "", err or ""
-        except subprocess.TimeoutExpired:
-            if should_stop is not None and should_stop():
-                raise RenderCancelled()
-            if deadline is not None and time.monotonic() > deadline:
-                raise RenderFailed("the Stable Audio 3 worker ran past its time limit")
+        return W.run(python, WORKER, request, cwd=root, env=env, label="Stable Audio 3", should_stop=should_stop,
+                     timeout=timeout, required="seed")
+    except W.WorkerCancelled:
+        raise RenderCancelled() from None
+    except W.WorkerFailed as exc:
+        raise RenderFailed(str(exc)) from None
 
 
 def adapter_digest(path) -> str:

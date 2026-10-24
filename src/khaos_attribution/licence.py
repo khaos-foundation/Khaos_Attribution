@@ -91,6 +91,20 @@ def licence_summary(name) -> str:
     return BASE_MODEL_LICENCE_SUMMARIES.get(key) or UNKNOWN_LICENCE_SUMMARY.format(name=key)
 
 
+def engine_status(base_model_id) -> tuple:
+    """("stable" | "experimental", note) for the engine a base-model id names; an id that names no known engine
+    is stable, never guessed experimental."""
+    from khaos_attribution.base_model import engine_of, is_base_model_id  # noqa: PLC0415
+    from khaos_attribution.engines import EngineUnavailable, descriptor  # noqa: PLC0415
+    if not is_base_model_id(base_model_id):
+        return "stable", None
+    try:
+        d = descriptor(engine_of(base_model_id))
+    except EngineUnavailable:
+        return "stable", None
+    return d.status, d.status_note
+
+
 def licence_line(card) -> dict:
     """The licence block a surface renders, read from a model card or a
     provenance record and never retyped: the base model and licence name
@@ -102,8 +116,11 @@ def licence_line(card) -> dict:
     name = str(name).strip() if isinstance(name, str) and name.strip() else None
     model = doc.get("base_model")
     model = str(model).strip() if isinstance(model, str) and model.strip() else None
+    status, note = engine_status(doc.get("base_model_id"))
     return {"base_model": model,
             "base_model_licence": name,
+            "status": status,
+            "status_note": note,
             "permits": licence_summary(name),
             "warranty": WARRANTY_STATEMENT,
             "warranty_points": list(WARRANTY_POINTS),
