@@ -465,3 +465,14 @@ def test_a_withdrawn_model_leaves_the_sitemap_and_asks_not_to_be_indexed(registe
     assert f"/models/{serial}<" not in http.get("/sitemap.xml").text
     missing = http.get("/models/99999")
     assert missing.status_code == 404 and "No such model" in missing.text and "noindex" in missing.text
+
+
+def test_the_register_pages_wear_the_record_sleeve_canon():
+    """The register looks like the rooms: their tokens, no glow, no hairlines, no tracked capitals, no label above the home title."""
+    from register_service import pages as P
+    css = P.CSS
+    for token in ("--bg: #070a0b", "--panel: #0f1416", "--field: #1c2426", "--muted: #8a9a9c", "--radius: 6px", "--fs-h1: 40px"):
+        assert token in css, token
+    for banned in ("radial-gradient", "box-shadow", "text-transform", "letter-spacing: .1", "border-bottom: 1px", "border-top: 1px", "ui-monospace"):
+        assert banned not in css, banned
+    assert P.hero("", "T", "p", []).count("stage-eyebrow") == 0 and "stage-eyebrow" in P.hero("Register No. 1", "T", "p", [])

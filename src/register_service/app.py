@@ -571,7 +571,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 "countersigned by the register and never edited.")
         facts = [P.count(len(serials), "model") + " registered", "ledger unbroken" if store.ledger_status()["ok"] else "ledger BROKEN",
                  "serials from 65,536"]
-        body = P.hero("The Guild of Fine Tuners", "The Guild Register.", para, facts)
+        body = P.hero("", "The Guild Register", para, facts)
         body += P.section("Registered models", "newest first")
         body += (P.table("80px minmax(0, 1fr) 120px 120px", ["No.", "Artist", "Registered", "State"], rows) if rows
                  else '<div class="empty">No model is registered yet.</div>')
