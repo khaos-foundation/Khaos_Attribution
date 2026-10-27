@@ -75,7 +75,7 @@ def test_append_is_refused_without_a_wardens_signature_and_to_workshop_and_space
     with pytest.raises(R.RegisterError) as e:
         warden._post("/log/append", {**strike, "entry": {**strike["entry"], "sitting": ""}, "nonce": "nonce-strike-0002"})
     assert e.value.status == 422, "a warden's entry names its sitting"
-    out = warden._post("/log/append", strike)
+    out = warden.log_append(strike["entry"])
     assert out["tree_size"] == store.log.size() and store.log.struck()[leaf]["reason"] == "consent withdrawn"
 
 

@@ -475,6 +475,10 @@ class RegisterClient:
         except urllib.error.HTTPError as e:
             raise RegisterError(e.code, (e.read().decode("utf-8", "replace") or e.reason)[:400]) from None
 
+    def log_append(self, entry: dict, nonce: str | None = None) -> dict:
+        """A warden's entry in the signed log: a revoke, admit or withhold naming its sitting; returns its leaf and index."""
+        return self._post("/log/append", {"entry": entry, "nonce": nonce or secrets.token_hex(8)})
+
     def served(self, serial: int, space_url: str, state: str, nonce: str | None = None) -> dict:
         return self._post("/api/served", {"serial": serial, "space_url": space_url, "state": state, "nonce": nonce or secrets.token_hex(8)})
 
