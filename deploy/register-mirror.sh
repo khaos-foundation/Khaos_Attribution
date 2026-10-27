@@ -21,7 +21,7 @@ git -C "$CLONE" checkout -q -B "$default" "origin/$default" 2>/dev/null || git -
 mkdir -p "$DATA/mirror/models"
 rsync -a --delete --exclude .git --exclude README.md "$DATA/mirror/" "$CLONE/"
 if [ ! -f "$CLONE/README.md" ]; then
-  printf '# The Guild Register, mirrored\n\nEvery registered model as a JSON record under `models/`, and the hash-chained ledger as `ledger.jsonl`. Written by the register at https://register.khaos.dev and pushed here; nothing is edited by hand.\n' > "$CLONE/README.md"
+  printf '# The Guild Register, mirrored\n\nEvery registered model as a JSON record under `models/`, the hash-chained ledger as `ledger.jsonl`, and the signed append-only log under `log/` (signed tree heads, entries, inclusion and consistency proofs, the log key, anchor receipts), enough for `khaos-log-verify --mirror <this folder>`. Written by the register at https://register.khaos.dev and pushed here; nothing is edited by hand.\n' > "$CLONE/README.md"
 fi
 git -C "$CLONE" add -A
 if git -C "$CLONE" diff --cached --quiet; then

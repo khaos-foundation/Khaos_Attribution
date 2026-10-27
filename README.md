@@ -65,6 +65,34 @@ is not proof either. **none**: no Khaos mark was found, which never proves a per
 than 20 minutes are not decoded. Authorities, researchers and the press can ask for a verify key at
 foundation@khaos.dev; it lifts the per-address limit (`--key` or `KHAOS_VERIFY_KEY`).
 
+## Verify an entry in the Guild Register
+
+The Guild Register is a tamper-evident public register: every model the Guild admits, and every strike, is an entry in
+a signed append-only log built the way Certificate Transparency logs are (RFC 6962 / RFC 9162). Nobody, the Foundation
+included, can change a past entry without every later signed head showing it; anyone can check an entry without asking
+the register; and the log's root is anchored daily with OpenTimestamps, so an entry can be shown to have existed by a date.
+
+```bash
+pip install "khaos-attribution[registry] @ git+https://github.com/khaos-foundation/Khaos_Attribution.git"
+khaos-log-verify record.json                      # a signed record, a log entry, a leaf hash or a record hash
+khaos-log-verify <leaf hash> --mirror ./ledger    # a clone of the public mirror; the register need not be up
+```
+
+The command uses only the log's public key committed in this package (`src/khaos_attribution/translog/log-key.pub`,
+placed after the log key's ceremony; until then pass the published key with `--key`) and the mirror's static files. It
+proves the entry's inclusion under a signed tree head, says whether the entry was struck and why, and checks that the
+newest head extends the last one this machine saw (kept in `~/.khaos/log-verify-state.json`). Exit codes: 0 proved, 1
+the proof failed, 2 not found, 3 no key or mirror could be read. The same check runs in a browser at
+`https://register.khaos.dev/verify-entry`.
+
+What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/
+genesis, `time` in RFC 3339 UTC, a random 128-bit `salt`, and the kind's own fields); its leaf hash is
+SHA-256(0x00 || entry); nodes are SHA-256(0x01 || left || right); a signed tree head is Ed25519 over the RFC 8785 JSON of
+`{log_id, root_sha256, timestamp, tree_size, version}`. RFC 8785 does not normalise unicode: anyone writing an entry
+sends its strings in NFC, or the same name in two forms is two different entries. A strike is an appended `revoke` that
+names the admitted leaf; nothing is ever changed or deleted. A withheld entry keeps its leaf, so every proof and head
+stays valid while its body is no longer served.
+
 ## Provenance record fields
 
 A provenance record travels with a generated output and says exactly how it

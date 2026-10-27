@@ -34,6 +34,19 @@ Two of the Foundation's directors, each with a YubiKey 5 (any 5-series key; the 
 
 To restore the key onto a new server, plug in either YubiKey: `age -d -i yubikey-<name>.txt register-key.age`, piped straight to the server. Each step refuses to run twice, and neither server step runs once the development setting is gone. The service itself remembers which key it served as the development key and refuses to start on it without that setting, so deleting the setting by hand never promotes it. When more Guardians are named later, the same key is kept and their custody is recorded with `register-cli key --present "Name, Name" --note "custody"`.
 
+### The log key
+
+The signed append-only log signs its tree heads with a second key, never the countersigning one, made and locked the same way at the same sitting:
+
+```
+register-log-key make
+REGISTER_STAGED=/srv/register/data/staged-log/log-key.pem deploy/register-key-backup.sh lock log-key.age <recipient-1> <recipient-2>
+REGISTER_STAGED=/srv/register/data/staged-log/log-key.pem deploy/register-key-backup.sh check log-key.age yubikey-<name>.txt
+register-log-key switch "Name, Name"
+```
+
+The switch retires the development log key, restarts the service (which signs the current tree with the new key), checks `/log/key` says the new key and not development, and records the key in the ledger (`register-cli key --log`). It prints the public key: commit it to the contract at `src/khaos_attribution/translog/log-key.pub`, release, and from then on `khaos-log-verify` and the `/verify-entry` page pin it. Write its key id on the sheet beside the countersigning key's.
+
 The full ceremony below keeps the key off the server's own tools while it is made. Use it when the Guardians want that.
 
 ## The full ceremony: before
