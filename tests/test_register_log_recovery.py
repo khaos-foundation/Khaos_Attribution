@@ -42,7 +42,7 @@ def _struck_last(register):
     return signed, leaf
 
 
-# ---- N1: a heartbeat entry, one head per size, the delay from the head that first held the entry ----
+# ---- a heartbeat entry, one head per size, the delay from the head that first held the entry ----
 
 def test_a_quiet_logs_strike_reaches_the_public_mirror_after_the_delay(register):
     from register_service.__main__ import refresh_head
@@ -103,7 +103,7 @@ def test_a_key_switch_appends_a_heartbeat_rather_than_a_second_head_of_one_size(
     assert st.log.entries(st.log.size() - 1, st.log.size())[0]["entry"]["kind"] == "heartbeat"
 
 
-# ---- N2: no readable published copy, no appends ----
+# ---- no readable published copy, no appends ----
 
 def _restore_elsewhere(app, tmp_path, client, key, witnesses):
     """The backup put on a new server: the database from before the last publish, no mirror folders."""
@@ -161,7 +161,7 @@ def test_no_readable_published_copy_fails_closed_unless_the_log_is_new(register,
     assert override.state.store.log.blocked is None
 
 
-# ---- N3: lost entries whose bodies were never published are replayed as leaves ----
+# ---- lost entries whose bodies were never published are replayed as leaves ----
 
 def test_recover_replays_a_lost_entry_whose_body_is_withheld_or_held_back(register, tmp_path):
     from register_service.translog import recover
@@ -187,7 +187,7 @@ def test_recover_replays_a_lost_entry_whose_body_is_withheld_or_held_back(regist
     assert st.log.problems(st.log.signer.public_pem()) == [] and any("without its body" in x for x in lines)
 
 
-# ---- N4: a republished record keeps the serial the log admitted it under ----
+# ---- a republished record keeps the serial the log admitted it under ----
 
 def test_a_record_republished_after_recovery_keeps_its_serial_and_adds_no_admit(register, tmp_path):
     from register_service.translog import recover
@@ -212,7 +212,7 @@ def test_a_record_republished_after_recovery_keeps_its_serial_and_adds_no_admit(
     assert app3.state.store.log.size() == size and len(app3.state.store.log.standing_admits(s2["record_sha256"])) == 1
 
 
-# ---- N5: an export that cannot get the lock in time is skipped, not waited on ----
+# ---- an export that cannot get the lock in time is skipped, not waited on ----
 
 def test_an_export_waits_a_bounded_time_for_the_lock_then_skips(register, monkeypatch, caplog):
     import register_service.translog as RT

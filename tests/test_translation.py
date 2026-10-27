@@ -500,3 +500,95 @@ def test_a_busy_model_is_said_to_be_busy():
     out = T.expand_checked(REQ, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL,
                            lm=lambda a: {"caption": "ambient techno"})
     assert out["fallback_note"] == T.FALLBACK_NOTE
+
+
+# ── bounded work, ruled-out moods, hedges, renderings, dropped instruments, the LM held alike ──
+
+_WORST = ("calm piano, no " + ", a" * 700)[:2000]
+
+
+def test_every_entry_point_is_linear_on_a_hostile_denial_list():
+    """A comma list after "no" that never closes with "or" costs well under a second at 2,000 characters."""
+    for text in (_WORST, "no " + ", a" * 700, "without " + ", word" * 300):
+        for run in (lambda: T.clean_request(text, True), lambda: T.split_denials(text),
+                    lambda: T.lint_translation(REQ, text, instrumental=True, pool=POOL),
+                    lambda: T.lint_translation(text, GOOD, instrumental=True, pool=POOL),
+                    lambda: T.check_caption(text, text, instrumental=True),
+                    lambda: T.expand_checked(text, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL,
+                                             translator=fake("Caption: " + text), lm=lambda a: {"caption": text})):
+            start = time.perf_counter()
+            run()
+            assert time.perf_counter() - start < 0.5, text[:30]
+
+
+def test_a_denial_list_still_runs_to_its_or():
+    """'no X, Y or Z' denies all three; a list that never closes denies only its first item."""
+    asserted, denied = T.split_denials("piano, no drums, bass or strings")
+    assert "drums" in denied and "strings" in denied and "bass" in denied
+    asserted, denied = T.split_denials("no drums, bass, strings")
+    assert "drums" in denied and "bass" in asserted and "strings" in asserted
+
+
+def test_a_mood_the_request_rules_out_stays_out():
+    """'not sad' rules out sadness and its kin; a kept or opposite mood passes."""
+    tail = ", its warm tape hiss and lush reverb drifting through a dim, intimate room with a dreamy texture"
+    assert any(r.startswith("denied_mood:") for r in lint("solo piano, not sad", "A melancholic solo piano, mournful" + tail))
+    assert lint("solo piano, not sad", "A tender solo piano, unhurried" + tail) == []
+    assert lint("solo piano, not sad", "A hopeful solo piano, warm and gentle" + tail) == []
+
+
+def test_a_rendering_keeps_moods_and_denials_and_plain_ascii_foreign_is_foreign():
+    """A foreign request's moods and 'sin' survive into its rendering; 'sin', 'sans', 'ohne' mark a request foreign."""
+    assert any(r.startswith("rendering_") for r in T._rendering_reasons("piano alegre y luminoso, sin tristeza",
+                                                                         "sad piano"))
+    assert T._rendering_reasons("piano alegre y luminoso, sin tristeza", "happy bright piano, without sadness") == []
+    assert any(r.startswith("rendering_") for r in T._rendering_reasons("piano alegre sin bateria", "happy piano with drums"))
+    assert T._rendering_reasons("piano alegre sin bateria", "happy piano without drums") == []
+    for request in ("piano alegre sin bateria", "piano calme sans batterie", "Klavier ruhig ohne Schlagzeug"):
+        assert not T._reads_english(request), request
+    assert T._reads_english("sad solo piano") and T._reads_english("piano, no drums")
+    raw = ("Language: Spanish\nEnglish request: sad piano\nCaption: A sad melancholic piano, its warm tape hiss and "
+           "soft reverb drifting through a dim intimate room with close-miked production and gentle swells")
+    assert T.translate("piano alegre y luminoso, sin tristeza", POOL, instrumental=True, pool=POOL,
+                       llm=fake(raw))["caption"] is None
+
+
+def test_hedges_drop_a_mood_and_a_negated_absence_is_a_presence():
+    """'far from happy', 'hardly calm' drop the mood; 'never far from drums', 'strings not missing' bring them."""
+    tail = ", its warm tape hiss and lush reverb drifting through a dim, intimate room with a dreamy texture"
+    assert "mood_dropped:happy" in lint("happy piano melody", "A piano melody far from happy, joyless and hollow" + tail)
+    assert "mood_dropped:calm" in lint("calm piano", "A piano that is hardly calm, anything but serene" + tail)
+    assert "mood_dropped:calm" in lint("calm piano", "A piano barely calm, scarcely at rest" + tail)
+    assert any(r.startswith("denied:") for r in lint("piano, no drums", "A piano never far from a drum kit's pulse" + tail))
+    for said in ("A dark piano, strings not missing", "A dark piano, with strings nowhere absent",
+                 "A dark piano, never without strings"):
+        assert any(r.startswith("denied:") for r in lint("dark piano, no strings", said + tail)), said
+    assert "mood_hedged:calm" in lint("calm piano", "A piano hardly calm, anything but serene, soft and gentle" + tail)
+    assert lint("happy piano", "A happy piano, far from sad, bright and playful" + tail) == []
+    assert lint("piano, no drums", "A piano never far from a hush, with no drums at all, bare" + tail) == []
+
+
+def test_a_named_instrument_cannot_be_dropped():
+    """Every instrument the request names is said (its own word, a specialisation, or a family member)."""
+    tail = ", its warm tape hiss and lush reverb drifting through a dim, intimate room with a dreamy texture"
+    assert "dropped_noun:drum" in lint("piano, cello and drums", "A piano and cello duo" + tail)
+    assert lint("piano, cello and drums", "A piano and cello over soft brushed snare" + tail) == []
+    assert lint("piano, cello and drums", "A grand piano, a cello and drums" + tail) == []
+    assert lint("piano, no drums", "A bare piano, slow and patient" + tail) == []
+
+
+def test_the_lm_is_held_to_what_the_request_rules_out_and_asks():
+    """The 5Hz LM's caption meets the same meaning checks: no denied noun, no flipped or ruled-out mood."""
+    out = T.expand_checked("sad piano, no drums", instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL,
+                           lm=lambda a: {"caption": "sad piano with pounding drums"})
+    assert out["fallback"] == "request" and any(r.startswith("denied:") for r in out["rejects"][0]["reasons"])
+    out = T.expand_checked("happy piano", instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL,
+                           lm=lambda a: {"caption": "a happy piano, warm and bright"})
+    assert out["translator"] == "lm"
+
+
+def test_an_empty_request_is_refused_never_an_empty_caption():
+    """A request with no words raises `EmptyRequest`; it never comes back as an empty caption."""
+    for request in ("", "   ", "\n\t"):
+        with pytest.raises(T.EmptyRequest):
+            T.expand_checked(request, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL)

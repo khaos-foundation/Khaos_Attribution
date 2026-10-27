@@ -1,4 +1,4 @@
-"""Prompt expansion — one idea in, the adapter's caption dialect out.
+"""Prompt expansion — one idea in, out in the artist's caption words.
 
 Shared by the Workshop and the Listening Space: the exemplar file shape,
 exemplar selection, the query template, the tidy-up and the trigger rule.

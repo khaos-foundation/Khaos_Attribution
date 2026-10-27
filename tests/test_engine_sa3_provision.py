@@ -49,6 +49,7 @@ def test_check_compares_the_pin_and_the_environment_and_each_weight(tmp_path, mo
 
 
 def test_an_install_fills_the_cache_through_the_engines_own_downloader(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     root = tmp_path / "sa3"
     (root / ".git").mkdir(parents=True)
     (root / ".venv" / "bin").mkdir(parents=True)

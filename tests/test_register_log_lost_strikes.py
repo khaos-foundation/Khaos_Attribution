@@ -51,7 +51,7 @@ def _lose_a_strike(register, tmp_path):
     return app, cfg, st, signed, serial, leaf, warden
 
 
-# ---- 1. a lost entry after an admit leaves it unresolved ----
+# ---- a lost entry after an admit leaves it unresolved ----
 
 def test_a_strike_lost_in_recovery_is_never_a_clean_proof(register, tmp_path, capsys):
     app, cfg, st, signed, serial, leaf, _ = _lose_a_strike(register, tmp_path)
@@ -107,7 +107,7 @@ def test_a_revoke_resolves_the_lost_strike_as_struck(register, tmp_path, capsys)
     assert rc == V.PROVED and "STRUCK: struck again after the recovery" in out
 
 
-# ---- 2. a frozen copy has its own verdict ----
+# ---- a frozen copy has its own verdict ----
 
 def test_a_copy_older_than_two_days_exits_frozen_even_for_a_struck_model(register, tmp_path, capsys):
     app, store, http = register
@@ -130,7 +130,7 @@ def test_a_copy_older_than_two_days_exits_frozen_even_for_a_struck_model(registe
     assert page[0].startswith("bad|Not current") and "this copy may be frozen" in page[0]
 
 
-# ---- 3. only the key that signed a size may speak for it ----
+# ---- only the key that signed a size may speak for it ----
 
 def test_a_head_signed_by_a_retired_key_cannot_close_the_register(register, tmp_path):
     app, store, http = register
@@ -154,7 +154,7 @@ def test_the_log_key_switch_destroys_the_retired_development_key():
     assert "shred -u" in text and 'mv "$KEY" "$RETIRED.pem"' in text
 
 
-# ---- 4. the unwitnessed open is one shot, and only for a new log ----
+# ---- the unwitnessed open is one shot, and only for a new log ----
 
 def test_the_unwitnessed_open_is_a_marker_used_once_and_refused_for_a_log_with_entries(tmp_path):
     cut_off = tmp_path / "cut-off"
@@ -172,7 +172,7 @@ def test_the_unwitnessed_open_is_a_marker_used_once_and_refused_for_a_log_with_e
     assert again.log.blocked and "has entries" in again.log.blocked
 
 
-# ---- 5. once started, "nothing published" no longer opens an empty log ----
+# ---- once started, "nothing published" no longer opens an empty log ----
 
 def test_an_empty_log_on_a_started_register_is_blocked_even_when_nothing_answers(register, tmp_path):
     import sqlite3

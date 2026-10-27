@@ -53,7 +53,7 @@ def _drop_body(where, leaf):
         bundle.write_text(json.dumps(doc))
 
 
-# ---- 1. what is proved is the requested record's admit, and a missing body needs a proved withhold ----
+# ---- what is proved is the requested record's admit, and a missing body needs a proved withhold ----
 
 def test_a_lying_mirror_cannot_prove_another_records_admit_or_a_never_registered_record(register, tmp_path):
     app, store, http = register
@@ -97,7 +97,7 @@ def _export(app):
     export(app.state.store.log, _mirror(app), log_key_doc(app.state.store.log.signer, True))
 
 
-# ---- 2. strikes come from proved entries, never from an editable hint ----
+# ---- strikes come from proved entries, never from an editable hint ----
 
 def test_a_strike_is_found_from_proved_entries_even_when_the_admit_is_withheld_or_the_hint_is_edited(register, tmp_path):
     app, store, http = register
@@ -126,7 +126,7 @@ def test_a_withheld_revoke_still_strikes_with_its_reason_withheld(register):
     assert out["struck"] and out["struck"]["reason"] is None and out["struck"]["reason_withheld"]
 
 
-# ---- 3. a database behind its own published log refuses to append ----
+# ---- a database behind its own published log refuses to append ----
 
 def _restore(app, cfg, tmp_path, client, key):
     store = app.state.store
@@ -196,7 +196,7 @@ def test_log_recover_puts_back_a_leaf_whose_published_body_is_gone_and_marks_it_
     assert last["kind"] == "withhold" and last["withholds"] == hashes[-1]
 
 
-# ---- 4. one standing admit per record ----
+# ---- one standing admit per record ----
 
 def test_a_warden_cannot_admit_a_withdrawn_or_already_admitted_record_and_withdraw_strikes_every_admit(register):
     app, store, http = register
@@ -218,7 +218,7 @@ def test_a_warden_cannot_admit_a_withdrawn_or_already_admitted_record_and_withdr
     assert e.value.status == 422 and "withdrawn" in str(e.value)
 
 
-# ---- 5. overlapping exports never move the mirror backwards ----
+# ---- overlapping exports never move the mirror backwards ----
 
 def test_overlapping_exports_never_move_latest_backwards(register):
     import register_service.translog as RT
@@ -249,7 +249,7 @@ def test_overlapping_exports_never_move_latest_backwards(register):
     assert json.loads((_mirror(app) / "log" / "sth" / "latest.json").read_text())["tree_size"] == store.log.size()
 
 
-# ---- 6. a quiet log is re-signed daily and an old head is flagged ----
+# ---- a quiet log is re-signed daily and an old head is flagged ----
 
 def test_the_daily_job_signs_a_fresh_head_and_the_verifier_flags_an_old_one(register, monkeypatch, capsys):
     app, store, http = register
@@ -273,7 +273,7 @@ def test_the_daily_job_signs_a_fresh_head_and_the_verifier_flags_an_old_one(regi
     assert out["warnings"] == []
 
 
-# ---- 7. a key switch does not strand a remembered head; the newest size is never immutable ----
+# ---- a key switch does not strand a remembered head; the newest size is never immutable ----
 
 def test_a_head_remembered_before_a_key_switch_is_still_checked_after_it(register, tmp_path):
     app, store, http = register
@@ -302,7 +302,7 @@ def test_the_newest_size_head_is_never_served_as_immutable(register):
     assert "immutable" in http.get(f"/log/sth/{n - 1}").headers["cache-control"]
 
 
-# ---- 8. old rows with a blank reason ----
+# ---- old rows with a blank reason ----
 
 def test_genesis_takes_a_withdrawn_record_whose_reason_is_blank(register, tmp_path):
     app, store, http = register
@@ -322,7 +322,7 @@ def test_genesis_takes_a_withdrawn_record_whose_reason_is_blank(register, tmp_pa
     assert kinds == ["genesis", "admit", "revoke"]
 
 
-# ---- 9. who appended ----
+# ---- who appended ----
 
 def test_a_warden_entry_names_the_machine_that_appended_it_and_the_ledger_has_the_row(register):
     app, store, http = register
@@ -336,7 +336,7 @@ def test_a_warden_entry_names_the_machine_that_appended_it_and_the_ledger_has_th
     assert row["kind"] == "log-append" and row["key_id"] == wkey.key_id and row["detail"]["leaf_hash"] == out["leaf_hash"]
 
 
-# ---- 10. new bodies reach the public mirror only after the grace period ----
+# ---- new bodies reach the public mirror only after the grace period ----
 
 def test_new_bodies_wait_out_the_grace_period_before_the_public_mirror_and_a_withhold_inside_it_never_lands(register, tmp_path):
     app, store, http = register

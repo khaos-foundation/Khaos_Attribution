@@ -64,7 +64,7 @@ def _struck_then_lost(register, tmp_path):
     return app3, cfg, backup, s2, first, (k1, c1), (k3, c3), warden
 
 
-# ---- the HIGH: a republished record starts unresolved against every open lost leaf ----
+# ---- a republished record starts unresolved against every open lost leaf ----
 
 @pytest.mark.parametrize("with_countersignature", [True, False])
 def test_a_record_republished_after_a_recovery_is_unresolved_until_a_warden_answers(register, tmp_path, with_countersignature):
@@ -101,7 +101,7 @@ def test_a_confirm_made_before_the_republish_does_not_answer_for_it(register, tm
     assert store.log.standing_admits(s2["record_sha256"]) == []
 
 
-# ---- the lows: earlier register keys count, reservations survive a second restore ----
+# ---- earlier register keys count, reservations survive a second restore ----
 
 def test_a_countersignature_from_before_a_register_key_switch_wins_back_its_serial(register, tmp_path):
     app3, cfg, backup, s2, first, (k1, c1), _, warden = _struck_then_lost(register, tmp_path)

@@ -47,7 +47,7 @@ def _lose_an_admit(register, tmp_path):
     return app3, http3, s1, s2, first, (k1, c1), (k3, c3), warden
 
 
-# ---- 1. a lost admit's serial is reserved, and returned to the record its countersignature names ----
+# ---- a lost admit's serial is reserved, and returned to the record its countersignature names ----
 
 def test_a_lost_admits_serial_is_never_given_to_another_record(register, tmp_path):
     app3, http3, s1, s2, first, (k1, c1), (k3, c3), warden = _lose_an_admit(register, tmp_path)
@@ -74,7 +74,7 @@ def test_a_republish_without_or_with_a_forged_countersignature_gets_a_new_serial
     assert app3.state.store.reserved_serials() == [first["serial"]], "the reservation stays for the real holder"
 
 
-# ---- 2. one lost entry never takes the catalogue offline ----
+# ---- one lost entry never takes the catalogue offline ----
 
 def test_unresolved_models_stay_out_of_withdrawn_and_serving_them_is_accepted_as_under_review(register, tmp_path):
     app3, http3, s1, s2, first, (k1, c1), (k3, c3), warden = _lose_an_admit(register, tmp_path)
