@@ -87,9 +87,10 @@ admit entry, and a strike only through a proved revoke (or the withhold of one, 
 proves the entry's inclusion, says whether it was struck and why, checks that the newest head extends the last one this
 machine saw (kept in `~/.khaos/log-verify-state.json`), and warns when the newest head is more than 48 hours old: the
 register appends a `heartbeat` entry (its time and nothing else) every day, so an older head means the mirror may be
-stale. Exit codes: 0 proved, 1 the proof failed, 2 not found, 3 no key or mirror could be read, 4 proved but newer entries
-are not yet public in this mirror (the publication delay), so a strike among them would not show. The same check runs
-in a browser at
+stale. Exit codes: 0 proved, 1 the proof failed, 2 not found, 3 no key or mirror could be read, 4 proved but a strike
+after it could be hidden (newer entries not yet public in this mirror, or an entry after it lost in a recovery and not
+since confirmed or struck by the wardens), 5 proved but the newest head is over 48 hours old, so this copy may be
+frozen. The same check runs in a browser at
 `https://register.khaos.dev/verify-entry`.
 
 What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/

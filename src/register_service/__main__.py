@@ -114,7 +114,7 @@ def main(argv=None) -> int:
         problems = store.log.problems(pub.read_text(encoding="ascii") if pub.is_file() else None)
         if pub.is_file():
             verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], pub.read_text(encoding="ascii")),
-                                             bool(cfg.get("log_unwitnessed")))
+                                             started=(cfg["data"] / "log-started").is_file())
             problems += [verdict] if verdict else []
         print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {len(store.serials())} models")
         print(f"log {'whole' if not problems else 'BROKEN'}: {store.log.size()} entries"
@@ -132,7 +132,8 @@ def open_log(cfg: dict, store: Store, appending: bool = False):
     store.log.signer = key
     with store._tx():
         store.log.remember_key_locked()
-    verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], key.public_pem()), bool(cfg.get("log_unwitnessed")))
+    verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], key.public_pem()),
+                                     started=(cfg["data"] / "log-started").is_file())
     store.log.blocked = verdict
     if verdict and appending:
         raise SystemExit(verdict)

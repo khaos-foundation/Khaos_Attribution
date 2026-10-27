@@ -155,8 +155,9 @@ def test_no_readable_published_copy_fails_closed_unless_the_log_is_new(register,
     unsure = create_app({"data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
                          "log_witnesses": ["http://127.0.0.1:9/ledger"]})
     assert unsure.state.store.log.blocked, "a first start that cannot read the public copy cannot know it is the first"
+    (cut_off / "log-open-unwitnessed").write_text("")
     override = create_app({"data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
-                           "log_witnesses": ["http://127.0.0.1:9/ledger"], "log_unwitnessed": True})
+                           "log_witnesses": ["http://127.0.0.1:9/ledger"]})
     assert override.state.store.log.blocked is None
 
 

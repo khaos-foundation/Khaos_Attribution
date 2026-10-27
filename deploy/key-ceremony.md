@@ -45,7 +45,7 @@ REGISTER_STAGED=/srv/register/data/staged-log/log-key.pem deploy/register-key-ba
 register-log-key switch "Name, Name"
 ```
 
-The switch retires the development log key, restarts the service (which signs the current tree with the new key), checks `/log/key` says the new key and not development, and records the key in the ledger (`register-cli key --log`). It prints the public key: commit it to the contract at `src/khaos_attribution/translog/log-key.pub`, release, and from then on `khaos-log-verify` and the `/verify-entry` page pin it. Write its key id on the sheet beside the countersigning key's.
+The switch retires the development log key and, once the new one is serving, destroys it (`shred -u`; it was only ever a development key, and a key that still exists could sign heads), restarts the service (which signs the current tree with the new key), checks `/log/key` says the new key and not development, and records the key in the ledger (`register-cli key --log`). It prints the public key: commit it to the contract at `src/khaos_attribution/translog/log-key.pub`, release, and from then on `khaos-log-verify` and the `/verify-entry` page pin it. Write its key id on the sheet beside the countersigning key's.
 
 The full ceremony below keeps the key off the server's own tools while it is made. Use it when the Guardians want that.
 

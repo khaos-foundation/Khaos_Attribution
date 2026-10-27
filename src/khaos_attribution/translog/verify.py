@@ -2,7 +2,8 @@
     khaos-log-verify <entry.json | record.json | leaf hash | record hash> [--mirror URL-or-folder] [--key log-key.pub]
 It also checks the newest head is consistent with the last head this machine saw. The register itself is never asked.
 Exit codes: 0 proved; 1 the proof failed (the log or mirror is not what it claims); 2 not found or bad input;
-3 no key or no mirror could be read; 4 proved, but newer entries are not yet public and a strike among them would not show.
+3 no key or no mirror could be read; 4 proved, but a strike after it could be hidden (entries not yet public, or lost
+in a recovery); 5 proved, but the newest head is over 48 hours old and this copy may be frozen.
 """
 
 from __future__ import annotations
@@ -17,8 +18,9 @@ from khaos_attribution import translog as T
 
 DEFAULT_MIRRORS = ("https://register.khaos.dev/mirror", "https://raw.githubusercontent.com/guild-register/ledger/main")
 STATE_FILE = Path.home() / ".khaos" / "log-verify-state.json"
-PROVED, FAILED, NOT_FOUND, UNREADABLE, HELD_BACK = 0, 1, 2, 3, 4
+PROVED, FAILED, NOT_FOUND, UNREADABLE, HELD_BACK, FROZEN = 0, 1, 2, 3, 4, 5
 HELD_BACK_NOTE = "proved, but newer entries are not yet public; a strike among them would not show"
+LOST_NOTE = "an entry after this one was lost in a recovery; whether it struck this model is unknown"
 STALE_HOURS = 48   # the register appends a heartbeat entry daily, quiet or not
 DELAY_ALLOWANCE_DAYS = 9   # the public mirror holds new bodies back at most seven days; two more for the daily head
 
@@ -122,7 +124,8 @@ def load_log(mirror: Mirror, pem: str) -> dict:
     for i in range(n):
         if entries[i] is None and leaves[i] not in withheld and (pending is None or i < pending):
             raise T.LogError(f"entry {i}'s body is missing and no proved withhold names it")
-    return {"latest": latest, "leaves": leaves, "entries": entries, "withheld": withheld, "pending": pending}
+    lost = {leaf for leaf, e in withheld.items() if e.get("lost") is True}
+    return {"latest": latest, "leaves": leaves, "entries": entries, "withheld": withheld, "pending": pending, "lost": lost}
 
 
 def _hours(earlier: str, later: str) -> float:
@@ -182,6 +185,18 @@ def strike_of(log: dict, index: int) -> dict | None:
     return None
 
 
+def lost_after(log: dict, index: int) -> bool:
+    """Whether an entry after this one was lost in a recovery and no later confirm of this entry answers it."""
+    leaf, unknown = log["leaves"][index], False
+    for i in range(index + 1, len(log["leaves"])):
+        e = log["entries"][i]
+        if log["leaves"][i] in log["lost"]:
+            unknown = True
+        elif e and e.get("kind") == "confirm" and e.get("confirms") == leaf:
+            unknown = False
+    return unknown
+
+
 def prove(target: str, mirror: Mirror, pem: str, state: dict | None = None, now: str | None = None) -> dict:
     """Every check, from the mirror's files alone; raises LogError on a failed proof, NotFound or Unreadable otherwise."""
     log = load_log(mirror, pem)
@@ -201,13 +216,17 @@ def prove(target: str, mirror: Mirror, pem: str, state: dict | None = None, now:
            "struck": strike_of(log, index), "warnings": warnings}
     held = [i for i in range(index + 1, len(log["leaves"])) if log["entries"][i] is None and log["leaves"][i] not in log["withheld"]]
     out["held_back_after"] = len(held)
+    out["lost_after"] = lost_after(log, index) and not out["struck"]
     if held and not out["struck"]:
         warnings.append(f"{HELD_BACK_NOTE} ({len(held)} held back by the publication delay)")
+    if out["lost_after"]:
+        warnings.append(LOST_NOTE)
     from datetime import datetime, timezone  # noqa: PLC0415
     out["stale_hours"] = round(_hours(latest["timestamp"], now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")), 1)
-    if out["stale_hours"] > STALE_HOURS:
-        warnings.append(f"the newest head is {out['stale_hours']:.0f} hours old; the log takes a heartbeat entry daily, so "
-                        "this mirror may be stale")
+    out["frozen"] = out["stale_hours"] > STALE_HOURS
+    if out["frozen"]:
+        warnings.append(f"the newest head is {out['stale_hours']:.0f} hours old; this copy may be frozen (the log takes a "
+                        "heartbeat entry daily)")
     if state and state.get("tree_size"):
         seen = int(state["tree_size"])
         if seen > latest["tree_size"]:
@@ -308,7 +327,9 @@ def main(argv=None) -> int:
                 print(f"The newest head ({out['latest']['tree_size']}) extends the one seen before ({out['consistent_since']}).")
             for w in out["warnings"]:
                 print(f"WARNING: {w}")
-        if out["held_back_after"] and not out["struck"]:
+        if out["frozen"]:
+            return FROZEN
+        if (out["held_back_after"] and not out["struck"]) or out["lost_after"]:
             return HELD_BACK
         return PROVED
     print(f"no mirror could be read: {last}", file=sys.stderr)

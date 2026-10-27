@@ -23,6 +23,8 @@ if [ -d "$WORK/mirror" ]; then
   rm -rf "$DATA/mirror/log"; [ -d "$WORK/published-log" ] && mv "$WORK/published-log" "$DATA/mirror/log"
   chown -R register:register "$DATA/mirror"
 fi
+# A restored register has started its log before, whether or not the archive says so.
+if [ -f "$WORK/log-started" ] || [ -d "$DATA/mirror/log" ]; then install -o register -g register -m 640 /dev/null "$DATA/log-started"; fi
 rm -rf "$WORK"
 # A fresh clone of the public mirror is the witness that survives a lost server: the register compares itself with it at start.
 if grep -q '^LEDGER_REPO=.' /etc/register.env; then

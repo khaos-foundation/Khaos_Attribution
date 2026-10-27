@@ -13,6 +13,8 @@ for db in register index; do
   [ -f "$DATA/$db.sqlite3" ] && sqlite3 "$DATA/$db.sqlite3" ".backup '$WORK/$db.sqlite3'"
 done
 [ -d "$DATA/mirror" ] && cp -a "$DATA/mirror" "$WORK/mirror"
+# The marker that this register started its log: an empty log is never opened on "nothing published" once it exists.
+[ -f "$DATA/log-started" ] && cp -a "$DATA/log-started" "$WORK/log-started"
 # The signing key is never in a backup: the Guardians hold its backup.
 tar -C "$WORK" -czf "$OUT/register-$STAMP.tar.gz" .
 sha256sum "$OUT/register-$STAMP.tar.gz" > "$OUT/register-$STAMP.tar.gz.sha256"

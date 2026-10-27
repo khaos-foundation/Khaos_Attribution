@@ -60,6 +60,8 @@ switch)
   sudo -u register bash -c 'set -a; . "$1"; set +a; cd "$(dirname "$2")" && exec "$2" -m register_service key --log --present "$3" --note "first ceremony"' -- "$ENV_FILE" "$PY" "$PRESENT" \
     || LEDGER_FAILED=1
   rm -rf "$(dirname "$STAGED")"
+  # The retired key was a development key: destroyed, so no head it could still sign ever speaks for this log.
+  shred -u "$RETIRED.pem" 2>/dev/null || rm -f "$RETIRED.pem"
   [ -z "${LEDGER_FAILED:-}" ] || { echo "the log signs with $NEW_ID but its ledger entry failed; run: register-cli key --log --present \"$PRESENT\" --note \"first ceremony\""; exit 1; }
   echo "The log's heads are now signed by key $NEW_ID. Commit its public half to the contract:"
   echo "  src/khaos_attribution/translog/log-key.pub"

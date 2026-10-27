@@ -197,7 +197,7 @@ class Store:
         """A record the log admitted before this database lost it: its row back under the same serial, nothing appended."""
         serial = int(admitted["serial"])
         counter = countersign(serial, admitted["countersignature"]["countersigned_at_utc"])
-        struck = not self.log.standing_admits(signed["record_sha256"])
+        struck = set(self.log.admit_states(signed["record_sha256"]).values()) == {"struck"}
         self.db.execute(
             "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
             " published_at, payload, withdrawn_at, withdraw_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -241,7 +241,7 @@ class Store:
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
             if self.log.admit_leaf_of(row["record_sha256"]) is None:
                 raise RuntimeError(f"record {serial} has no admit entry in the log")
-            for leaf in self.log.standing_admits(row["record_sha256"]):
+            for leaf in [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]:
                 self.log.revoke_locked(leaf, reason[:400].strip() or "withdrawn by the account that published it", time=at)
             return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
 
@@ -265,6 +265,12 @@ class Store:
         return [r["serial"] for r in self.db.execute(
             "SELECT serial FROM records WHERE payload = ? AND state != 'withdrawn' ORDER BY serial", (int(payload),))]
 
+    def unresolved_serials(self) -> list:
+        """Registered models the log holds unresolved after a recovery: not served until a warden answers."""
+        shas = self.log.unresolved_records()
+        return sorted(r["serial"] for r in self.db.execute("SELECT serial, record_sha256 FROM records").fetchall()
+                      if r["record_sha256"] in shas)
+
     def withdrawn_serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'withdrawn' ORDER BY serial")]
 
@@ -279,12 +285,12 @@ class Store:
 
     # ---- the log ----
 
-    def log_open(self, witnesses: list | None = None, unwitnessed: bool = False) -> int:
+    def log_open(self, witnesses: list | None = None, unwitnessed: bool = False, started: bool = False) -> int:
         """Checks the database against the log it published; then the first entries, once, and a heartbeat under a new
         log key. A database no published copy vouches for is blocked, never appended to."""
         with self._tx():
             self.log.remember_key_locked()
-        self.log.blocked = self.log.open_verdict(self.log.witness(witnesses or [], self.log.signer.public_pem()), unwitnessed)
+        self.log.blocked = self.log.open_verdict(self.log.witness(witnesses or [], self.log.signer.public_pem()), unwitnessed, started)
         if self.log.blocked:
             return 0
         with self._tx():
@@ -311,11 +317,14 @@ class Store:
             elif kind == "revoke":
                 out = self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"), wardens=entry.get("wardens"),
                                              sitting=entry.get("sitting") or "", appended_by=key_id)
+            elif kind == "confirm":
+                out = self.log.confirm_locked(str(entry.get("confirms") or ""), wardens=entry.get("wardens"),
+                                              sitting=entry.get("sitting") or "", appended_by=key_id)
             elif kind == "withhold":
                 out = self.log.withhold_locked(str(entry.get("withholds") or ""), entry.get("reason"), wardens=entry.get("wardens"),
                                                sitting=entry.get("sitting") or "", appended_by=key_id)
             else:
-                raise ValueError("kind is admit, revoke or withhold")
+                raise ValueError("kind is admit, revoke, confirm or withhold")
             self._ledger("log-append", None, None, key_id, {"kind": kind, "leaf_hash": out["leaf_hash"], "index": out["index"]})
             return out
 

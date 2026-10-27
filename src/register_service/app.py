@@ -46,7 +46,6 @@ def settings() -> dict:
             "log_dev_key": os.environ.get("REGISTER_LOG_DEV_KEY", "1" if dev_key else "0") == "1",
             "log_public_delay_days": float(os.environ.get("REGISTER_LOG_PUBLIC_DELAY_DAYS", "7")),
             "log_witnesses": [w.strip() for w in os.environ.get("REGISTER_LOG_WITNESSES", PUBLIC_MIRROR_RAW).split(",") if w.strip()],
-            "log_unwitnessed": os.environ.get("REGISTER_LOG_UNWITNESSED") == "1",
             # A development key reachable from outside, by decision: the deploy sets it beside REGISTER_DEV_KEY.
             "dev_key_public": os.environ.get("REGISTER_DEV_KEY_PUBLIC") == "1",
             "public_url": os.environ.get("REGISTER_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")}
@@ -187,7 +186,13 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     store.log.signer = log_key
     mirror = cfg["data"] / "mirror"
     (mirror / "models").mkdir(parents=True, exist_ok=True)
-    store.log_open(log_places(cfg)[3], bool(cfg.get("log_unwitnessed")))
+    started, once = cfg["data"] / "log-started", cfg["data"] / "log-open-unwitnessed"
+    store.log_open(log_places(cfg)[3], unwitnessed=once.is_file(), started=started.is_file())
+    if not store.log.blocked:
+        # Outside the database on purpose: a database that lost its log cannot also forget that one was started.
+        if store.log.size():
+            started.touch()
+        once.unlink(missing_ok=True)
     if store.log.blocked:
         log.error("the log is blocked: %s", store.log.blocked)
     # No schema served either: the public doors are documented in deploy/README.md, not enumerated to callers.
@@ -233,7 +238,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
                "machine_public_pem": rec.get("machine_public_pem"),
                "countersignature": rec["countersignature"], "served": rec["served"],
-               "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"]}
+               "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
+               "log_state": "unresolved" if serial in store.unresolved_serials() else None}
         tmp = mirror / "models" / f"{serial}.json.new"
         tmp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(tmp, mirror / "models" / f"{serial}.json")
@@ -368,6 +374,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             rec = store.record(serial_of(body))
             if rec and rec["state"] == "withdrawn" and state == "serving":
                 raise HTTPException(410, "the model is withdrawn; a Space does not serve it")
+            if rec and state == "serving" and rec["serial"] in store.unresolved_serials():
+                raise HTTPException(410, "the model is unresolved in the log after a recovery; a Space does not serve it until "
+                                         "the wardens answer")
             try:
                 out = store.served(serial_of(body), key_id, str(body.get("space_url", ""))[:200], state)
             except KeyError as e:
@@ -562,7 +571,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/withdrawn")
     def withdrawn():
-        return {"withdrawn": store.withdrawn_serials()}
+        """Every model a Space must not serve: withdrawn, and unresolved after a recovery lost an entry behind it."""
+        unresolved = store.unresolved_serials()
+        return {"withdrawn": sorted(set(store.withdrawn_serials()) | set(unresolved)), "unresolved": unresolved}
 
     @app.get("/api/ledger")
     def ledger(since: int = 0):
@@ -581,10 +592,15 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         r = public_view(rec["signed"]["record"])
         m, ts = r["model"], r["training_set"]
         tracks = ts.get("tracks") or []
-        facts = [P.state_chip(rec["state"]), f"registered {P.esc(P.day(rec['published_at']))}", P.esc(m["base_model"]),
+        unresolved = serial in store.unresolved_serials()
+        facts = [P.state_chip("unresolved" if unresolved and rec["state"] != "withdrawn" else rec["state"]),
+                 f"registered {P.esc(P.day(rec['published_at']))}", P.esc(m["base_model"]),
                  P.count(len(tracks) or ts.get("track_count", 0), "track")]
         note = ("What the artist's Workshop attested, bound to hashes the artist's own machine can reproduce. The register cannot "
                 "see the audio and does not verify the claim; it makes it checkable.")
+        if unresolved:
+            note = ("Unresolved: an entry after this model's admission was lost when the register was recovered, and the wardens "
+                    "have not yet confirmed or struck it. It is not served meanwhile. ") + note
         body = P.hero(f"Register No. {serial}", r["artist_name"], note, facts, P.seal_for(serial, rec["signed"]["record"]))
         engine_id = f" <span class=\"mono\">{P.esc(m['base_model_id'])}</span>" if m.get("base_model_id") else ""
         kv = [("Base model", f"{P.esc(m['base_model'])}{engine_id} <span class=\"muted\">· {P.esc(m['base_model_licence'])} licence</span>"),

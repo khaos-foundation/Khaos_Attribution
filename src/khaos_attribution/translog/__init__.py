@@ -15,7 +15,7 @@ from importlib import resources
 LOG_ID = "guild-register"
 HEAD_VERSION = "guild.register.log.head/1"
 ENTRY_VERSION = "guild.register.log.entry/1"
-ENTRY_KINDS = ("genesis", "admit", "revoke", "withhold", "heartbeat")
+ENTRY_KINDS = ("genesis", "admit", "revoke", "withhold", "heartbeat", "confirm")
 KEY_FILE = "log-key.pub"   # the Foundation's log public key, committed after the ceremony
 SHA256_HEX = 64
 

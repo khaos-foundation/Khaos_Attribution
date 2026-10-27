@@ -264,7 +264,7 @@ def test_the_daily_job_signs_a_fresh_head_and_the_verifier_flags_an_old_one(regi
                      (old["timestamp"], old["signature"], before["tree_size"]))
     _export(app)
     out = _prove(s1["record_sha256"], _mirror(app), store.log.signer.public_pem())
-    assert out["stale_hours"] > 48 and any("stale" in w for w in out["warnings"])
+    assert out["stale_hours"] > 48 and out["frozen"] and any("may be frozen" in w for w in out["warnings"])
     refresh_head(app.state.cfg, store)
     fresh = store.log.head()
     assert fresh["tree_size"] == before["tree_size"] + 1 and fresh["timestamp"] > old["timestamp"]
@@ -316,6 +316,7 @@ def test_genesis_takes_a_withdrawn_record_whose_reason_is_blank(register, tmp_pa
     db.close()
     shutil.rmtree(_mirror(app) / "log")
     shutil.rmtree(app.state.cfg["data"] / "mirror-public")
+    (app.state.cfg["data"] / "log-started").unlink()
     again = create_app(app.state.cfg).state.store
     kinds = [e["entry"]["kind"] for e in again.log.entries(0, 10)]
     assert kinds == ["genesis", "admit", "revoke"]
@@ -390,7 +391,7 @@ def test_the_browser_verifier_holds_the_same_line_against_a_lying_or_stale_mirro
     assert drop[0].startswith("bad|Not proved") and "withhold" in drop[0]
     assert never[0].startswith("bad|Not proved: no admitted entry")
     assert struck[0].startswith("ok|Proved") and "bad|Struck: consent withdrawn (S1)" in struck
-    assert aged[0].startswith("ok|Proved") and any("may be stale" in x for x in aged)
+    assert aged[0].startswith("bad|Not current") and any(x.startswith("ok|Proved") for x in aged) and "may be frozen" in aged[0]
 
 
 def test_log_recover_refuses_entries_that_do_not_make_the_signed_root(register, tmp_path, monkeypatch, capsys):

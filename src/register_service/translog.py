@@ -167,11 +167,34 @@ class TransLog:
                                          "time": entry.get("time"), "reason_withheld": body is None})
         return out
 
+    def admit_states(self, record_sha256: str) -> dict:
+        """Each admit leaf of the record: struck (a revoke names it), unresolved (an entry after it was lost in a
+        recovery and no warden has confirmed it since), or standing."""
+        lost = [r["idx"] for r in self.db.execute("SELECT idx FROM log_leaves WHERE kind = 'unavailable' ORDER BY idx")]
+        out = {}
+        for a in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx",
+                                 (record_sha256,)).fetchall():
+            if self.db.execute("SELECT 1 FROM log_leaves WHERE kind = 'revoke' AND refers = ?", (a["leaf_hash"],)).fetchone():
+                out[a["leaf_hash"]] = "struck"
+                continue
+            last_lost = max((i for i in lost if i > a["idx"]), default=None)
+            confirmed = last_lost is not None and self.db.execute(
+                "SELECT 1 FROM log_leaves WHERE kind = 'confirm' AND refers = ? AND idx > ?", (a["leaf_hash"], last_lost)).fetchone()
+            out[a["leaf_hash"]] = "unresolved" if last_lost is not None and not confirmed else "standing"
+        return out
+
     def standing_admits(self, record_sha256: str) -> list:
-        """The record's admit leaves no revoke has struck."""
-        return [r["leaf_hash"] for r in self.db.execute(
-            "SELECT a.leaf_hash FROM log_leaves a WHERE a.kind = 'admit' AND a.record_sha256 = ? AND NOT EXISTS"
-            " (SELECT 1 FROM log_leaves r WHERE r.kind = 'revoke' AND r.refers = a.leaf_hash) ORDER BY a.idx", (record_sha256,))]
+        """The record's admit leaves neither struck nor left unresolved by a lost entry."""
+        return [k for k, v in self.admit_states(record_sha256).items() if v == "standing"]
+
+    def unresolved_records(self) -> list:
+        """Records whose every live admit waits on a warden after a recovery lost an entry behind it."""
+        out = []
+        for r in self.db.execute("SELECT DISTINCT record_sha256 FROM log_leaves WHERE kind = 'admit'").fetchall():
+            states = set(self.admit_states(r["record_sha256"]).values())
+            if "unresolved" in states and "standing" not in states:
+                out.append(r["record_sha256"])
+        return out
 
     def admit_leaf_of(self, record_sha256: str) -> str | None:
         row = self.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx LIMIT 1",
@@ -198,7 +221,7 @@ class TransLog:
         index = self.size()
         self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind, serial, record_sha256, refers) VALUES (?, ?, ?, ?, ?, ?)",
                         (index, leaf.hex(), entry["kind"], entry.get("serial"), entry.get("record_sha256"),
-                         entry.get("withholds") or entry.get("revokes")))
+                         entry.get("withholds") or entry.get("revokes") or entry.get("confirms")))
         self.db.execute("INSERT INTO log_bodies (leaf_hash, body) VALUES (?, ?)", (leaf.hex(), body))
         level, i, h = 0, index, leaf
         self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
@@ -286,6 +309,15 @@ class TransLog:
                                                wardens=_names(wardens), sitting=_text(sitting, "sitting", False),
                                                appended_by=appended_by))
 
+    def confirm_locked(self, leaf_hex: str, wardens=None, sitting=None, appended_by: str | None = None) -> dict:
+        """The wardens' answer that an admit stands after a recovery lost an entry behind it."""
+        leaf = self.leaf(leaf_hex)
+        if leaf is None or leaf["kind"] != "admit":
+            raise EntryRefused("a confirm names an admitted entry's leaf hash")
+        return self.append_locked(T.make_entry("confirm", confirms=leaf_hex, serial=leaf["serial"], record_sha256=leaf["record_sha256"],
+                                               wardens=_names(wardens), sitting=_text(sitting, "sitting", True),
+                                               appended_by=appended_by))
+
     def withhold_locked(self, leaf_hex: str, reason: str, wardens=None, sitting=None, appended_by: str | None = None) -> dict:
         """The body leaves public view; the leaf, every proof and every head stay as they were. Withholding a revoke
         keeps naming what it struck, so the strike itself never disappears."""
@@ -366,11 +398,15 @@ class TransLog:
                 empty = mirror.local and not (Path(str(where)) / "log").is_dir()
                 out.append({"where": str(where), "state": "empty" if empty else "unreadable", "message": str(e)})
                 continue
-            pem = public_pem if isinstance(head, dict) and head.get("key_id") == T.key_id_of_pem(public_pem) else \
-                self.known_key(str(head.get("key_id", "")) if isinstance(head, dict) else "")
             try:
-                if pem is None:
-                    raise T.LogError(f"signed by key {head.get('key_id')}, which this log never used")
+                if not isinstance(head, dict) or not isinstance(head.get("tree_size"), int):
+                    raise T.LogError("not a signed head")
+                own = self.head(head["tree_size"]) if head["tree_size"] <= self.size() else None
+                # Only the key that signed a size here may speak for it; beyond this database, only the current key.
+                expected = own["key_id"] if own else T.key_id_of_pem(public_pem)
+                pem = public_pem if expected == T.key_id_of_pem(public_pem) else self.known_key(expected)
+                if head.get("key_id") != expected or pem is None:
+                    raise T.LogError(f"signed by key {head.get('key_id')}, not the key of size {head['tree_size']} ({expected})")
                 T.verify_head(head, pem)
             except (T.LogError, AttributeError) as e:
                 out.append({"where": str(where), "state": "other-key", "message": f"{where}: {e}"})
@@ -389,21 +425,28 @@ class TransLog:
             out.append({"where": str(where), "state": state, "message": message, "head": head})
         return out
 
-    def open_verdict(self, seen: list, unwitnessed: bool = False) -> str | None:
+    def open_verdict(self, seen: list, unwitnessed: bool = False, started: bool = False) -> str | None:
         """Why this database may not append, or None. It fails closed: some published copy must vouch for it, unless
-        the log is new and nothing anywhere has been published yet."""
+        the log is new, this register never started one, and nothing anywhere answers that it was published."""
         for w in seen:
             if w["state"] in ("behind", "forked"):
                 return w["message"]
         if any(w["state"] == "ok" for w in seen):
             return None
-        if self.size() == 0 and all(w["state"] == "empty" for w in seen):
+        if self.size() == 0 and not started and all(w["state"] == "empty" for w in seen):
             return None
         if unwitnessed:
+            if self.size():
+                return ("the one-shot unwitnessed open is refused: the log has entries, so a published copy must vouch for it "
+                        "(REGISTER_LOG_WITNESSES)")
             return None
+        if self.size() == 0 and started:
+            return ("this register started its log before (data/log-started) yet its database holds none, and no published "
+                    "copy can be read: restore the database or make a published copy reachable")
         return ("no published copy of the log could be read to show this database is not behind it ("
-                + "; ".join(f"{w['where']}: {w['state']}" for w in seen) + "). Make one reachable (REGISTER_LOG_WITNESSES), or "
-                "after checking by hand that nothing newer was published, start once with REGISTER_LOG_UNWITNESSED=1")
+                + "; ".join(f"{w['where']}: {w['state']}" for w in seen) + "). Make one reachable (REGISTER_LOG_WITNESSES), or, "
+                "for a log with no entries and after checking by hand that nothing was published, create data/"
+                "log-open-unwitnessed for one start")
 
     # ---- anchors ----
 
@@ -476,8 +519,8 @@ def recover(store, places: list, public_pem: str) -> tuple:
             log.blocked = None
             for r in log.db.execute("SELECT leaf_hash FROM log_bodies WHERE withhold_reason = ?", (UNAVAILABLE,)).fetchall():
                 # No withhold names this lost body, so a verifier would refuse it: the log says plainly that it is gone.
-                log.append_locked(T.make_entry("withhold", withholds=r["leaf_hash"], reason="the body was lost in a restore "
-                                                                                           "before it was published"))
+                log.append_locked(T.make_entry("withhold", withholds=r["leaf_hash"], lost=True,
+                                               reason="the body was lost in a restore before it was published"))
                 lines.append(f"leaf {r['leaf_hash']} is now marked as lost by a withhold entry")
     except T.LogError as e:
         log.blocked = log.blocked or "recovery failed"
