@@ -180,11 +180,18 @@ class TransLog:
         return lost, answers
 
     def open_lost(self, admit_idx: int, admit_leaf: str, lost=None, answers=None) -> list:
-        """The lost leaves after this admit that no confirm has answered for it (one naming no admit answers for all)."""
+        """The lost leaves that leave this admit unresolved: each one after it that no confirm has answered for it (one
+        naming no admit answers for all), and each one its own `pending_lost` names that no confirm after it answers."""
         if lost is None:
             lost, answers = self._lost_and_answers()
-        return [h for i, h in sorted(lost.items()) if i > admit_idx and not any(
+        out = [h for i, h in sorted(lost.items()) if i > admit_idx and not any(
             c_idx > i and ans == h and conf in (None, admit_leaf) for c_idx, ans, conf in answers)]
+        row = self.db.execute("SELECT body FROM log_bodies WHERE leaf_hash = ?", (admit_leaf,)).fetchone()
+        body = json.loads(bytes(row["body"])) if row and row["body"] else {}
+        for h in body.get("pending_lost") or []:
+            if h not in out and not any(c_idx > admit_idx and ans == h and conf in (None, admit_leaf) for c_idx, ans, conf in answers):
+                out.append(h)
+        return out
 
     def admit_states(self, record_sha256: str) -> dict:
         """Each admit leaf of the record: struck (a revoke names it), unresolved (an entry after it was lost in a
@@ -306,11 +313,12 @@ class TransLog:
         return row["public_pem"] if row else None
 
     def admit_locked(self, serial: int, record_sha256: str, counter: dict, time: str | None = None, wardens=None,
-                     sitting=None, appended_by: str | None = None, restores: dict | None = None) -> dict:
+                     sitting=None, appended_by: str | None = None, restores: dict | None = None,
+                     pending_lost: list | None = None) -> dict:
         ref = {k: counter[k] for k in ("register_key_id", "register_signature", "countersigned_at_utc")}
         return self.append_locked(T.make_entry("admit", time=time, serial=int(serial), record_sha256=record_sha256,
                                                countersignature=ref, wardens=_names(wardens), sitting=_text(sitting, "sitting", False),
-                                               appended_by=appended_by, restores=restores))
+                                               appended_by=appended_by, restores=restores, pending_lost=pending_lost))
 
     def reserve_locked(self, count: int, reason: str) -> list:
         """`count` serials above every one this register knows, held back for records a recovery could not see."""
@@ -322,6 +330,31 @@ class TransLog:
         for serial in out:
             self.db.execute("INSERT INTO log_reserved (serial, reason, reserved_at) VALUES (?, ?, ?)", (serial, reason, T.now_rfc3339()))
         return out
+
+    def sync_reserved_locked(self) -> None:
+        """The reservations rebuilt from the log itself: every lost-entry withhold that holds a serial, returned once an
+        admit restores it. The log survives a restore that the table alone would not."""
+        for r in self.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind IN ('withhold', 'admit')").fetchall():
+            row = self.db.execute("SELECT body FROM log_bodies WHERE leaf_hash = ?", (r["leaf_hash"],)).fetchone()
+            if not row or not row["body"]:
+                continue
+            e = json.loads(bytes(row["body"]))
+            if e.get("kind") == "withhold" and isinstance(e.get("reserves_serial"), int):
+                self.db.execute("INSERT OR IGNORE INTO log_reserved (serial, reason, reserved_at) VALUES (?, ?, ?)",
+                                (e["reserves_serial"], "a recovery lost entries whose kind is unknown", e["time"]))
+            elif e.get("kind") == "admit" and isinstance(e.get("restores"), dict):
+                self.db.execute("UPDATE log_reserved SET returned_at = COALESCE(returned_at, ?), returned_to = COALESCE(returned_to, ?)"
+                                " WHERE serial = ?", (e["time"], e["record_sha256"], e["restores"].get("serial")))
+
+    def open_lost_global(self) -> list:
+        """Lost leaves no confirm has answered for every admit."""
+        lost, answers = self._lost_and_answers()
+        return [h for i, h in sorted(lost.items()) if not any(c > i and ans == h and conf is None for c, ans, conf in answers)]
+
+    def admit_leaf_of_latest(self, record_sha256: str) -> str | None:
+        row = self.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx DESC LIMIT 1",
+                              (record_sha256,)).fetchone()
+        return row["leaf_hash"] if row else None
 
     def reserved(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM log_reserved WHERE returned_at IS NULL ORDER BY serial")]
@@ -557,14 +590,18 @@ def recover(store, places: list, public_pem: str) -> tuple:
                     log.insert_head_locked(old)
             log.insert_head_locked(head)
             log.blocked = None
-            for r in log.db.execute("SELECT leaf_hash FROM log_bodies WHERE withhold_reason = ?", (UNAVAILABLE,)).fetchall():
-                # No withhold names this lost body, so a verifier would refuse it: the log says plainly that it is gone.
-                log.append_locked(T.make_entry("withhold", withholds=r["leaf_hash"], lost=True,
+            log.sync_reserved_locked()
+            unmarked = [r["leaf_hash"] for r in log.db.execute(
+                "SELECT b.leaf_hash FROM log_bodies b JOIN log_leaves l ON l.leaf_hash = b.leaf_hash WHERE b.withhold_reason = ?"
+                " ORDER BY l.idx", (UNAVAILABLE,)).fetchall()]
+            # A lost leaf may have been an admit holding the next serial; its kind is unknown, so each one holds one.
+            held = log.reserve_locked(len(unmarked), "a recovery lost entries whose kind is unknown") if unmarked else []
+            for leaf_hex, serial in zip(unmarked, held):
+                # The withhold says the body is gone and carries the reservation, so a later restore rebuilds it from the log.
+                log.append_locked(T.make_entry("withhold", withholds=leaf_hex, lost=True, reserves_serial=serial,
                                                reason="the body was lost in a restore before it was published"))
-                lines.append(f"leaf {r['leaf_hash']} is now marked as lost by a withhold entry")
-            if missing:
-                # A lost leaf may have been an admit holding the next serial; its kind is unknown, so each one holds one.
-                held = log.reserve_locked(len(missing), "a recovery lost entries whose kind is unknown")
+                lines.append(f"leaf {leaf_hex} is now marked as lost by a withhold entry, holding serial {serial}")
+            if held:
                 lines.append(f"serials {held[0]} to {held[-1]} are reserved for records whose admit may be among the lost "
                              "entries; each returns to the record that presents this register's countersignature for it")
     except T.LogError as e:

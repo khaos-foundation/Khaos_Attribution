@@ -189,6 +189,11 @@ def lost_after(log: dict, index: int) -> bool:
     """Whether an entry after this one was lost in a recovery and no later confirm answers that loss, for every admit
     (naming none) or for this one."""
     leaf, leaves = log["leaves"][index], log["leaves"]
+    for h in (log["entries"][index] or {}).get("pending_lost") or []:
+        # An admit appended after a recovery waits on the losses it names until a confirm after it answers them.
+        if not any(e and e.get("kind") == "confirm" and e.get("answers") == h and e.get("confirms") in (None, leaf)
+                   for e in log["entries"][index + 1:]):
+            return True
     for i in range(index + 1, len(leaves)):
         if leaves[i] not in log["lost"]:
             continue

@@ -55,12 +55,12 @@ def test_a_lost_admits_serial_is_never_given_to_another_record(register, tmp_pat
     assert other["serial"] != first["serial"] and other["serial"] > first["serial"]
 
 
-def test_the_lost_record_gets_its_serial_back_with_its_countersignature_and_is_standing(register, tmp_path):
+def test_the_lost_record_gets_its_serial_back_with_its_countersignature_and_waits_on_the_wardens(register, tmp_path):
     app3, http3, s1, s2, first, (k1, c1), (k3, c3), warden = _lose_an_admit(register, tmp_path)
     again = c1.publish(s2, countersignature=first["countersignature"])
     assert again["serial"] == first["serial"] and again["countersignature"] == first["countersignature"]
     store = app3.state.store
-    assert len(store.log.standing_admits(s2["record_sha256"])) == 1
+    assert store.log.standing_admits(s2["record_sha256"]) == [] and again["serial"] in store.unresolved_serials()
     admit = store.log.admitted(s2["record_sha256"])
     assert admit["restores"]["serial"] == first["serial"] and admit["restores"]["linked_by"] == "countersigned serial"
     assert store.reserved_serials() == [], "the reservation is returned"

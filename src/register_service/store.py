@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS records (serial INTEGER PRIMARY KEY, record_sha256 TE
   state TEXT NOT NULL, published_at TEXT NOT NULL, withdrawn_at TEXT, withdraw_reason TEXT);
 CREATE TABLE IF NOT EXISTS served (serial INTEGER NOT NULL, space_url TEXT NOT NULL, state TEXT NOT NULL,
   at TEXT NOT NULL, key_id TEXT NOT NULL, PRIMARY KEY (serial, space_url));
+CREATE TABLE IF NOT EXISTS register_keys (key_id TEXT PRIMARY KEY, public_pem TEXT NOT NULL, first_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, serial INTEGER, record_sha256 TEXT,
   key_id TEXT, at TEXT NOT NULL, detail_json TEXT NOT NULL, entry_sha256 TEXT NOT NULL, prev_sha256 TEXT);
 """
@@ -200,7 +201,11 @@ class Store:
                  json.dumps(counter, sort_keys=True), counter["countersigned_at_utc"], _payload_of(signed)))
             self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
                          {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"]})
-            self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"], restores=restores)
+            # A record this database does not know may be one the recovery lost, its strike among the lost entries:
+            # its admit waits on every loss still open until the wardens answer, never on its own word.
+            pending = self.log.open_lost_global()
+            self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"], restores=restores,
+                                  pending_lost=pending or ([] if restores else None))
             return serial, counter, False
 
     def _register_admitted(self, signed: dict, machine_key_id: str, account_id: int, countersign, admitted: dict) -> tuple:
@@ -275,6 +280,16 @@ class Store:
         return [r["serial"] for r in self.db.execute(
             "SELECT serial FROM records WHERE payload = ? AND state != 'withdrawn' ORDER BY serial", (int(payload),))]
 
+    def remember_register_key(self, key_id: str, public_pem: str) -> None:
+        """Every countersigning key's public half, so a countersignature made before a key switch can still be checked."""
+        with self._tx():
+            self.db.execute("INSERT OR IGNORE INTO register_keys (key_id, public_pem, first_seen) VALUES (?, ?, ?)",
+                            (key_id, public_pem, now_utc()))
+
+    def register_key_pem(self, key_id: str) -> str | None:
+        row = self.db.execute("SELECT public_pem FROM register_keys WHERE key_id = ?", (str(key_id),)).fetchone()
+        return row["public_pem"] if row else None
+
     def reserved_serials(self) -> list:
         return self.log.reserved()
 
@@ -309,6 +324,7 @@ class Store:
         with self._tx():
             n = self.log.genesis_locked()
             self.log.resign_locked()
+            self.log.sync_reserved_locked()
             return n
 
     def log_append(self, entry: dict, key_id: str) -> dict:

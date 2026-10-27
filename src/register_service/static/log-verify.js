@@ -202,6 +202,10 @@
   // for every admit (naming none) or for this one.
   function lostAfter(log, index) {
     const leaf = log.leaves[index];
+    const answeredAfter = (h, from) => log.entries.slice(from).some((e) => e && e.kind === "confirm" && e.answers === h &&
+      (e.confirms === undefined || e.confirms === null || e.confirms === leaf));
+    // An admit appended after a recovery waits on the losses it names until a confirm after it answers them.
+    for (const h of ((log.entries[index] || {}).pending_lost || [])) if (!answeredAfter(h, index + 1)) return true;
     for (let i = index + 1; i < log.leaves.length; i++) {
       if (!log.lost[log.leaves[i]]) continue;
       const answered = log.entries.slice(i + 1).some((e) => e && e.kind === "confirm" && e.answers === log.leaves[i] &&

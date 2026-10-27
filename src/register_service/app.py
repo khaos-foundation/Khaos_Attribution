@@ -182,6 +182,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     store = Store(cfg["data"] / "register.sqlite3")
     index = Index(cfg["data"] / "index.sqlite3")
     key = load_register_key(cfg)
+    store.remember_register_key(key.key_id, key.public_pem())
     log_key, log_dev = load_log_key(cfg), log_key_settings(cfg)[1]
     store.log.signer = log_key
     mirror = cfg["data"] / "mirror"
@@ -322,7 +323,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if record["model"]["machine_key_id"] != key_id:
             raise HTTPException(422, "the record names another machine as its maker")
         # A countersignature this register made, presented again after a recovery, gets its reserved serial back.
-        if not (isinstance(presented, dict) and R.countersignature_valid(presented, signed["record_sha256"], key.public_pem())):
+        issuer = store.register_key_pem(presented.get("register_key_id")) if isinstance(presented, dict) else None
+        if not (issuer and R.countersignature_valid(presented, signed["record_sha256"], issuer)):
             presented = None
         serial, counter, already = store.register(signed, key_id, machine["account_id"],
                                                   lambda n, at: R.countersign(signed, n, key, at or now_utc()), presented)
