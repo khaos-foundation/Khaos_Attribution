@@ -409,3 +409,94 @@ def test_a_sung_request_served_by_the_translator_says_no_lyrics_were_drafted():
     assert out["lyrics"] is None and out["lyrics_note"] == T.LYRICS_NOTE
     out = T.expand_checked(REQ, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL, translator=fake(sung))
     assert out["lyrics_note"] is None
+
+
+# ── the third pass: renderings, voices in lists, sound sources, moods, absences, repeats, names ──
+
+def test_an_english_request_is_never_swapped_for_a_rendering():
+    """A model claiming French with an unrelated rendering does not change what an English request is checked against."""
+    raw = ("Language: French\nEnglish request: aggressive techno with a pounding kick\nCaption: Aggressive techno with "
+           "a pounding kick, distorted bass and metallic percussion under filtered synth pads, driving all night.")
+    out = T.translate("warm strings and a soft harp", POOL, instrumental=True, pool=POOL, llm=fake(raw))
+    assert out["caption"] is None and out["translated_from"] is None
+    assert T._reads_english("sad solo piano") and not T._reads_english("música alegre con guitarra")
+    swap = ("Language: French\nEnglish request: happy piano party\nCaption: A happy, joyful piano party, bright and "
+            "bouncy, with lush reverb and a dreamy texture around every note.")
+    out = T.translate("sad solo piano", POOL, instrumental=True, pool=POOL, llm=fake(swap))
+    assert out["caption"] is None and "mood_dropped:sad" in out["rejects"][0]["reasons"]
+
+
+def test_a_foreign_rendering_keeps_cognates_and_adds_no_claim():
+    """'guitarra' must come back as a guitar, and the rendering may not bring drums the original never named."""
+    assert T._rendering_reasons("música alegre con guitarra", "happy music with guitar") == []
+    assert T._rendering_reasons("música alegre con guitarra", "happy music with drums and guitar") == ["rendering_adds:drum"]
+    assert T._rendering_reasons("música alegre con guitarra", "happy music") == ["rendering_drops:guitarra"]
+    raw = ("Language: Spanish\nEnglish request: happy music with drums and guitar\nCaption: A happy, bright guitar "
+           "melody over lively drums, warm and joyful, with lush reverb and a dreamy texture around every note.")
+    out = T.translate("música alegre con guitarra", POOL, instrumental=True, pool=POOL, llm=fake(raw))
+    assert out["caption"] is None and "rendering_adds:drum" in out["rejects"][0]["reasons"]
+
+
+def test_a_voice_leaves_a_denial_list_and_the_rest_stays():
+    assert T.clean_request("ambient pads without singing or drums", True) == "ambient pads without drums"
+    assert T.clean_request("strings, vocals and drums are not wanted", True) == "strings, drums are not wanted"
+    assert T.clean_request("piano with no voice, choir or percussion", True) == "piano with no percussion"
+    assert T.clean_request("no vocals, no drums, just pads", True) == "no drums, just pads"
+
+
+def test_sound_sources_outside_the_vocabulary_are_claims():
+    """Beats, keys, a low end, leads, a reese, a wobble, electronics and saws name instruments too."""
+    body = ("Warm strings beside a soft harp drift through a gentle, intimate space, lush reverb and tape hiss around "
+            "them, tender and unhurried, {}.")
+    for extra, noun in (("with glitchy beats", "beat"), ("over bright plinking keys", "keys"),
+                        ("over a thumping low end", "low end"), ("with buzzy electronics", "electronics"),
+                        ("soon replaced by sawtooth leads", "lead"), ("and a wobbling reese", "reese")):
+        assert f"invented_noun:{noun}" in lint("warm strings and a soft harp", body.format(extra)), extra
+    assert lint("warm strings and a soft harp", body.format("the harp's glassy plucks ringing")) == []
+
+
+def test_wider_mood_opposites_and_kindred_words():
+    """'ecstatic', 'blissful', 'breakneck', 'luminous' flip their opposites; 'triumphant' answers 'victory'."""
+    assert "mood_opposite:sad->ecstatic" in lint(REQ, GOOD.replace("intimate", "ecstatic"))
+    for mood, body in (("calm", "violent"), ("slow", "breakneck"), ("dark", "luminous")):
+        reasons = lint(f"{mood} solo piano", f"A {mood} solo piano piece, soft and intimate, {body} at heart, with warm "
+                       "tape hiss and lush reverb around every note of the night.")
+        assert f"mood_opposite:{mood}->{body}" in reasons, mood
+    fanfare = ("A triumphant brass fanfare, bold and celebratory, rich resonant brass and lush reverb around a grand, "
+               "uplifting swell.")
+    assert lint("a big brass fanfare for a victory screen", fanfare) == []
+    assert "mood_opposite:triumphant->aggressive" in lint(
+        "a big brass fanfare for a victory screen", "A big brass fanfare for the victory screen, aggressive and "
+        "mechanical, with lush reverb and relentless drive across every bar.")
+
+
+def test_a_requested_noun_that_fades_out_or_is_absent_is_turned_down():
+    body = ("Warm strings beside a soft harp drift through a gentle, intimate space with lush reverb and tape hiss, "
+            "{}.")
+    for tail in ("until the strings fade out and vanish entirely", "although the strings are absent here"):
+        assert "negated_request:strings" in lint("warm strings and a soft harp", body.format(tail)), tail
+
+
+def test_a_body_that_only_repeats_the_request_is_not_a_translation():
+    assert T.MIN_NEW_WORDS == 6
+    reasons = lint("warm strings and a soft harp", "Warm strings and soft harp, warm strings and a soft harp, warm "
+                   "strings and soft harps, warm strings and the soft harp, gentle.")
+    assert any(r.startswith("repeats_request") for r in reasons)
+
+
+def test_similes_reach_for_images_not_names():
+    """'recede like tides' is an image; 'like Burial' or 'like burial' is a name; a sentence opened by one too."""
+    assert T._names("Pads swell and recede like tides over the night", set()) == []
+    assert T._names("Pads swell like burial over the night", set()) == ["burial"]
+    assert T._names("Pads swell for the night. Burial would make this.", set()) == ["Burial"]
+
+
+def test_a_busy_model_is_said_to_be_busy():
+    """When nothing was written at all the note says the models were busy, not that the request was changed."""
+    def lm(a):
+        raise RuntimeError("An expansion is already running")
+    out = T.expand_checked(REQ, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL, lm=lm)
+    assert out["fallback_note"] == T.BUSY_NOTE
+    out = T.expand_checked(REQ, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL,
+                           lm=lambda a: {"caption": "ambient techno"})
+    assert out["fallback_note"] == T.FALLBACK_NOTE

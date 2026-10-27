@@ -64,11 +64,14 @@ MAX_RESPONSE_BYTES = 1 << 20
 ANSWERED_FLOOR = 0.5
 # Under two content words there is too little to measure a share of.
 FLOOR_MIN_WORDS = 2
+# A translation adds the artist's words; under six of its own beside the request it only repeats it.
+MIN_NEW_WORDS = 6
 
 FALLBACK_NOTE = ("Could not say this in the artist's words without changing what you asked; "
                  "the nearest descriptions are below.")
 TRANSLATED_NOTE = "Said in English from your {language} request."
 LYRICS_NOTE = "No lyrics draft: the translator writes the description only."
+BUSY_NOTE = "The language models were busy or not answering, so your own words are kept; try again in a moment."
 
 
 class TranslatorUnavailable(RuntimeError):
@@ -104,10 +107,13 @@ def _tokens(text: str) -> list[str]:
 # ── denials ──────────────────────────────────────────────────────────────
 
 # A denial runs to the end of its clause: punctuation, or a conjunction that starts the next claim.
+_STOPS = r"\b(?:but|and|with|just|only|also|then|instead|while|yet|plus|although|though|whereas)\b"
+_ITEM = rf"(?:(?!{_STOPS})[^.;,:!?])"
+# A denial runs to the end of its clause, and across a comma list that closes with "or"/"nor" ("no X, Y or Z").
 _DENIAL = re.compile(
     r"\b(?:no|not|without|never|zero|none\s+of|free\s+(?:of|from)|devoid\s+of|absence\s+of|absent|lacking|minus|nor|"
     r"instead\s+of|rather\s+than)\b"
-    r".*?(?=[.;,:!?]|\b(?:but|and|with|just|only|also|then|instead|while|yet|plus)\b|$)",
+    rf"{_ITEM}*?(?:(?:,\s*{_ITEM}+?)*,?\s+(?:or|nor)\s+{_ITEM}+?)?(?=[.;,:!?]|{_STOPS}|$)",
     re.IGNORECASE | re.DOTALL)
 _FREE = re.compile(r"\b([^\W\d_][\w]*)-free\b", re.IGNORECASE)
 _UNWANTED = re.compile(
@@ -115,15 +121,22 @@ _UNWANTED = re.compile(
     r"not\s+allowed|left\s+out|banned)\b", re.IGNORECASE)
 
 
+_GONE = re.compile(
+    r"\b((?:[^\W\d_]+[\s-]){0,2}[^\W\d_]+)\s+(?:(?:are|is|were|was|go|goes|went)\s+)?(?:absent|gone|missing|silent|"
+    r"fades?\s+(?:out|away)|faded\s+(?:out|away)|fading\s+(?:out|away)|drops?\s+out|dropped\s+out|vanish\w*|"
+    r"disappear\w*|cuts?\s+out|falls?\s+silent|fell\s+silent)\b", re.IGNORECASE)
+
+
 def split_denials(text: str) -> tuple[str, str]:
-    """(what the text claims is there, what it rules out): "no X", "without X", "X-free", "X is not wanted"."""
+    """(what the text claims is there, what it rules out): "no X", "without X", "X-free", "X is not wanted",
+    "X fades out", "X is absent"."""
     denied: list[str] = []
 
     def take(m: re.Match) -> str:
         denied.append(m.group(1) if m.re is not _DENIAL else m.group(0))
         return " "
     text = _nfc(text)
-    for rx in (_UNWANTED, _FREE, _DENIAL):
+    for rx in (_UNWANTED, _GONE, _FREE, _DENIAL):
         text = rx.sub(take, text)
     return text, " ; ".join(denied)
 
@@ -134,12 +147,35 @@ def clean_request(request: str, instrumental: bool) -> str:
     text = " ".join(_nfc(request).split())
     if not instrumental:
         return text
-    for rx in (_UNWANTED, _FREE, _DENIAL):
-        text = rx.sub(lambda m: " " if vocal_hits(m.group(0).replace("-free", "")) or
-                      (m.re is _FREE and vocal_hits(m.group(1))) else m.group(0), text)
+    text = _UNWANTED.sub(lambda m: _without_voices(m.group(1), m.group(0)[len(m.group(1)):], lead=False), text)
+    text = _FREE.sub(lambda m: " " if vocal_hits(m.group(1)) else m.group(0), text)
+    text = _DENIAL.sub(lambda m: _without_voices_denial(m.group(0)), text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", " ".join(text.split()))
+    text = re.sub(r"\b(?:with|and|or|but|plus)\s*(?=[,.;:!?]|$)", "", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", " ".join(text.split()))
     text = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", text)
     return text.strip(" ,;:") or " ".join(_nfc(request).split())
+
+
+_LIST_SPLIT = re.compile(r"\s*(?:,|/|&|\bor\b|\bnor\b|\band\b)\s*", re.IGNORECASE)
+_DENIAL_LEAD = re.compile(r"^(\S+(?:\s+(?:of|from|than))?(?:\s+any)?)\s+(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def _without_voices(items_text: str, tail: str, lead: bool) -> str:
+    """A denied list with its voice items taken out and the rest kept: "singing or drums" -> "drums"."""
+    items = [i for i in _LIST_SPLIT.split(items_text) if i.strip()]
+    keep = [i for i in items if not vocal_hits(i)]
+    if len(keep) == len(items):
+        return items_text + tail
+    return f"{' or '.join(keep)}{tail}" if keep else " "
+
+
+def _without_voices_denial(span: str) -> str:
+    m = _DENIAL_LEAD.match(span.strip())
+    if not m or not vocal_hits(span):
+        return span
+    rest = _without_voices(m.group(2), "", lead=True)
+    return f" {m.group(1)} {rest.strip()} " if rest.strip() else " "
 
 
 # ── claims ───────────────────────────────────────────────────────────────
@@ -157,13 +193,24 @@ _MORE_GENRES = re.compile(r"\b(?:raw[\s-])?(?:hardstyle|hard\s+dance|gabber|phon
                           r"hardcore\s+techno|big\s+room|dubstep|brostep)\b", re.IGNORECASE)
 
 
+# Sound sources the caption vocabulary does not list, as the instrument each one names: claims all the same.
+_SOURCES = {
+    "beat": r"beats?", "keys": r"keys", "low end": r"low[\s-]end", "lead": r"leads?", "reese": r"reese",
+    "wobble": r"wobbles?|wobbling", "electronics": r"electronics", "saw": r"saws?|sawtooth", "square wave": r"square\s+waves?",
+    "arpeggio": r"arps?", "hi-hat": r"hats", "synth": r"synthy", "sub bass": r"subs?",
+    "drum": r"drumming", "bleep": r"bleeps?|blips?",
+}
+_SOURCE_RE = [(name, re.compile(rf"(?<![\w-])(?:{rx})(?![\w-])", re.IGNORECASE)) for name, rx in _SOURCES.items()]
+
+
 def _claims(text: str) -> dict[str, set[str]]:
-    """Vocabulary hits by category, hyphens read both kept and split."""
+    """Vocabulary hits by category, hyphens read both kept and split; `_SOURCES` read as instruments."""
     out: dict[str, set[str]] = {}
     for variant in (text, text.replace("-", " ")):
         for cat, hits in extract_attributes(variant).items():
             out.setdefault(cat, set()).update(hits)
         out["genre"].update(" ".join(m.group(0).lower().split()) for m in _MORE_GENRES.finditer(variant))
+        out["instrument"].update(name for name, rx in _SOURCE_RE if rx.search(variant))
     out["genre"] = out.get("genre", set()) - _CHARACTER
     return out
 
@@ -174,14 +221,17 @@ def _singular(noun: str) -> str:
 
 # Naming a family names its members: "drums" asks for a kick and a snare, "strings" for a cello.
 _FAMILIES = {
-    "drum": {"drum", "drum kit", "kick", "kick drum", "snare", "snare drum", "hi-hat", "hihat", "cymbal",
+    "drum": {"drum", "beat", "drum kit", "kick", "kick drum", "snare", "snare drum", "hi-hat", "hihat", "cymbal",
              "ride cymbal", "crash cymbal", "tom", "percussion", "breakbeat", "drum machine", "drum loop",
              "808", "clap", "handclap", "shaker", "tambourine", "conga", "bongo"},
     "string": {"string", "string section", "violin", "viola", "cello", "double bass", "orchestral strings",
                "fiddle", "harp"},
     "brass": {"brass", "trumpet", "trombone", "horn", "french horn", "tuba"},
-    "synth": {"synth", "synthesizer", "synth pad", "pad", "synth lead", "lead synth", "synth bass", "arpeggio",
-              "arpeggiator", "modular synth", "analog synth"},
+    "keys": {"keys", "piano", "grand piano", "upright piano", "electric piano", "keyboard", "organ", "hammond organ",
+             "rhodes", "wurlitzer", "clavinet", "harpsichord"},
+    "bass": {"bass", "bass guitar", "sub bass", "sub-bass", "synth bass", "bassline", "low end", "reese", "wobble"},
+    "synth": {"synth", "synthesizer", "synth pad", "pad", "synth lead", "lead synth", "lead", "arpeggio",
+              "arpeggiator", "modular synth", "analog synth", "electronics", "saw", "square wave", "bleep"},
 }
 _FAMILIES["percussion"] = _FAMILIES["drum"]
 # Words, not vocabulary terms, that still play a denied kit: "hats", "a four on the floor".
@@ -240,21 +290,38 @@ def _denies(noun: str, denied: set[str]) -> bool:
 
 # A body that says the opposite of a mood the request asked for has changed the request.
 _OPPOSED = (
-    ({"sad", "melancholic", "melancholy", "mournful", "somber", "sombre", "gloomy", "wistful", "bleak"},
-     {"happy", "joyful", "cheerful", "upbeat", "uplifting", "euphoric", "playful", "bouncy", "sunny",
-      "celebratory", "triumphant"}),
+    ({"sad", "melancholic", "melancholy", "mournful", "somber", "sombre", "gloomy", "wistful", "bleak", "sorrowful",
+      "sorrow", "grief", "grieving", "forlorn", "despairing", "heartbroken", "doleful"},
+     {"happy", "joyful", "cheerful", "upbeat", "uplifting", "euphoric", "playful", "bouncy", "sunny", "celebratory",
+      "triumphant", "ecstatic", "jubilant", "merry", "lighthearted", "light-hearted", "blissful", "glee", "gleeful",
+      "sunshine", "carefree", "elated", "exuberant"}),
     ({"calm", "peaceful", "serene", "relaxed", "tranquil", "chill", "mellow", "gentle", "laid-back", "soft",
-      "quiet", "meditative"},
+      "quiet", "meditative", "placid", "still"},
      {"aggressive", "frantic", "chaotic", "intense", "urgent", "restless", "pounding", "harsh", "loud",
-      "relentless"}),
+      "relentless", "violent", "ferocious", "explosive", "furious", "stormy", "savage", "brutal"}),
     ({"tense", "anxious", "uneasy", "ominous", "menacing"}, {"relaxed", "calm", "peaceful", "serene", "laid-back"}),
-    ({"dark", "brooding"}, {"bright", "sunny", "cheerful"}),
-    ({"slow", "glacial"}, {"fast", "high-energy", "frantic", "upbeat"}),
+    ({"dark", "brooding"}, {"bright", "sunny", "cheerful", "luminous", "sparkling", "radiant", "glittering"}),
+    ({"slow", "glacial", "unhurried", "languid"}, {"fast", "high-energy", "frantic", "upbeat", "brisk", "rapid",
+                                                   "breakneck", "racing"}),
+    ({"triumphant", "celebratory", "victorious", "heroic", "glorious", "majestic"},
+     {"aggressive", "mechanical", "menacing", "sinister", "defeated", "bleak"}),
 )
+# Words a restatement may say for a request word; they count toward what it kept.
+_KIN_WORDS = {
+    "victory": {"triumphant", "victorious", "celebratory", "winning", "triumph"},
+    "night": {"nocturnal", "nighttime", "midnight", "night's"}, "rainy": {"rain", "rainfall", "rain-soaked"},
+    "stealth": {"stealthy", "covert", "sneaking", "furtive"}, "big": {"grand", "huge", "massive", "epic", "bold"},
+    "morning": {"dawn", "sunrise", "daybreak"}, "home": {"homecoming", "homeward"},
+    "happy": {"joyful", "cheerful"}, "sunny": {"bright", "sunlit"},
+}
+# A request word that names a mood without being one: its opposite is a changed request too.
+_IMPLIED_MOODS = {"victory": "triumphant", "victorious": "triumphant", "celebration": "celebratory",
+                  "party": "celebratory", "funeral": "mournful", "lullaby": "gentle", "rainy": "melancholic"}
 _MOOD_WORDS = {w for pair in _OPPOSED for side in pair for w in side} | set(MOOD_ADJECTIVES)
 
 
 def _moods(text: str) -> set[str]:
+    """The text's mood words (a hyphenated one whole too)."""
     words = set(_tokens(text)) | {m.group(0).lower() for m in re.finditer(r"\b\w+-\w+\b", _nfc(text))}
     return {w for w in words if w in _MOOD_WORDS}
 
@@ -310,7 +377,8 @@ _SENTENCE_START = re.compile(r"(?:^|[.!?:;]\s+|[\"“(]\s*)$")
 
 
 _ENGLISH_GLUE = frozenset("the a an and with of in for over to is its on by at from into under".split())
-_OTHER_GLUE = frozenset("der die das und mit ein eine für el la los las y con une le les et avec il di con".split())
+_OTHER_GLUE = frozenset("""der die das und mit ein eine für im el la los las y con una uno para por une le les et avec
+pour du des il di de""".split())
 
 
 def _english(text: str) -> bool:
@@ -320,16 +388,40 @@ def _english(text: str) -> bool:
     return english >= 2 and english > sum(w in _OTHER_GLUE for w in words)
 
 
+def _reads_english(text: str) -> bool:
+    """A request reads as English unless another language's function words outnumber English ones or its
+    letters are not plain ASCII; short requests ("sad solo piano") have none of either."""
+    words = _tokens(text)
+    letters = [c for c in _nfc(text) if c.isalpha()]
+    plain = not letters or sum(c.isascii() for c in letters) / len(letters) >= 0.97
+    return plain and sum(w in _OTHER_GLUE for w in words) <= sum(w in _ENGLISH_GLUE for w in words)
+
+
+# Common images a simile reaches for; any other word after "like" may be a name.
+_IMAGERY = frozenset("""rain tide tides wave waves wind breath breathing water light smoke glass fog mist dust star stars
+snow ice fire thunder cloud clouds dream dreams ghost ghosts heartbeat clockwork machine machines rust silk velvet
+honey sunlight moonlight shadow shadows ocean sea storm storms river rivers memory memories echo echoes whisper
+lullaby hymn prayer march heartbeat pulse candle candles drizzle bells""".split())
+# A sentence that opens on a name usually says what that person would do: "Burial would make this".
+_LEADING_NAME = re.compile(r"(?:^|[.!?]\s+)([A-Z][\w'’-]+)\s+(?:would|could|might|will|meets|does|did|made|makes|"
+                           r"wrote|writes|produced|produces|says|said|approves?)\b")
+
+
 def _names(text: str, known: set[str]) -> list[str]:
+    """Likely names: capitals mid-sentence in English, a sentence opened by one doing something, and the
+    word after "like" when it is capitalised or neither known nor a common image."""
     out = []
     if _english(text):
         for m in _WORD.finditer(text):
             word = m.group(0)
             if word[:1].isupper() and not _SENTENCE_START.search(text[:m.start()]) and word.lower() not in known:
                 out.append(word)
+        out += [m.group(1) for m in _LEADING_NAME.finditer(text) if m.group(1).lower() not in known]
     for m in _SIMILE.finditer(text):
-        if m.group(1).lower().strip("'’") not in known:
-            out.append(m.group(1))
+        word = m.group(1).strip("'’")
+        lower = word.lower()
+        if word[:1].isupper() or (lower not in known and lower not in _IMAGERY and _singular(lower) not in _IMAGERY):
+            out.append(word)
     return out
 
 
@@ -401,14 +493,50 @@ def extract_answer(raw: str) -> str:
 
 def _rendered(request: str, parsed: dict) -> tuple[str, str | None]:
     """The English request the checks read, and the language it was translated from (None for English).
-    A rendering that shares most of the request's words was English already, whatever the model says."""
+    A request that reads as English is checked as written, whatever language the model claims."""
     language, english = parsed.get("language"), parsed.get("english_request")
-    if not english or not language or language.strip().lower().startswith("english"):
+    if (not english or not language or language.strip().lower().startswith("english")
+            or _reads_english(request)):
         return request, None
     asked = set(tokens(request))
     if asked and len(asked & set(tokens(english))) / len(asked) >= 0.5:
         return request, None
     return english, language.strip()
+
+
+def _fold(word: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", word.lower()) if not unicodedata.combining(c))
+
+
+def _cognate(a: str, b: str) -> bool:
+    """Spelled alike across languages: "guitarra" and "guitar", "violín" and "violin", "piano" and "piano"."""
+    a, b = _fold(a), _fold(b)
+    if a == b:
+        return True
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n >= 5 or (n >= 4 and n >= min(len(a), len(b)) - 1)
+
+
+_VOCAB_WORDS = sorted({w for t in (*INSTRUMENTS, *GENRES, *VOCAL_TERMS) for w in _tokens(t) if len(w) >= 4})
+
+
+def _rendering_reasons(request: str, english: str) -> list[str]:
+    """Why an English rendering of a foreign request cannot be read for it: a claim noun the original has no
+    cognate for, or a cognate of a vocabulary noun in the original that the rendering lost."""
+    words = [w for w in _tokens(request) if len(w) >= 4]
+    claims = {n for cat in _NAMING for n in _claims(english).get(cat, set())}
+    reasons = [f"rendering_adds:{n}" for n in sorted(claims)
+               if not any(_cognate(w, part) for w in words for part in n.split())]
+    rendered = set(_tokens(english))
+    for w in words:
+        kin = [v for v in _VOCAB_WORDS if _cognate(w, v)]
+        if kin and not any(_cognate(k, r) for k in kin for r in rendered):
+            reasons.append(f"rendering_drops:{w}")
+    return reasons
 
 
 # ── the checks ───────────────────────────────────────────────────────────
@@ -445,9 +573,10 @@ def _asked_words(request: str) -> list[str]:
 
 
 def _with_kin(request: str, body: str) -> str:
-    """The body with each request mood it says in a kindred word appended, so the share counts it kept."""
+    """The body with each request word it says in a kindred word appended, so the share counts it kept."""
     said = set(_tokens(body))
     extra = [m for m in _moods(request) if m not in said and _kin(m) & said]
+    extra += [w for w in _tokens(request) if w not in said and w in _KIN_WORDS and _KIN_WORDS[w] & said]
     return f"{body} {' '.join(extra)}" if extra else body
 
 
@@ -503,11 +632,15 @@ def lint_translation(request: str, output: str, *, instrumental: bool,
     for noun in sorted(named):
         if any(_denies(noun, {n}) for cat in _NAMING for n in negated.get(cat, set())):
             reasons.append(f"negated_request:{noun}")
+    new = {_singular(w) for w in _tokens(body) if len(w) >= 3} - {_singular(w) for w in _tokens(request)} - _ENGLISH_GLUE
+    if len(new) < MIN_NEW_WORDS:
+        reasons.append(f"repeats_request:{len(new)}_new_words")
     body_words = set(_tokens(said_text)) | _moods(said_text)
-    for mood in sorted(_moods(asked_text)):
-        if not ({mood, _singular(mood)} | _kin(mood)) & body_words:
+    implied = {_IMPLIED_MOODS[w] for w in _tokens(asked_text) if w in _IMPLIED_MOODS}
+    for mood in sorted(_moods(asked_text) | implied):
+        if mood not in implied and not ({mood, _singular(mood)} | _kin(mood)) & body_words:
             reasons.append(f"mood_dropped:{mood}")
-        flipped = sorted(_opposites(mood) & _moods(said_text))
+        flipped = sorted((_opposites(mood) - _kin(mood)) & _moods(said_text))
         if flipped:
             reasons.append(f"mood_opposite:{mood}->{flipped[0]}")
     theory = _THEORY.search(text)
@@ -578,11 +711,15 @@ def translate(request: str, shots: list[str] | Callable[[int], list[str]], *, in
             if not n:
                 raise exc if isinstance(exc, TranslatorUnavailable) else \
                     TranslatorUnavailable(f"{type(exc).__name__}: {exc}") from exc
-            rejects.append({"by": _label(llm, label), "attempt": n + 1, "reasons": [f"unavailable:{exc}"[:200]]})
+            rejects.append({"by": _label(llm, label), "attempt": n + 1, "reasons": [f"unavailable:{exc}"[:200]],
+                            "error": True})
             break
         parsed = parse_answer(raw)
         english, language = _rendered(request, parsed)
         text, reasons = lint_translation(english, parsed["caption"], instrumental=instrumental, pool=pool)
+        if language:
+            more = _rendering_reasons(request, english)
+            text, reasons = (None, more + reasons) if more else (text, reasons)
         if text is not None:
             return {"caption": text, "attempts": n + 1, "rejects": rejects, "label": _label(llm, label),
                     "translated_from": language, "english_request": english if language else None}
@@ -597,9 +734,12 @@ _EMPTY_HARVEST = {"bpm": None, "keyscale": None, "timesignature": None, "duratio
 
 
 def request_fallback(request: str, attempts: int, rejects: list[dict]) -> dict:
-    """The listener's own words as the caption, said so: never an invented caption."""
+    """The listener's own words as the caption, said so: never an invented caption. When no model wrote
+    anything at all the note says they were busy, not that the request could not be kept."""
+    wrote = any(not r.get("error") for r in rejects)
     return {**_EMPTY_HARVEST, "caption": " ".join(str(request).split()), "translator": "request",
-            "fallback": "request", "fallback_note": FALLBACK_NOTE, "attempts": attempts, "rejects": rejects,
+            "fallback": "request", "fallback_note": FALLBACK_NOTE if wrote else BUSY_NOTE,
+            "attempts": attempts, "rejects": rejects,
             "translated_from": None, "translated_note": None, "lyrics_note": None}
 
 
@@ -620,7 +760,7 @@ def expand_checked(request: str, *, instrumental: bool, attempt: int, pool: Iter
                             llm=translator, label=translator_label, deadline=deadline)
         except TranslatorUnavailable as exc:
             rejects.append({"by": _label(translator, translator_label), "attempt": 1,
-                            "reasons": [f"unavailable:{exc}"[:200]]})
+                            "reasons": [f"unavailable:{exc}"[:200]], "error": True})
         else:
             attempts, rejects = out["attempts"], out["rejects"]
             if out["caption"] is None:
@@ -634,13 +774,14 @@ def expand_checked(request: str, *, instrumental: bool, attempt: int, pool: Iter
     if lm is not None:
         for n in range(MAX_ATTEMPTS):
             if n and time.monotonic() >= deadline:
-                rejects.append({"by": "lm", "attempt": n + 1, "reasons": ["no time left"]})
+                rejects.append({"by": "lm", "attempt": n + 1, "reasons": ["no time left"], "error": True})
                 break
             attempts += 1
             try:
                 result = dict(lm(attempt + n))
             except Exception as exc:  # noqa: BLE001 — a failing or busy LM is a refusal, never a 500
-                rejects.append({"by": "lm", "attempt": n + 1, "reasons": [f"{type(exc).__name__}: {exc}"[:200]]})
+                rejects.append({"by": "lm", "attempt": n + 1, "reasons": [f"{type(exc).__name__}: {exc}"[:200]],
+                                "error": True})
                 continue
             reasons = check_caption(request, result.get("caption") or "", instrumental=instrumental)
             if not reasons:
