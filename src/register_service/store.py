@@ -339,10 +339,15 @@ class Store:
                     raise KeyError("no record is registered under that record_sha256")
                 if row["state"] == "withdrawn":
                     raise ValueError("that record is withdrawn; it is not admitted again")
-                if self.log.standing_admits(row["record_sha256"]):
+                states = self.log.admit_states(row["record_sha256"])
+                if "unresolved" in states.values():
+                    raise ValueError('that record waits on a loss from a recovery; answer it with {"kind":"confirm","answers":'
+                                     '<lost leaf>,"confirms":<admit leaf>,"sitting":...}, or strike it, rather than admit it again')
+                if "standing" in states.values():
                     raise ValueError("that record already has an admit no revoke has struck")
                 out = self.log.admit_locked(row["serial"], row["record_sha256"], json.loads(row["counter_json"]),
-                                            wardens=entry.get("wardens"), sitting=entry.get("sitting") or "", appended_by=key_id)
+                                            wardens=entry.get("wardens"), sitting=entry.get("sitting") or "", appended_by=key_id,
+                                            pending_lost=self.log.open_lost_global() or None)
             elif kind == "revoke":
                 out = self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"), wardens=entry.get("wardens"),
                                              sitting=entry.get("sitting") or "", appended_by=key_id)

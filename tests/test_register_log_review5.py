@@ -126,3 +126,27 @@ def test_reservations_live_in_the_log_and_survive_a_second_restore_from_an_older
     assert c3.publish(_signed(k3, run_id="run_8"))["serial"] not in again
     c1._post = _Transport(TestClient(app5), k1)
     assert c1.publish(s2, first["countersignature"])["serial"] == first["serial"]
+
+
+def test_a_warden_admit_cannot_make_an_unresolved_record_standing(register, tmp_path):
+    """A plain admit is refused while the record waits on a loss, naming the confirm to use; it never skips the answer."""
+    app3, cfg, backup, s2, first, (k1, c1), _, warden = _struck_then_lost(register, tmp_path)
+    store = app3.state.store
+    s1_sha = store.db.execute("SELECT record_sha256 FROM records ORDER BY serial LIMIT 1").fetchone()["record_sha256"]
+    assert store.log.admit_states(s1_sha) and "unresolved" in store.log.admit_states(s1_sha).values()
+    with pytest.raises(R.RegisterError) as e:
+        warden.log_append({"kind": "admit", "record_sha256": s1_sha, "sitting": "S3"})
+    assert e.value.status == 422 and '"kind":"confirm","answers"' in str(e.value).replace("\\", "")
+    assert store.log.standing_admits(s1_sha) == []
+
+
+def test_every_warden_admit_waits_on_the_losses_still_open(register, tmp_path):
+    app3, cfg, backup, s2, first, (k1, c1), _, warden = _struck_then_lost(register, tmp_path)
+    store = app3.state.store
+    s1_sha = store.db.execute("SELECT record_sha256 FROM records ORDER BY serial LIMIT 1").fetchone()["record_sha256"]
+    admit = store.log.admit_leaf_of(s1_sha)
+    warden.log_append({"kind": "revoke", "revokes": admit, "reason": "re-examined", "sitting": "S3"})
+    out = warden.log_append({"kind": "admit", "record_sha256": s1_sha, "sitting": "S4"})
+    entry = store.log.entries(out["index"], out["index"] + 1)[0]["entry"]
+    assert entry["pending_lost"] == store.log.open_lost_global() != []
+    assert store.log.standing_admits(s1_sha) == []
