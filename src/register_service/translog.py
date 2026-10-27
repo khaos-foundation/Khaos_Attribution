@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS log_bodies (leaf_hash TEXT PRIMARY KEY, body BLOB NOT
 CREATE TABLE IF NOT EXISTS log_nodes (level INTEGER NOT NULL, idx INTEGER NOT NULL, hash BLOB NOT NULL, PRIMARY KEY (level, idx));
 CREATE TABLE IF NOT EXISTS log_heads (id INTEGER PRIMARY KEY, tree_size INTEGER UNIQUE NOT NULL, root_sha256 TEXT NOT NULL,
   timestamp TEXT NOT NULL, key_id TEXT NOT NULL, signature TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS log_reserved (serial INTEGER PRIMARY KEY, reason TEXT NOT NULL, reserved_at TEXT NOT NULL,
+  returned_at TEXT, returned_to TEXT);
 CREATE TABLE IF NOT EXISTS log_keys (key_id TEXT PRIMARY KEY, public_pem TEXT NOT NULL, first_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS log_anchors (tree_size INTEGER PRIMARY KEY, root_sha256 TEXT NOT NULL, backend TEXT NOT NULL,
   stamped_at TEXT NOT NULL, receipt BLOB NOT NULL, state TEXT NOT NULL, completed_at TEXT);
@@ -167,20 +169,34 @@ class TransLog:
                                          "time": entry.get("time"), "reason_withheld": body is None})
         return out
 
+    def _lost_and_answers(self) -> tuple:
+        """(lost leaves as idx -> hash, confirms as (idx, answers, confirms-or-None))."""
+        lost = {r["idx"]: r["leaf_hash"] for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'unavailable'")}
+        answers = []
+        for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'confirm'").fetchall():
+            row = self.db.execute("SELECT body FROM log_bodies WHERE leaf_hash = ?", (r["leaf_hash"],)).fetchone()
+            body = json.loads(bytes(row["body"])) if row and row["body"] else {}
+            answers.append((r["idx"], body.get("answers"), body.get("confirms")))
+        return lost, answers
+
+    def open_lost(self, admit_idx: int, admit_leaf: str, lost=None, answers=None) -> list:
+        """The lost leaves after this admit that no confirm has answered for it (one naming no admit answers for all)."""
+        if lost is None:
+            lost, answers = self._lost_and_answers()
+        return [h for i, h in sorted(lost.items()) if i > admit_idx and not any(
+            c_idx > i and ans == h and conf in (None, admit_leaf) for c_idx, ans, conf in answers)]
+
     def admit_states(self, record_sha256: str) -> dict:
         """Each admit leaf of the record: struck (a revoke names it), unresolved (an entry after it was lost in a
-        recovery and no warden has confirmed it since), or standing."""
-        lost = [r["idx"] for r in self.db.execute("SELECT idx FROM log_leaves WHERE kind = 'unavailable' ORDER BY idx")]
+        recovery and no warden has answered that loss), or standing."""
+        lost, answers = self._lost_and_answers()
         out = {}
         for a in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx",
                                  (record_sha256,)).fetchall():
             if self.db.execute("SELECT 1 FROM log_leaves WHERE kind = 'revoke' AND refers = ?", (a["leaf_hash"],)).fetchone():
                 out[a["leaf_hash"]] = "struck"
                 continue
-            last_lost = max((i for i in lost if i > a["idx"]), default=None)
-            confirmed = last_lost is not None and self.db.execute(
-                "SELECT 1 FROM log_leaves WHERE kind = 'confirm' AND refers = ? AND idx > ?", (a["leaf_hash"], last_lost)).fetchone()
-            out[a["leaf_hash"]] = "unresolved" if last_lost is not None and not confirmed else "standing"
+            out[a["leaf_hash"]] = "unresolved" if self.open_lost(a["idx"], a["leaf_hash"], lost, answers) else "standing"
         return out
 
     def standing_admits(self, record_sha256: str) -> list:
@@ -221,7 +237,7 @@ class TransLog:
         index = self.size()
         self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind, serial, record_sha256, refers) VALUES (?, ?, ?, ?, ?, ?)",
                         (index, leaf.hex(), entry["kind"], entry.get("serial"), entry.get("record_sha256"),
-                         entry.get("withholds") or entry.get("revokes") or entry.get("confirms")))
+                         entry.get("withholds") or entry.get("revokes") or entry.get("answers")))
         self.db.execute("INSERT INTO log_bodies (leaf_hash, body) VALUES (?, ?)", (leaf.hex(), body))
         level, i, h = 0, index, leaf
         self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
@@ -290,11 +306,28 @@ class TransLog:
         return row["public_pem"] if row else None
 
     def admit_locked(self, serial: int, record_sha256: str, counter: dict, time: str | None = None, wardens=None,
-                     sitting=None, appended_by: str | None = None) -> dict:
+                     sitting=None, appended_by: str | None = None, restores: dict | None = None) -> dict:
         ref = {k: counter[k] for k in ("register_key_id", "register_signature", "countersigned_at_utc")}
         return self.append_locked(T.make_entry("admit", time=time, serial=int(serial), record_sha256=record_sha256,
                                                countersignature=ref, wardens=_names(wardens), sitting=_text(sitting, "sitting", False),
-                                               appended_by=appended_by))
+                                               appended_by=appended_by, restores=restores))
+
+    def reserve_locked(self, count: int, reason: str) -> list:
+        """`count` serials above every one this register knows, held back for records a recovery could not see."""
+        top = max(int(self.db.execute("SELECT MAX(serial) AS m FROM records").fetchone()["m"] or 0), self.max_serial(),
+                  int(self.db.execute("SELECT MAX(serial) AS m FROM log_reserved").fetchone()["m"] or 0))
+        from khaos_attribution.registry import FIRST_SERIAL  # noqa: PLC0415
+        start = max(top + 1, FIRST_SERIAL)
+        out = list(range(start, start + count))
+        for serial in out:
+            self.db.execute("INSERT INTO log_reserved (serial, reason, reserved_at) VALUES (?, ?, ?)", (serial, reason, T.now_rfc3339()))
+        return out
+
+    def reserved(self) -> list:
+        return [r["serial"] for r in self.db.execute("SELECT serial FROM log_reserved WHERE returned_at IS NULL ORDER BY serial")]
+
+    def max_reserved(self) -> int:
+        return int(self.db.execute("SELECT MAX(serial) AS m FROM log_reserved").fetchone()["m"] or 0)
 
     def revoke_locked(self, leaf_hex: str, reason: str, time: str | None = None, wardens=None, sitting=None,
                       appended_by: str | None = None) -> dict:
@@ -309,14 +342,21 @@ class TransLog:
                                                wardens=_names(wardens), sitting=_text(sitting, "sitting", False),
                                                appended_by=appended_by))
 
-    def confirm_locked(self, leaf_hex: str, wardens=None, sitting=None, appended_by: str | None = None) -> dict:
-        """The wardens' answer that an admit stands after a recovery lost an entry behind it."""
-        leaf = self.leaf(leaf_hex)
-        if leaf is None or leaf["kind"] != "admit":
-            raise EntryRefused("a confirm names an admitted entry's leaf hash")
-        return self.append_locked(T.make_entry("confirm", confirms=leaf_hex, serial=leaf["serial"], record_sha256=leaf["record_sha256"],
-                                               wardens=_names(wardens), sitting=_text(sitting, "sitting", True),
-                                               appended_by=appended_by))
+    def confirm_locked(self, answers: str, confirms: str | None = None, wardens=None, sitting=None,
+                       appended_by: str | None = None) -> dict:
+        """The wardens' answer to a lost leaf: nothing it held strikes the admits before it (or only `confirms`)."""
+        lost = self.leaf(answers)
+        if lost is None or lost["kind"] != "unavailable":
+            raise EntryRefused("a confirm names the lost leaf it answers")
+        sitting = _text(sitting, "sitting", True)
+        fields = {}
+        if confirms is not None:
+            admit = self.leaf(confirms)
+            if admit is None or admit["kind"] != "admit" or answers not in self.open_lost(admit["idx"], confirms):
+                raise EntryRefused("that admit is not left unresolved by that lost leaf")
+            fields = {"confirms": confirms, "serial": admit["serial"], "record_sha256": admit["record_sha256"]}
+        return self.append_locked(T.make_entry("confirm", answers=answers, wardens=_names(wardens), sitting=sitting,
+                                               appended_by=appended_by, **fields))
 
     def withhold_locked(self, leaf_hex: str, reason: str, wardens=None, sitting=None, appended_by: str | None = None) -> dict:
         """The body leaves public view; the leaf, every proof and every head stay as they were. Withholding a revoke
@@ -522,6 +562,11 @@ def recover(store, places: list, public_pem: str) -> tuple:
                 log.append_locked(T.make_entry("withhold", withholds=r["leaf_hash"], lost=True,
                                                reason="the body was lost in a restore before it was published"))
                 lines.append(f"leaf {r['leaf_hash']} is now marked as lost by a withhold entry")
+            if missing:
+                # A lost leaf may have been an admit holding the next serial; its kind is unknown, so each one holds one.
+                held = log.reserve_locked(len(missing), "a recovery lost entries whose kind is unknown")
+                lines.append(f"serials {held[0]} to {held[-1]} are reserved for records whose admit may be among the lost "
+                             "entries; each returns to the record that presents this register's countersignature for it")
     except T.LogError as e:
         log.blocked = log.blocked or "recovery failed"
         return False, [f"INCIDENT: {e}"]

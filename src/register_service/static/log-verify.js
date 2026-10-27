@@ -198,16 +198,17 @@
     return null;
   }
 
-  // An entry lost in a recovery after this one, with no later confirm of this one, leaves its strike unknown.
+  // An entry lost in a recovery after this one leaves its strike unknown until a later confirm answers that loss,
+  // for every admit (naming none) or for this one.
   function lostAfter(log, index) {
     const leaf = log.leaves[index];
-    let unknown = false;
     for (let i = index + 1; i < log.leaves.length; i++) {
-      const e = log.entries[i];
-      if (log.lost[log.leaves[i]]) unknown = true;
-      else if (e && e.kind === "confirm" && e.confirms === leaf) unknown = false;
+      if (!log.lost[log.leaves[i]]) continue;
+      const answered = log.entries.slice(i + 1).some((e) => e && e.kind === "confirm" && e.answers === log.leaves[i] &&
+        (e.confirms === undefined || e.confirms === null || e.confirms === leaf));
+      if (!answered) return true;
     }
-    return unknown;
+    return false;
   }
 
   function show(lines) {

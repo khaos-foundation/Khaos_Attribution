@@ -422,8 +422,9 @@ class RegisterClient:
         return self._post("/api/enrol", {"invite": invite, "machine_name": machine_name,
                                          "public_key_pem": self.key.public_pem(), "nonce": secrets.token_hex(8)})
 
-    def publish(self, signed: dict) -> dict:
-        return self._post("/api/records", signed)
+    def publish(self, signed: dict, countersignature: dict | None = None) -> dict:
+        """With the register's countersignature from an earlier answer, a record lost in a recovery gets its serial back."""
+        return self._post("/api/records", {**signed, "countersignature": countersignature} if countersignature else signed)
 
     def withdraw(self, serial: int, reason: str, nonce: str | None = None) -> dict:
         """An outbox entry carries its nonce from the day it was written, so a retry is the same body, not a replay."""

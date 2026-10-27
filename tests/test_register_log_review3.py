@@ -64,26 +64,35 @@ def test_a_strike_lost_in_recovery_is_never_a_clean_proof(register, tmp_path, ca
     assert page[0].startswith("ok|Proved") and any("lost in a recovery; whether it struck this model is unknown" in x for x in page)
 
 
-def test_the_register_does_not_serve_an_unresolved_model_until_a_warden_answers(register, tmp_path, capsys):
+def _lost_leaf(store):
+    return store.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'unavailable'").fetchone()["leaf_hash"]
+
+
+def test_an_unresolved_model_is_under_review_until_a_warden_answers_the_lost_leaf(register, tmp_path, capsys):
+    """Unresolved is its own list, never withdrawn; a confirm names the lost leaf it answers and needs a sitting."""
     app, cfg, st, signed, serial, leaf, warden = _lose_a_strike(register, tmp_path)
     app2 = create_app(cfg)
     http = TestClient(app2)
-    assert st.log.standing_admits(signed["record_sha256"]) == []
-    assert serial in http.get("/api/withdrawn").json()["withdrawn"]
-    assert serial in http.get("/api/withdrawn").json()["unresolved"]
-    assert "unresolved" in http.get(f"/models/{serial}").text
+    store = app2.state.store
+    lost = _lost_leaf(store)
+    assert store.log.standing_admits(signed["record_sha256"]) == []
+    listed = http.get("/api/withdrawn").json()
+    assert serial in listed["unresolved"] and serial not in listed["withdrawn"]
+    assert "under review" in http.get(f"/models/{serial}").text
     warden._post = _Transport(http, warden.key)
     with pytest.raises(R.RegisterError) as e:
-        warden.log_append({"kind": "confirm", "confirms": leaf})
+        warden.log_append({"kind": "confirm", "answers": lost})
     assert e.value.status == 422, "a confirmation names its sitting"
-    workshop_key, workshop = _machine((app2, app2.state.store, http), "artist-one")
     with pytest.raises(R.RegisterError) as e:
-        workshop.log_append({"kind": "confirm", "confirms": leaf, "sitting": "S10"})
+        warden.log_append({"kind": "confirm", "confirms": leaf, "sitting": "S10"})
+    assert e.value.status == 422, "a confirmation names the lost leaf it answers"
+    workshop_key, workshop = _machine((app2, store, http), "artist-one")
+    with pytest.raises(R.RegisterError) as e:
+        workshop.log_append({"kind": "confirm", "answers": lost, "sitting": "S10"})
     assert e.value.status == 403
-    warden.log_append({"kind": "confirm", "confirms": leaf, "sitting": "S10"})
-    store = app2.state.store
+    warden.log_append({"kind": "confirm", "answers": lost, "sitting": "S10"})
     assert store.log.standing_admits(signed["record_sha256"]) == [leaf]
-    assert serial not in http.get("/api/withdrawn").json()["withdrawn"]
+    assert serial not in http.get("/api/withdrawn").json()["unresolved"]
     rc, out = _vrun(leaf, cfg["data"] / "mirror", store.log.signer.public_pem(), tmp_path, capsys)
     assert rc == V.PROVED, out
 

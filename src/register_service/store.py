@@ -166,11 +166,12 @@ class Store:
     def _next_serial(self) -> int:
         row = self.db.execute("SELECT MAX(serial) AS m FROM records").fetchone()
         # A serial the log already admitted is taken even when its row was lost to a restore.
-        return max(FIRST_SERIAL, (row["m"] or 0) + 1, self.log.max_serial() + 1)
+        return max(FIRST_SERIAL, (row["m"] or 0) + 1, self.log.max_serial() + 1, self.log.max_reserved() + 1)
 
-    def register(self, signed: dict, machine_key_id: str, account_id: int, countersign) -> tuple:
+    def register(self, signed: dict, machine_key_id: str, account_id: int, countersign, presented: dict | None = None) -> tuple:
         """The next serial, the countersignature and the row, as one transaction: (serial, counter, already).
-        `countersign(serial, at)` signs; a record the log already admits keeps that admit's serial and time."""
+        `countersign(serial, at)` signs; a record the log already admits keeps that admit's serial and time, and one
+        presenting a valid countersignature (`presented`, checked by the caller) for a reserved serial gets it back."""
         with self._tx():
             have = self.db.execute("SELECT serial, counter_json FROM records WHERE record_sha256 = ?",
                                    (signed["record_sha256"],)).fetchone()
@@ -181,8 +182,17 @@ class Store:
             admitted = self.log.admitted(signed["record_sha256"])
             if admitted is not None:
                 return self._register_admitted(signed, machine_key_id, account_id, countersign, admitted)
-            serial = self._next_serial()
-            counter = countersign(serial, None)
+            restores = None
+            if presented is not None and int(presented["serial"]) in self.log.reserved():
+                serial = int(presented["serial"])
+                counter = countersign(serial, presented["countersigned_at_utc"])
+                self.db.execute("UPDATE log_reserved SET returned_at = ?, returned_to = ? WHERE serial = ?",
+                                (now_utc(), signed["record_sha256"], serial))
+                restores = {"serial": serial, "countersigned_at_utc": presented["countersigned_at_utc"],
+                            "linked_by": "countersigned serial"}
+            else:
+                serial = self._next_serial()
+                counter = countersign(serial, None)
             self.db.execute(
                 "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
                 " published_at, payload) VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?)",
@@ -190,7 +200,7 @@ class Store:
                  json.dumps(counter, sort_keys=True), counter["countersigned_at_utc"], _payload_of(signed)))
             self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
                          {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"]})
-            self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"])
+            self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"], restores=restores)
             return serial, counter, False
 
     def _register_admitted(self, signed: dict, machine_key_id: str, account_id: int, countersign, admitted: dict) -> tuple:
@@ -265,6 +275,9 @@ class Store:
         return [r["serial"] for r in self.db.execute(
             "SELECT serial FROM records WHERE payload = ? AND state != 'withdrawn' ORDER BY serial", (int(payload),))]
 
+    def reserved_serials(self) -> list:
+        return self.log.reserved()
+
     def unresolved_serials(self) -> list:
         """Registered models the log holds unresolved after a recovery: not served until a warden answers."""
         shas = self.log.unresolved_records()
@@ -318,7 +331,7 @@ class Store:
                 out = self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"), wardens=entry.get("wardens"),
                                              sitting=entry.get("sitting") or "", appended_by=key_id)
             elif kind == "confirm":
-                out = self.log.confirm_locked(str(entry.get("confirms") or ""), wardens=entry.get("wardens"),
+                out = self.log.confirm_locked(str(entry.get("answers") or ""), entry.get("confirms"), wardens=entry.get("wardens"),
                                               sitting=entry.get("sitting") or "", appended_by=key_id)
             elif kind == "withhold":
                 out = self.log.withhold_locked(str(entry.get("withholds") or ""), entry.get("reason"), wardens=entry.get("wardens"),

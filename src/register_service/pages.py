@@ -179,7 +179,7 @@ def table(cols: str, headers: list, rows: list) -> str:
 
 
 def state_chip(state: str) -> str:
-    kind = {"registered": "good", "withdrawn": "failed", "unresolved": "failed"}.get(state, "")
+    kind = {"registered": "good", "withdrawn": "failed", "under review": "failed"}.get(state, "")
     return f'<span class="stage-chip {kind}">{esc(state)}</span>'
 
 

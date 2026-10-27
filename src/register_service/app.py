@@ -311,6 +311,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.post("/api/records")
     async def records(request: Request):
         signed, machine, key_id, pem = await signed_body(request)
+        presented = signed.pop("countersignature", None)
         problems = R.signed_problems(signed, pem)
         if problems:
             raise HTTPException(422, "; ".join(problems))
@@ -320,8 +321,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(422, "; ".join(problems))
         if record["model"]["machine_key_id"] != key_id:
             raise HTTPException(422, "the record names another machine as its maker")
+        # A countersignature this register made, presented again after a recovery, gets its reserved serial back.
+        if not (isinstance(presented, dict) and R.countersignature_valid(presented, signed["record_sha256"], key.public_pem())):
+            presented = None
         serial, counter, already = store.register(signed, key_id, machine["account_id"],
-                                                  lambda n, at: R.countersign(signed, n, key, at or now_utc()))
+                                                  lambda n, at: R.countersign(signed, n, key, at or now_utc()), presented)
         if not already:
             mirror_quietly(serial)
         return {"serial": serial, "countersignature": counter, "already": already,
@@ -374,9 +378,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             rec = store.record(serial_of(body))
             if rec and rec["state"] == "withdrawn" and state == "serving":
                 raise HTTPException(410, "the model is withdrawn; a Space does not serve it")
-            if rec and state == "serving" and rec["serial"] in store.unresolved_serials():
-                raise HTTPException(410, "the model is unresolved in the log after a recovery; a Space does not serve it until "
-                                         "the wardens answer")
+            review = bool(rec and state == "serving" and rec["serial"] in store.unresolved_serials())
             try:
                 out = store.served(serial_of(body), key_id, str(body.get("space_url", ""))[:200], state)
             except KeyError as e:
@@ -384,8 +386,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             except PermissionError as e:
                 raise HTTPException(403, str(e)) from None
             mirror_quietly(out["serial"])
-            return out
-        return await run_in_threadpool(once, body, key_id, work)
+            return {**out, "under_review": True} if review else out
+        answer = await run_in_threadpool(once, body, key_id, work)
+        # Under review is not withdrawn: the report is taken, and the Space shows the model as under review.
+        return JSONResponse(answer, status_code=202) if answer.get("under_review") else answer
 
 
     @app.post("/api/outputs")
@@ -571,9 +575,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/withdrawn")
     def withdrawn():
-        """Every model a Space must not serve: withdrawn, and unresolved after a recovery lost an entry behind it."""
-        unresolved = store.unresolved_serials()
-        return {"withdrawn": sorted(set(store.withdrawn_serials()) | set(unresolved)), "unresolved": unresolved}
+        """`withdrawn`: models a Space must not serve. `unresolved`: models under review because a recovery lost an entry
+        after their admission and the wardens have not answered it; a Space keeps them and shows them as under review."""
+        return {"withdrawn": store.withdrawn_serials(), "unresolved": store.unresolved_serials()}
 
     @app.get("/api/ledger")
     def ledger(since: int = 0):
@@ -593,14 +597,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         m, ts = r["model"], r["training_set"]
         tracks = ts.get("tracks") or []
         unresolved = serial in store.unresolved_serials()
-        facts = [P.state_chip("unresolved" if unresolved and rec["state"] != "withdrawn" else rec["state"]),
+        facts = [P.state_chip("under review" if unresolved and rec["state"] != "withdrawn" else rec["state"]),
                  f"registered {P.esc(P.day(rec['published_at']))}", P.esc(m["base_model"]),
                  P.count(len(tracks) or ts.get("track_count", 0), "track")]
         note = ("What the artist's Workshop attested, bound to hashes the artist's own machine can reproduce. The register cannot "
                 "see the audio and does not verify the claim; it makes it checkable.")
         if unresolved:
-            note = ("Unresolved: an entry after this model's admission was lost when the register was recovered, and the wardens "
-                    "have not yet confirmed or struck it. It is not served meanwhile. ") + note
+            note = ("Under review: an entry after this model's admission was lost when the register was recovered, and the wardens "
+                    "have not yet answered it. Until they confirm it or strike it, whether it was struck is unknown. ") + note
         body = P.hero(f"Register No. {serial}", r["artist_name"], note, facts, P.seal_for(serial, rec["signed"]["record"]))
         engine_id = f" <span class=\"mono\">{P.esc(m['base_model_id'])}</span>" if m.get("base_model_id") else ""
         kv = [("Base model", f"{P.esc(m['base_model'])}{engine_id} <span class=\"muted\">· {P.esc(m['base_model_licence'])} licence</span>"),
