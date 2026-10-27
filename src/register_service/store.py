@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from khaos_attribution.registry import FIRST_SERIAL, canonical_bytes, sha256_hex
+from register_service.translog import TransLog
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL);
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 """
 
 
-ROLES = ("workshop", "space")
+ROLES = ("workshop", "space", "warden")
 
 
 def _payload_of(signed: dict) -> int:
@@ -54,6 +55,7 @@ class Store:
         self.db.executescript(SCHEMA)
         self._ledger_status = None
         self._add_payload_column()
+        self.log = TransLog(self)
 
     def _add_payload_column(self) -> None:
         """The watermark bucket as its own indexed column, so a bucket lookup never parses every record."""
@@ -102,7 +104,8 @@ class Store:
             return cur.lastrowid
 
     def create_invite(self, account_name: str, role: str = "workshop") -> str:
-        """An invite fixes the role the machine will have: a Workshop publishes and withdraws; a Space reports serving."""
+        """An invite fixes the role the machine will have: a Workshop publishes and withdraws; a Space reports serving;
+        a warden's machine appends the Guild's strikes and manual entries to the log."""
         if role not in ROLES:
             raise ValueError(f"role is one of {ROLES}")
         with self._tx():
@@ -180,6 +183,7 @@ class Store:
                  json.dumps(counter, sort_keys=True), counter["countersigned_at_utc"], _payload_of(signed)))
             self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
                          {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"]})
+            self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"])
             return serial, counter, False
 
     def record(self, serial: int) -> dict | None:
@@ -212,6 +216,11 @@ class Store:
             self.db.execute("UPDATE records SET state = 'withdrawn', withdrawn_at = ?, withdraw_reason = ? WHERE serial = ?",
                             (at, reason[:400], serial))
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
+            leaf = self.log.admit_leaf_of(row["record_sha256"])
+            if leaf is None:
+                raise RuntimeError(f"record {serial} has no admit entry in the log")
+            if not self.log.struck().get(leaf):
+                self.log.revoke_locked(leaf, reason[:400].strip() or "withdrawn by the account that published it", time=at)
             return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
 
     def served(self, serial: int, key_id: str, space_url: str, state: str) -> dict:
@@ -245,6 +254,39 @@ class Store:
         with self._tx():
             self._ledger("key", None, None, key_id, {"public_key_sha256": sha256_hex(public_pem.encode("utf-8")),
                                                      "present": [str(p)[:80] for p in present][:12], "note": note[:400]})
+
+    # ---- the log ----
+
+    def log_open(self) -> int:
+        """The log's first entries from the ledger and the records, once, and a fresh head when the log key changed."""
+        with self._tx():
+            n = self.log.genesis_locked()
+            self.log.resign_locked()
+            return n
+
+    def log_append(self, entry: dict) -> dict:
+        """A warden's entry: an admit of a registered record, a revoke or a withhold, each naming its sitting."""
+        kind = entry.get("kind")
+        with self._tx():
+            if kind == "admit":
+                row = self.db.execute("SELECT serial, record_sha256, counter_json FROM records WHERE record_sha256 = ?",
+                                      (str(entry.get("record_sha256") or ""),)).fetchone()
+                if row is None:
+                    raise KeyError("no record is registered under that record_sha256")
+                return self.log.admit_locked(row["serial"], row["record_sha256"], json.loads(row["counter_json"]),
+                                             wardens=entry.get("wardens"), sitting=entry.get("sitting") or "")
+            if kind == "revoke":
+                return self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"),
+                                              wardens=entry.get("wardens"), sitting=entry.get("sitting") or "")
+            if kind == "withhold":
+                return self.log.withhold_locked(str(entry.get("withholds") or ""), entry.get("reason"),
+                                                wardens=entry.get("wardens"), sitting=entry.get("sitting") or "")
+        raise ValueError("kind is admit, revoke or withhold")
+
+    def log_withhold(self, leaf_hex: str, reason: str) -> dict:
+        """The operator's withhold: the body leaves public view, the withholding is itself an entry."""
+        with self._tx():
+            return self.log.withhold_locked(leaf_hex, reason)
 
     # ---- the ledger ----
 

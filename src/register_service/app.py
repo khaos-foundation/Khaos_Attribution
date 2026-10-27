@@ -1,7 +1,8 @@
-"""The register's web face: five signed calls for machines, public reads for everyone.
+"""The register's web face: signed calls for machines, public reads for everyone, the signed append-only log.
 Settings by environment: REGISTER_DATA_DIR (store, mirror), REGISTER_KEY_FILE (the
 register's private key; REGISTER_DEV_KEY=1 lets a missing one be made, for development
-only), REGISTER_PUBLIC_URL.
+only), REGISTER_LOG_KEY_FILE and REGISTER_LOG_DEV_KEY (the same for the log's own key),
+REGISTER_PUBLIC_URL.
 """
 
 from __future__ import annotations
@@ -20,10 +21,12 @@ from starlette.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from khaos_attribution import registry as R
+from khaos_attribution import translog as T
 from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of
 from register_service.store import Store, now_utc
+from register_service.translog import EntryRefused, export as export_log
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
@@ -36,7 +39,11 @@ log = logging.getLogger("register_service")
 def settings() -> dict:
     data = Path(os.environ.get("REGISTER_DATA_DIR", "./register-data")).resolve()
     key_file = Path(os.environ.get("REGISTER_KEY_FILE", str(data / "register-key.pem")))
-    return {"data": data, "key_file": key_file, "dev_key": os.environ.get("REGISTER_DEV_KEY") == "1",
+    dev_key = os.environ.get("REGISTER_DEV_KEY") == "1"
+    return {"data": data, "key_file": key_file, "dev_key": dev_key,
+            "log_key_file": Path(os.environ.get("REGISTER_LOG_KEY_FILE", str(data / "log-key.pem"))),
+            # The log key has its own ceremony, so its development setting is its own; unset, it follows the register's.
+            "log_dev_key": os.environ.get("REGISTER_LOG_DEV_KEY", "1" if dev_key else "0") == "1",
             # A development key reachable from outside, by decision: the deploy sets it beside REGISTER_DEV_KEY.
             "dev_key_public": os.environ.get("REGISTER_DEV_KEY_PUBLIC") == "1",
             "public_url": os.environ.get("REGISTER_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")}
@@ -48,7 +55,7 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 def check_dev_key_exposure(cfg: dict, host: str) -> None:
     """A development key serves on loopback, and behind a proxy only when the deploy says so: binding loopback
     keeps nothing private once a proxy fronts it, so the public address is what is checked."""
-    if not cfg["dev_key"]:
+    if not (cfg["dev_key"] or cfg.get("log_dev_key")):
         return
     if host not in LOOPBACK_HOSTS:
         raise SystemExit("a development key serves on loopback only")
@@ -62,24 +69,46 @@ def dev_marker(cfg: dict) -> Path:
     return cfg["key_file"].with_suffix(".dev")
 
 
-def load_register_key(cfg: dict) -> R.SigningKey:
-    """The countersigning key; a key ever served as the development key is refused once that setting is gone."""
-    marker = dev_marker(cfg)
-    if cfg["key_file"].is_file():
-        key = R.SigningKey.load(cfg["key_file"])
-        if cfg["dev_key"]:
+def _load_key(key_file: Path, dev: bool, what: str, setting: str) -> R.SigningKey:
+    """A key ever served as a development key is refused once that setting is gone; none is made without it."""
+    marker = key_file.with_suffix(".dev")
+    if key_file.is_file():
+        key = R.SigningKey.load(key_file)
+        if dev:
             marker.write_text(key.key_id + "\n", encoding="utf-8")
         elif marker.is_file() and marker.read_text(encoding="utf-8").strip() == key.key_id:
-            raise SystemExit(f"the key at {cfg['key_file']} is the development key ({key.key_id}); "
+            raise SystemExit(f"the key at {key_file} is the development key for the {what} ({key.key_id}); "
                              "the Guild's key is placed by the ceremony (deploy/key-ceremony.md)")
         return key
-    if not cfg["dev_key"]:
-        raise SystemExit(f"no register key at {cfg['key_file']}: the Guardians' key is made in the ceremony, never here "
-                         "(REGISTER_DEV_KEY=1 makes a development key)")
-    cfg["key_file"].parent.mkdir(parents=True, exist_ok=True)
-    key = R.SigningKey.load_or_create(cfg["key_file"])
+    if not dev:
+        raise SystemExit(f"no {what} at {key_file}: the Guardians' key is made in the ceremony, never here "
+                         f"({setting}=1 makes a development key)")
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    key = R.SigningKey.load_or_create(key_file)
     marker.write_text(key.key_id + "\n", encoding="utf-8")
     return key
+
+
+def load_register_key(cfg: dict) -> R.SigningKey:
+    """The countersigning key."""
+    return _load_key(cfg["key_file"], cfg["dev_key"], "register key", "REGISTER_DEV_KEY")
+
+
+def log_key_settings(cfg: dict) -> tuple:
+    return cfg.get("log_key_file") or cfg["data"] / "log-key.pem", cfg.get("log_dev_key", cfg["dev_key"])
+
+
+def load_log_key(cfg: dict) -> R.SigningKey:
+    """The log's own key, which signs tree heads and nothing else."""
+    path, dev = log_key_settings(cfg)
+    return _load_key(path, dev, "log key", "REGISTER_LOG_DEV_KEY")
+
+
+def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
+    committed = T.committed_key()
+    return {"log_id": T.LOG_ID, "key_id": key.key_id, "public_key_pem": key.public_pem(), "development": bool(dev),
+            "committed": bool(committed and committed.key_id == key.key_id),
+            "signed_bytes": "RFC 8785 JSON of {log_id, root_sha256, timestamp, tree_size, version}; Ed25519"}
 
 
 def public_view(record: dict) -> dict:
@@ -120,6 +149,8 @@ class RateLimit:
 
 
 PUBLIC_LIMITS = {"/api/verify": 20, "/api/enrol": 6}
+# The log's public reads: a verifier walks a few files per entry; a crawler is bounded.
+LOG_READ_LIMIT = 240
 SIGNED_LIMIT = 120
 # A verify key's own lane: far above the public bound, still a bound, per key.
 KEYED_VERIFY_LIMIT = 600
@@ -132,8 +163,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     store = Store(cfg["data"] / "register.sqlite3")
     index = Index(cfg["data"] / "index.sqlite3")
     key = load_register_key(cfg)
+    log_key, log_dev = load_log_key(cfg), log_key_settings(cfg)[1]
+    store.log.signer = log_key
     mirror = cfg["data"] / "mirror"
     (mirror / "models").mkdir(parents=True, exist_ok=True)
+    store.log_open()
     # No schema served either: the public doors are documented in deploy/README.md, not enumerated to callers.
     app = FastAPI(title="Guild Register", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.index, app.state.key, app.state.cfg = store, index, key, cfg
@@ -188,14 +222,24 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 fh.write(json.dumps(e, sort_keys=True) + "\n")
         os.replace(new, mirror / "ledger.jsonl")
 
+    def log_mirror_quietly() -> None:
+        try:
+            export_log(store.log, mirror, log_key_doc(log_key, log_dev))
+        except Exception as exc:  # noqa: BLE001
+            log.error("log mirror not written: %s", exc)
+
     def mirror_quietly(serial: int) -> None:
         # The record is in the ledger; a mirror that cannot be written is logged and written on the next change.
         try:
             write_mirror(serial)
         except Exception as exc:  # noqa: BLE001
             log.error("mirror not written for %s: %s", serial, exc)
+        log_mirror_quietly()
+
+    log_mirror_quietly()
 
     limits = {path: RateLimit(n) for path, n in {**PUBLIC_LIMITS, **CLAIM_LIMITS}.items()}
+    log_read_limit = RateLimit(LOG_READ_LIMIT)
     lookup_limits = {path: RateLimit(n) for path, n in softbinding.LIMITS.items()}
     signed_limit = RateLimit(SIGNED_LIMIT)
     from register_service.verify_keys import Allowed  # noqa: PLC0415
@@ -213,6 +257,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if path.endswith("/byContent") and verify_key_allowed(request.headers.get("x-khaos-verify-key")):
                 client, bucket = "key:" + request.headers["x-khaos-verify-key"].strip(), keyed_verify_limit
             if not bucket.allow(client):
+                return JSONResponse({"detail": "too many requests from this address; try again in a minute"}, status_code=429,
+                                    headers={"Retry-After": "60"})
+        elif request.method in ("GET", "HEAD") and path.startswith(("/log/", "/mirror/log/")):
+            if not log_read_limit.allow(client):
                 return JSONResponse({"detail": "too many requests from this address; try again in a minute"}, status_code=429,
                                     headers={"Retry-After": "60"})
         elif request.method == "POST":
@@ -544,6 +592,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             body += P.table("minmax(0, 1fr) 120px 160px", ["Listening Space", "State", "Since"],
                             [[(f'<a href="{P.esc(s_["space_url"])}">{P.esc(s_["space_url"])}</a>', "wrap"), (P.esc(s_["state"]), "muted"), (P.esc(P.day(s_["at"])), "muted")]
                              for s_ in rec["served"]])
+        body += P.log_section(store.log.of_record(rec["record_sha256"]), store.log.struck())
         body += f'<div class="stage-pill-row"><a class="k-btn k-btn--pill" href="/api/models/{serial}">The record as JSON</a></div>'
         n_tracks = len(tracks) or ts.get("track_count", 0)
         withdrawn = " It has since been withdrawn." if rec["state"] == "withdrawn" else ""
@@ -603,6 +652,125 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app.add_api_route("/favicon.ico", lambda: static_png("icon.png"), methods=["GET", "HEAD"])
     app.add_api_route("/apple-touch-icon.png", lambda: static_png("icon.png"), methods=["GET", "HEAD"])
     app.add_api_route("/card.png", lambda: static_png("card.png"), methods=["GET", "HEAD"])
+
+    # ---- the signed append-only log ----
+
+    def cached(request: Request, doc, max_age: int) -> Response:
+        """JSON with an ETag over its bytes; a matching If-None-Match is a 304."""
+        data = (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8")
+        etag = '"' + R.sha256_hex(data)[:32] + '"'
+        headers = {"ETag": etag, "Cache-Control": f"public, max-age={max_age}" + (", immutable" if max_age >= 86400 else "")}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(data, media_type="application/json", headers=headers)
+
+    def size_param(value, name: str) -> int:
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"{name} must be an integer") from None
+        if n < 0:
+            raise HTTPException(422, f"{name} must not be negative")
+        return n
+
+    @app.post("/log/append")
+    async def log_append(request: Request):
+        """A warden's entry, signed by the warden's enrolled machine: a strike, an admit or a withhold, naming the sitting."""
+        body, machine, key_id, _ = await signed_body(request)
+        if machine["role"] != "warden":
+            raise HTTPException(403, "only a warden's machine appends to the log")
+        entry = body.get("entry")
+        if not isinstance(entry, dict):
+            raise HTTPException(422, "entry must be an object")
+
+        def work():
+            try:
+                out = store.log_append(entry)
+            except KeyError as e:
+                raise HTTPException(404, e.args[0]) from None
+            except (EntryRefused, ValueError) as e:
+                raise HTTPException(422, str(e)) from None
+            log_mirror_quietly()
+            return out
+        return await run_in_threadpool(once, body, key_id, work)
+
+    @app.api_route("/log/sth", methods=["GET", "HEAD"])
+    def log_sth(request: Request):
+        head = store.log.head()
+        if head is None:
+            raise HTTPException(404, "the log is empty")
+        return cached(request, head, 10)
+
+    @app.api_route("/log/sth/{size}", methods=["GET", "HEAD"])
+    def log_sth_at(request: Request, size: int):
+        head = store.log.head(size)
+        if head is None:
+            raise HTTPException(404, "no head of that size")
+        return cached(request, head, 31536000)
+
+    @app.api_route("/log/proof/{leaf_hash}", methods=["GET", "HEAD"])
+    def log_proof(request: Request, leaf_hash: str, size: int | None = None):
+        if not T.is_hex256(leaf_hash):
+            raise HTTPException(422, "a leaf hash is 64 lowercase hex characters")
+        if size is not None and store.log.head(size_param(size, "size")) is None:
+            raise HTTPException(404, "no head of that size")
+        try:
+            proof = store.log.inclusion(leaf_hash, size)
+        except KeyError as e:
+            raise HTTPException(404, e.args[0]) from None
+        return cached(request, proof, 31536000 if size is not None else 10)
+
+    @app.api_route("/log/consistency", methods=["GET", "HEAD"])
+    def log_consistency(request: Request):
+        params = request.query_params
+        a, b = size_param(params.get("from"), "from"), size_param(params.get("to"), "to")
+        if not 0 < a <= b or store.log.head(a) is None or store.log.head(b) is None:
+            raise HTTPException(404, "from and to must be sizes of signed heads, from no larger than to")
+        return cached(request, store.log.consistency(a, b), 31536000)
+
+    @app.api_route("/log/entries", methods=["GET", "HEAD"])
+    def log_entries(request: Request):
+        params = request.query_params
+        start = size_param(params.get("start", 0), "start")
+        end = size_param(params.get("end", start + 100), "end")
+        if end <= start:
+            raise HTTPException(422, "end must be larger than start")
+        from register_service.translog import PAGE_MAX  # noqa: PLC0415
+        return cached(request, {"start": start, "entries": store.log.entries(start, min(end, start + PAGE_MAX))}, 60)
+
+    @app.api_route("/log/key", methods=["GET", "HEAD"])
+    def log_key_route(request: Request):
+        return cached(request, log_key_doc(log_key, log_dev), 300)
+
+    @app.api_route("/log/anchors", methods=["GET", "HEAD"])
+    def log_anchors(request: Request):
+        from register_service.translog import receipt_b64  # noqa: PLC0415
+        rows = [{**{k: a[k] for k in ("tree_size", "root_sha256", "backend", "state", "stamped_at", "completed_at")},
+                 "receipt_base64": receipt_b64(a["receipt"])} for a in store.log.anchors()]
+        return cached(request, {"anchors": rows}, 300)
+
+    @app.api_route("/mirror/log/{name:path}", methods=["GET", "HEAD"])
+    def log_mirror_file(name: str):
+        """The static export, served as the mirror holds it, so the page and the command read the same files."""
+        base = (mirror / "log").resolve()
+        path = (base / name).resolve()
+        if base not in path.parents or not path.is_file() or path.suffix not in (".json", ".ots"):
+            raise HTTPException(404, "no such file")
+        media = "application/json" if path.suffix == ".json" else "application/octet-stream"
+        return Response(path.read_bytes(), media_type=media, headers={"Cache-Control": "public, max-age=10"})
+
+    @app.api_route("/log/verify.js", methods=["GET", "HEAD"])
+    def log_verify_js():
+        return Response(resources.files("register_service").joinpath("static", "log-verify.js").read_bytes(),
+                        media_type="text/javascript", headers={"Cache-Control": "public, max-age=3600"})
+
+    @app.api_route("/verify-entry", methods=["GET", "HEAD"], response_class=HTMLResponse)
+    def verify_entry_page():
+        from register_service import pages as P  # noqa: PLC0415
+        return P.page("Verify an entry · Guild Register", P.verify_entry_body(T.committed_key(), log_key_doc(log_key, log_dev)),
+                      dev=bool(cfg["dev_key"]), path="/verify-entry", base=cfg["public_url"],
+                      description="Check that an entry is in the Guild Register's signed append-only log, in your browser, "
+                                  "from the log's own files and its public key.")
 
     @app.get("/health")
     def health():

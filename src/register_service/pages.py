@@ -70,6 +70,20 @@ a.stage-tr:hover { background: var(--field); }
 .foot { margin-top: 48px; padding: 18px 20px; background: var(--panel); border-radius: var(--radius); color: var(--muted);
   font-size: var(--fs-note); display: flex; gap: 18px; flex-wrap: wrap; }
 .foot a { color: var(--muted); }
+.struck { text-decoration: line-through; text-decoration-color: var(--danger); color: var(--muted); }
+.log-form { display: flex; flex-direction: column; gap: 12px; background: var(--panel); border-radius: var(--radius); padding: 16px;
+  margin-bottom: 24px; }
+.log-form label { font-size: var(--fs-note); color: var(--muted); font-weight: 600; }
+.log-form textarea { width: 100%; min-height: 120px; resize: vertical; background: var(--field); color: var(--text); border: 0;
+  border-radius: var(--radius); padding: 12px; font: inherit; font-size: var(--fs-note); }
+.log-form textarea:focus-visible, .log-form button:focus-visible { outline: 2px solid var(--highlight); outline-offset: 2px; }
+.log-form button { align-self: flex-start; height: 40px; padding: 0 18px; border: 0; border-radius: 999px; background: var(--highlight);
+  color: var(--ink-on-highlight); font: inherit; font-weight: 700; cursor: pointer; }
+.log-result { background: var(--panel); border-radius: var(--radius); padding: 16px; margin-bottom: 24px; }
+.log-result:empty { display: none; }
+.log-result p { margin: 0 0 8px; }
+.log-result .ok { color: var(--highlight); font-weight: 700; }
+.log-result .bad { color: var(--danger); font-weight: 700; }
 @media (max-width: 760px) {
   main { padding: 20px 16px 60px; }
   .stage-hero:has(.stage-hero-seal) .stage-hero-text { padding-right: 0; padding-top: 150px; }
@@ -111,7 +125,8 @@ def page(title: str, body: str, *, dev: bool, description: str = DESCRIPTION, pa
             f'<title>{esc(title)}</title>{head_tags(title, description, base + path, base, extra_head)}<style>{CSS}</style></head><body><main>'
             f'<a class="brand" href="/">{STAR_SVG}<span>Guild Register</span><small>of Fine Tuners</small></a>'
             f'{dev_line}{body}'
-            f'<div class="foot"><a href="/api/ledger">The ledger</a><a href="/api/public-key">The register\'s public key</a>'
+            f'<div class="foot"><a href="/verify-entry">Verify an entry</a><a href="/log/sth">The log\'s signed head</a>'
+            f'<a href="/api/ledger">The ledger</a><a href="/api/public-key">The register\'s public key</a>'
             f'<a href="https://github.com/guild-register/ledger">The public mirror</a><span>Kept by the Khaos Foundation Limited</span></div>'
             f'</main></body></html>')
 
@@ -191,3 +206,59 @@ def day(iso) -> str:
 
 def count(n: int, noun: str) -> str:
     return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def log_section(entries: list, struck: dict) -> str:
+    """The model's entries in the signed log; an admit struck by a revoke is drawn struck through, with the reason."""
+    if not entries:
+        return ""
+    rows = []
+    for e in entries:
+        body = e.get("entry") or {}
+        kind, lh = e["kind"], e["leaf_hash"]
+        strike = struck.get(lh) if kind == "admit" else None
+        if kind == "admit":
+            what = "Admitted" + (f" at {esc(body['sitting'])}" if body.get("sitting") else "")
+        elif kind == "revoke":
+            what = f"Struck: {esc(body.get('reason') or '')}" + (f" ({esc(body['sitting'])})" if body.get("sitting") else "")
+        else:
+            what = esc(kind)
+        if not body:
+            what = f"{esc(kind)}, body withheld"
+        cell = f'<span class="struck">{what}</span>' if strike else what
+        if strike:
+            cell += f' <span class="muted">· {esc(strike.get("reason") or "")}</span>'
+        rows.append([(cell, "wrap"), (esc(day(body.get("time"))), "muted"),
+                     (f'<a class="mono" href="/verify-entry#{esc(lh)}">{esc(lh[:16])}…</a>', "")])
+    return section("In the log", "the Guild's signed append-only log") + table(
+        "minmax(0, 1fr) 120px 180px", ["Entry", "Date", "Leaf"], rows)
+
+
+VERIFY_PARA = ("Paste a register record, a log entry, a leaf hash or a record hash. Your browser fetches the log's own files, "
+               "recomputes the hashes, walks the inclusion proof to the signed tree head and checks the head's signature. "
+               "Nothing is sent anywhere.")
+
+
+def verify_entry_body(committed, key_doc: dict) -> str:
+    """The in-browser verifier's page; the pinned key is the one committed in the contract, when there is one."""
+    pinned_pem = committed.public_pem if committed else ""
+    if committed and committed.key_id == key_doc["key_id"]:
+        key_line = f"Pinned log key {esc(committed.key_id)}, as committed in the contract."
+    elif committed:
+        key_line = (f"The contract pins log key {esc(committed.key_id)}, but this register serves {esc(key_doc['key_id'])}: "
+                    "every check here will fail until they agree.")
+    else:
+        key_line = (f"No log key is committed in the contract yet; this page checks against the key the register serves "
+                    f"({esc(key_doc['key_id'])}{', a development key' if key_doc['development'] else ''}), which proves "
+                    "consistency, not who signed.")
+    body = hero("Guild Register", "Verify an entry", VERIFY_PARA, [key_line])
+    body += (f'<form class="log-form" id="log-form" data-pinned-pem="{esc(pinned_pem)}" data-mirror="/mirror">'
+             '<label for="log-input">Record, entry or hash</label>'
+             '<textarea id="log-input" spellcheck="false" autocomplete="off"></textarea>'
+             '<button type="submit">Verify</button></form>'
+             '<div class="log-result" id="log-result" aria-live="polite"></div>'
+             '<p class="stage-para">The same check runs offline with <span class="mono">khaos-log-verify</span>, from a copy of '
+             'the mirror and the key committed in the contract. A browser without Ed25519 in WebCrypto checks the proof '
+             'and says the signature must be checked with the command.</p>'
+             '<script src="/log/verify.js" defer></script>')
+    return body
