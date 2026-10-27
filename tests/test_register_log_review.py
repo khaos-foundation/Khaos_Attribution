@@ -179,17 +179,21 @@ def test_log_recover_replays_the_missing_entries_when_they_reproduce_the_signed_
     del app2
 
 
-def test_log_recover_declares_an_incident_when_the_mirror_cannot_reproduce_the_root(register, tmp_path, monkeypatch, capsys):
+def test_log_recover_puts_back_a_leaf_whose_published_body_is_gone_and_marks_it_lost(register, tmp_path, monkeypatch, capsys):
     app, store, http = register
     key, client, s1, _, _, _ = _two(register)
     cfg = app.state.cfg
     _restore(app, cfg, tmp_path, client, key)
     hashes = json.loads((_mirror(app) / "log" / "hashes.json").read_text())["leaves"]
-    _drop_body(_mirror(app), hashes[-1])
+    for place in (_mirror(app), cfg["data"] / "mirror-public"):
+        _drop_body(place, hashes[-1])
     from register_service.__main__ import main
     monkeypatch.setenv("REGISTER_DATA_DIR", str(cfg["data"]))
     monkeypatch.setenv("REGISTER_DEV_KEY", "1")
-    assert main(["log-recover"]) == 1 and "INCIDENT" in capsys.readouterr().out
+    assert main(["log-recover"]) == 0 and "without its body" in capsys.readouterr().out
+    st = create_app(cfg).state.store
+    last = st.log.entries(st.log.size() - 1, st.log.size())[0]["entry"]
+    assert last["kind"] == "withhold" and last["withholds"] == hashes[-1]
 
 
 # ---- 4. one standing admit per record ----
@@ -263,7 +267,7 @@ def test_the_daily_job_signs_a_fresh_head_and_the_verifier_flags_an_old_one(regi
     assert out["stale_hours"] > 48 and any("stale" in w for w in out["warnings"])
     refresh_head(app.state.cfg, store)
     fresh = store.log.head()
-    assert fresh["tree_size"] == before["tree_size"] and fresh["timestamp"] > old["timestamp"]
+    assert fresh["tree_size"] == before["tree_size"] + 1 and fresh["timestamp"] > old["timestamp"]
     assert anchor is not None
     out = _prove(s1["record_sha256"], _mirror(app), store.log.signer.public_pem())
     assert out["warnings"] == []
@@ -342,7 +346,7 @@ def test_new_bodies_wait_out_the_grace_period_before_the_public_mirror_and_a_wit
     assert (public / "log" / "sth" / "latest.json").is_file()
     assert not (public / "log" / "entries" / f"{leaf}.json").exists(), "a new body waits"
     out = _prove(leaf, public, pem)
-    assert out["entry"] is None and out["pending"] and any("not yet published" in w for w in out["warnings"])
+    assert out["entry"] is None and out["pending"] and any("not yet public" in w for w in out["warnings"]) and out["held_back_after"] == 1
     store.log_withhold(leaf, "a private name")
     from register_service.app import log_key_doc
     from register_service.translog import export

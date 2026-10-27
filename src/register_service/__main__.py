@@ -9,7 +9,7 @@
     python -m register_service make-key <path>            a new countersigning key, on the ceremony's machine
     python -m register_service key --present "A, B, C" [--log]    the ledger's record of a key the service now signs with
     python -m register_service log-withhold <leaf_hash> <reason>    a body out of public view; proofs unchanged
-    python -m register_service log-stamp | log-upgrade    a fresh head and the daily anchor of its root; the upgrade
+    python -m register_service log-stamp | log-upgrade    the day's heartbeat entry and the anchor of its root; the upgrade
     python -m register_service log-recover    put back entries the published log holds and this database lost
 """
 
@@ -113,8 +113,9 @@ def main(argv=None) -> int:
         pub = cfg["log_key_file"].with_suffix(".pub")
         problems = store.log.problems(pub.read_text(encoding="ascii") if pub.is_file() else None)
         if pub.is_file():
-            problems += [w["message"] for w in store.log.witness(log_places(cfg)[3], pub.read_text(encoding="ascii"))
-                         if w["state"] in ("behind", "forked")]
+            verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], pub.read_text(encoding="ascii")),
+                                             bool(cfg.get("log_unwitnessed")))
+            problems += [verdict] if verdict else []
         print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {len(store.serials())} models")
         print(f"log {'whole' if not problems else 'BROKEN'}: {store.log.size()} entries"
               + ("" if pub.is_file() else " (no log public key beside the key file; signatures not checked)"))
@@ -129,20 +130,21 @@ def open_log(cfg: dict, store: Store, appending: bool = False):
     from register_service.app import load_log_key, log_places  # noqa: PLC0415
     key = load_log_key(cfg)
     store.log.signer = key
-    for w in store.log.witness(log_places(cfg)[3], key.public_pem()):
-        if w["state"] in ("behind", "forked"):
-            store.log.blocked = w["message"]
-            if appending:
-                raise SystemExit(w["message"])
+    with store._tx():
+        store.log.remember_key_locked()
+    verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], key.public_pem()), bool(cfg.get("log_unwitnessed")))
+    store.log.blocked = verdict
+    if verdict and appending:
+        raise SystemExit(verdict)
     return key
 
 
 def refresh_head(cfg: dict, store: Store) -> dict | None:
-    """The current tree signed again with the time now, and exported: a quiet log still shows it is alive."""
+    """The day's heartbeat entry, appended and exported: a quiet log still shows it is alive."""
     from register_service.app import export_all, log_key_settings  # noqa: PLC0415
     key = open_log(cfg, store, appending=True)
     with store._tx():
-        head = store.log.refresh_locked()
+        head = store.log.heartbeat_locked()
     export_all(cfg, store.log, key, log_key_settings(cfg)[1])
     return head
 

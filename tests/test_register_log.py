@@ -275,8 +275,8 @@ def test_the_verify_page_runs_the_browser_verifier_from_its_own_file(register):
     assert js.status_code == 200 and "Ed25519" in js.text and "verifyConsistency" in js.text
 
 
-def test_a_new_log_key_signs_the_current_tree_afresh_and_proves_every_earlier_entry(register, tmp_path):
-    """The ceremony's switch: the development key's heads stay as history; the Guild's key signs the whole tree at start."""
+def test_a_new_log_key_signs_a_heartbeat_over_the_whole_tree_and_proves_every_earlier_entry(register, tmp_path):
+    """The ceremony's switch: the development key's heads stay as history; the Guild's key signs a heartbeat over the tree."""
     app, store, http = register
     _, _, signed, _ = _publish(register)
     size = store.log.size()
@@ -286,7 +286,8 @@ def test_a_new_log_key_signs_the_current_tree_afresh_and_proves_every_earlier_en
     guild = R.SigningKey.load_or_create(app.state.cfg["data"] / "log-key.pem")
     restarted = create_app({**app.state.cfg, "log_dev_key": False}).state.store
     head = restarted.log.head()
-    assert head["key_id"] == guild.key_id and head["tree_size"] == size and head["root_sha256"] == dev_head["root_sha256"]
+    assert head["key_id"] == guild.key_id and head["tree_size"] == size + 1
+    assert restarted.log.tree().root(size).hex() == dev_head["root_sha256"]
     assert len(restarted.log.all_heads()) == before + 1 and restarted.log.head(1)["key_id"] == dev_head["key_id"]
     assert restarted.log.problems(guild.public_pem()) == []
     (tmp_path / "guild.pub").write_text(guild.public_pem(), encoding="ascii")

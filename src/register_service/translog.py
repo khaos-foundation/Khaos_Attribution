@@ -23,13 +23,15 @@ CREATE INDEX IF NOT EXISTS log_leaves_record ON log_leaves (record_sha256);
 CREATE INDEX IF NOT EXISTS log_leaves_refers ON log_leaves (refers);
 CREATE TABLE IF NOT EXISTS log_bodies (leaf_hash TEXT PRIMARY KEY, body BLOB NOT NULL, withheld_at TEXT, withhold_reason TEXT);
 CREATE TABLE IF NOT EXISTS log_nodes (level INTEGER NOT NULL, idx INTEGER NOT NULL, hash BLOB NOT NULL, PRIMARY KEY (level, idx));
-CREATE TABLE IF NOT EXISTS log_heads (id INTEGER PRIMARY KEY, tree_size INTEGER NOT NULL, root_sha256 TEXT NOT NULL,
-  timestamp TEXT NOT NULL, key_id TEXT NOT NULL, signature TEXT NOT NULL, UNIQUE (tree_size, key_id, timestamp));
-CREATE INDEX IF NOT EXISTS log_heads_size ON log_heads (tree_size);
+CREATE TABLE IF NOT EXISTS log_heads (id INTEGER PRIMARY KEY, tree_size INTEGER UNIQUE NOT NULL, root_sha256 TEXT NOT NULL,
+  timestamp TEXT NOT NULL, key_id TEXT NOT NULL, signature TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS log_keys (key_id TEXT PRIMARY KEY, public_pem TEXT NOT NULL, first_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS log_anchors (tree_size INTEGER PRIMARY KEY, root_sha256 TEXT NOT NULL, backend TEXT NOT NULL,
   stamped_at TEXT NOT NULL, receipt BLOB NOT NULL, state TEXT NOT NULL, completed_at TEXT);
 """
 PAGE_MAX = 1000
+EXPORT_LOCK_TIMEOUT = 30.0   # seconds; a later export catches up with whatever this one skipped
+UNAVAILABLE = "unavailable: recovered without its body"
 TEXT_MAX = 400
 NAMES_MAX = 12
 
@@ -176,6 +178,15 @@ class TransLog:
                               (record_sha256,)).fetchone()
         return row["leaf_hash"] if row else None
 
+    def admitted(self, record_sha256: str) -> dict | None:
+        """The newest readable admit entry of the record, or None."""
+        for r in self.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx DESC",
+                                 (record_sha256,)):
+            row = self.db.execute("SELECT body FROM log_bodies WHERE leaf_hash = ?", (r["leaf_hash"],)).fetchone()
+            if row and row["body"]:
+                return json.loads(bytes(row["body"]))
+        return None
+
     def max_serial(self) -> int:
         row = self.db.execute("SELECT MAX(serial) AS m FROM log_leaves").fetchone()
         return int(row["m"] or 0)
@@ -212,6 +223,20 @@ class TransLog:
         _, leaf_hex = self._insert_leaf(body, json.loads(body))
         return leaf_hex
 
+    def replay_leaf_locked(self, leaf_hex: str) -> None:
+        """A published leaf whose body was never published (withheld, or inside the delay), put back as a leaf alone."""
+        index = self.size()
+        leaf = bytes.fromhex(leaf_hex)
+        self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind) VALUES (?, ?, 'unavailable')", (index, leaf_hex))
+        self.db.execute("INSERT INTO log_bodies (leaf_hash, body, withheld_at, withhold_reason) VALUES (?, ?, ?, ?)",
+                        (leaf_hex, b"", T.now_rfc3339(), UNAVAILABLE))
+        level, i, h = 0, index, leaf
+        self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
+        while i % 2 == 1:
+            h = T.node_hash(self._perfect(level, i - 1), h)
+            level, i = level + 1, i // 2
+            self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (?, ?, ?)", (level, i, h))
+
     def insert_head_locked(self, head: dict) -> None:
         self.db.execute("INSERT OR IGNORE INTO log_heads (tree_size, root_sha256, timestamp, key_id, signature) VALUES (?, ?, ?, ?, ?)",
                         (head["tree_size"], head["root_sha256"], head["timestamp"], head["key_id"], head["signature"]))
@@ -221,18 +246,25 @@ class TransLog:
         self.insert_head_locked(head)
         return head
 
-    def refresh_locked(self) -> dict | None:
-        """The current tree signed again with the time now, so a quiet log still shows it is alive."""
-        if self.blocked:
-            raise LogBlocked(self.blocked)
-        return self._sign_head_locked() if self.size() else None
+    def heartbeat_locked(self) -> dict:
+        """An entry with nothing but its time: freshness lives in the tree, and every size keeps exactly one head."""
+        return self.append_locked(T.make_entry("heartbeat"))
 
     def resign_locked(self) -> dict | None:
-        """After a key change, the current tree signed afresh by the new key: it commits to every entry before it."""
+        """After a key change, a heartbeat signed by the new key: its head commits to every entry before it."""
         latest = self.head()
         if latest is None or latest["key_id"] == self.signer.key_id:
             return None
-        return self._sign_head_locked()
+        return self.heartbeat_locked()
+
+    def remember_key_locked(self) -> None:
+        """The log key's public half, kept so a published head signed by an earlier key can still be checked."""
+        self.db.execute("INSERT OR IGNORE INTO log_keys (key_id, public_pem, first_seen) VALUES (?, ?, ?)",
+                        (self.signer.key_id, self.signer.public_pem(), T.now_rfc3339()))
+
+    def known_key(self, key_id: str) -> str | None:
+        row = self.db.execute("SELECT public_pem FROM log_keys WHERE key_id = ?", (key_id,)).fetchone()
+        return row["public_pem"] if row else None
 
     def admit_locked(self, serial: int, record_sha256: str, counter: dict, time: str | None = None, wardens=None,
                      sitting=None, appended_by: str | None = None) -> dict:
@@ -291,11 +323,13 @@ class TransLog:
     def problems(self, public_pem: str | None = None) -> list:
         """The whole log re-derived from its bodies: every leaf, node and head root, and each head's signature."""
         out, leaves = [], []
-        for r in self.db.execute("SELECT l.idx, l.leaf_hash, b.body FROM log_leaves l LEFT JOIN log_bodies b"
+        for r in self.db.execute("SELECT l.idx, l.leaf_hash, l.kind, b.body FROM log_leaves l LEFT JOIN log_bodies b"
                                  " ON b.leaf_hash = l.leaf_hash ORDER BY l.idx"):
             if r["idx"] != len(leaves):
                 out.append(f"leaf {len(leaves)} is missing")
-            if r["body"] is None or T.leaf_hash(bytes(r["body"])).hex() != r["leaf_hash"]:
+            if r["kind"] == "unavailable":
+                pass
+            elif r["body"] is None or T.leaf_hash(bytes(r["body"])).hex() != r["leaf_hash"]:
                 out.append(f"leaf {r['idx']}'s body does not hash to its leaf")
             leaves.append(bytes.fromhex(r["leaf_hash"]))
         nodes = T.perfect_nodes(leaves)
@@ -317,20 +351,29 @@ class TransLog:
     # ---- the published log as a witness ----
 
     def witness(self, places: list, public_pem: str) -> list:
-        """What each published copy of the log says about this database: ok, behind, forked or unreadable."""
+        """What each published copy of the log says about this database: ok, behind, forked, empty (nothing published
+        there yet), unreadable, or other-key (signed by a key this log never used)."""
         from khaos_attribution.translog import verify as V  # noqa: PLC0415
         out = []
         for where in places:
             mirror = V.Mirror(str(where), timeout=5.0)
             try:
                 head = mirror.get("sth/latest.json")
-            except (V.NotFound, V.Unreadable) as e:
-                out.append({"where": str(where), "state": "unreadable", "message": str(e)})
+            except V.NotFound as e:
+                out.append({"where": str(where), "state": "empty", "message": str(e)})
                 continue
+            except V.Unreadable as e:
+                empty = mirror.local and not (Path(str(where)) / "log").is_dir()
+                out.append({"where": str(where), "state": "empty" if empty else "unreadable", "message": str(e)})
+                continue
+            pem = public_pem if isinstance(head, dict) and head.get("key_id") == T.key_id_of_pem(public_pem) else \
+                self.known_key(str(head.get("key_id", "")) if isinstance(head, dict) else "")
             try:
-                T.verify_head(head, public_pem)
-            except T.LogError as e:
-                out.append({"where": str(where), "state": "other-key", "message": str(e)})
+                if pem is None:
+                    raise T.LogError(f"signed by key {head.get('key_id')}, which this log never used")
+                T.verify_head(head, pem)
+            except (T.LogError, AttributeError) as e:
+                out.append({"where": str(where), "state": "other-key", "message": f"{where}: {e}"})
                 continue
             size, n = int(head["tree_size"]), self.size()
             if size > n:
@@ -346,6 +389,22 @@ class TransLog:
             out.append({"where": str(where), "state": state, "message": message, "head": head})
         return out
 
+    def open_verdict(self, seen: list, unwitnessed: bool = False) -> str | None:
+        """Why this database may not append, or None. It fails closed: some published copy must vouch for it, unless
+        the log is new and nothing anywhere has been published yet."""
+        for w in seen:
+            if w["state"] in ("behind", "forked"):
+                return w["message"]
+        if any(w["state"] == "ok" for w in seen):
+            return None
+        if self.size() == 0 and all(w["state"] == "empty" for w in seen):
+            return None
+        if unwitnessed:
+            return None
+        return ("no published copy of the log could be read to show this database is not behind it ("
+                + "; ".join(f"{w['where']}: {w['state']}" for w in seen) + "). Make one reachable (REGISTER_LOG_WITNESSES), or "
+                "after checking by hand that nothing newer was published, start once with REGISTER_LOG_UNWITNESSED=1")
+
     # ---- anchors ----
 
     def anchors(self) -> list:
@@ -353,8 +412,8 @@ class TransLog:
 
 
 def recover(store, places: list, public_pem: str) -> tuple:
-    """Puts back the entries a published copy holds and this database lost, verbatim, when they reproduce that copy's
-    signed root; (recovered, lines to print). Anything else is an incident for people, not code."""
+    """Puts back the entries a published copy holds and this database lost, verbatim (a leaf alone where its body was
+    never published), when they reproduce that copy's signed root; (recovered, lines). Anything else is an incident."""
     from khaos_attribution.translog import verify as V  # noqa: PLC0415
     log = store.log
     seen = log.witness(places, public_pem)
@@ -386,13 +445,14 @@ def recover(store, places: list, public_pem: str) -> tuple:
             if i not in found and isinstance(text, str) and T.leaf_hash(text.encode("utf-8")).hex() == leaves[i]:
                 found[i] = text.encode("utf-8")
     missing = [i for i in range(n, size) if i not in found]
-    if missing:
-        return False, [f"INCIDENT: entries {missing[:10]} have no published body (withheld, or not yet public); the log "
-                       f"cannot be rebuilt to its signed root of size {size}. Keep the register blocked and call the wardens."]
-    lines = []
+    lines = [f"entry {i} recovered without its body (withheld, or not yet public); its leaf is in the signed tree"
+             for i in missing]
     try:
         with store._tx():
             for i in range(n, size):
+                if i in missing:
+                    log.replay_leaf_locked(leaves[i])
+                    continue
                 log.replay_locked(found[i])
                 entry = json.loads(found[i])
                 if entry["kind"] == "withhold":
@@ -413,9 +473,15 @@ def recover(store, places: list, public_pem: str) -> tuple:
                 if old["tree_size"] == k and log.tree().root(k).hex() == old["root_sha256"]:
                     log.insert_head_locked(old)
             log.insert_head_locked(head)
+            log.blocked = None
+            for r in log.db.execute("SELECT leaf_hash FROM log_bodies WHERE withhold_reason = ?", (UNAVAILABLE,)).fetchall():
+                # No withhold names this lost body, so a verifier would refuse it: the log says plainly that it is gone.
+                log.append_locked(T.make_entry("withhold", withholds=r["leaf_hash"], reason="the body was lost in a restore "
+                                                                                           "before it was published"))
+                lines.append(f"leaf {r['leaf_hash']} is now marked as lost by a withhold entry")
     except T.LogError as e:
+        log.blocked = log.blocked or "recovery failed"
         return False, [f"INCIDENT: {e}"]
-    log.blocked = None
     return True, [f"recovered entries {n} to {size - 1} from {where}; the log is at size {size} with its published root", *lines]
 
 
@@ -441,17 +507,36 @@ def _json(doc) -> bytes:
     return (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
 
+class ExportBusy(RuntimeError):
+    """Another export held the lock past the timeout."""
+
+
 @contextmanager
 def _export_lock(mirror: Path):
-    """One export at a time: across threads by the lock, across processes by a lock file."""
+    """One export at a time: across threads by the lock, across processes by a lock file, each waited on for at most
+    EXPORT_LOCK_TIMEOUT seconds."""
+    import time  # noqa: PLC0415
     mirror.mkdir(parents=True, exist_ok=True)
-    with _EXPORT_LOCK, open(mirror / ".log-export.lock", "w") as fh:
-        try:
-            import fcntl  # noqa: PLC0415
-            fcntl.flock(fh, fcntl.LOCK_EX)
-        except ImportError:
-            pass
-        yield
+    deadline = time.monotonic() + EXPORT_LOCK_TIMEOUT
+    if not _EXPORT_LOCK.acquire(timeout=EXPORT_LOCK_TIMEOUT):
+        raise ExportBusy("another export in this process held the lock")
+    try:
+        with open(mirror / ".log-export.lock", "w") as fh:
+            try:
+                import fcntl  # noqa: PLC0415
+            except ImportError:
+                fcntl = None
+            while fcntl is not None:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() > deadline:
+                        raise ExportBusy("another process held the export lock") from None
+                    time.sleep(0.05)
+            yield
+    finally:
+        _EXPORT_LOCK.release()
 
 
 def snapshot(log: TransLog) -> dict:
@@ -488,16 +573,22 @@ def pending_from(snap: dict, delay_days: float, now: datetime | None = None) -> 
     return None
 
 
-def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = None, delay_days: float = 7) -> None:
+def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = None, delay_days: float = 7) -> bool:
     """Everything a verifier needs, under mirror/log/, and under public/log/ the same with new bodies held back for
-    `delay_days`; a database the published log is ahead of exports nothing."""
+    `delay_days`; False when nothing was written (a blocked log, or the lock not had in time)."""
+    import logging  # noqa: PLC0415
     if log.blocked:
-        return
-    with _export_lock(Path(mirror)):
-        snap = snapshot(log)
-        _write_log(Path(mirror) / "log", snap, key_doc, None)
-        if public is not None:
-            _write_log(Path(public) / "log", snap, key_doc, pending_from(snap, delay_days))
+        return False
+    try:
+        with _export_lock(Path(mirror)):
+            snap = snapshot(log)
+            _write_log(Path(mirror) / "log", snap, key_doc, None)
+            if public is not None:
+                _write_log(Path(public) / "log", snap, key_doc, pending_from(snap, delay_days))
+    except ExportBusy as e:
+        logging.getLogger("register_service").warning("log export skipped: %s; the next export catches up", e)
+        return False
+    return True
 
 
 def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None) -> None:
@@ -509,8 +600,8 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None) -> No
                 return
         except (OSError, ValueError, KeyError):
             pass
-    # A withhold names only a leaf and a reason, and a verifier needs it to accept a missing body: it is never held back.
-    shown = [None if pending is not None and i >= pending and snap["kinds"][i] != "withhold" else b
+    # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing: neither waits.
+    shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat") else b
              for i, b in enumerate(snap["bodies"])]
     _write(root / "key.json", _json(key_doc))
     for i, leaf_hex in enumerate(leaves):
@@ -555,8 +646,11 @@ def _write_anchors(root: Path, anchors: list) -> None:
 
 def export_anchors(log: TransLog, mirror: Path) -> None:
     """The anchor receipts, as OpenTimestamps files, and their list."""
-    with _export_lock(Path(mirror)):
-        _write_anchors(Path(mirror) / "log", log.anchors())
+    try:
+        with _export_lock(Path(mirror)):
+            _write_anchors(Path(mirror) / "log", log.anchors())
+    except ExportBusy:
+        pass
 
 
 def receipt_b64(receipt: bytes) -> str:

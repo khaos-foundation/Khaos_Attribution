@@ -45,13 +45,15 @@ def settings() -> dict:
             # The log key has its own ceremony, so its development setting is its own; unset, it follows the register's.
             "log_dev_key": os.environ.get("REGISTER_LOG_DEV_KEY", "1" if dev_key else "0") == "1",
             "log_public_delay_days": float(os.environ.get("REGISTER_LOG_PUBLIC_DELAY_DAYS", "7")),
-            "log_witnesses": [w.strip() for w in os.environ.get("REGISTER_LOG_WITNESSES", "").split(",") if w.strip()],
+            "log_witnesses": [w.strip() for w in os.environ.get("REGISTER_LOG_WITNESSES", PUBLIC_MIRROR_RAW).split(",") if w.strip()],
+            "log_unwitnessed": os.environ.get("REGISTER_LOG_UNWITNESSED") == "1",
             # A development key reachable from outside, by decision: the deploy sets it beside REGISTER_DEV_KEY.
             "dev_key_public": os.environ.get("REGISTER_DEV_KEY_PUBLIC") == "1",
             "public_url": os.environ.get("REGISTER_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")}
 
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+PUBLIC_MIRROR_RAW = "https://raw.githubusercontent.com/guild-register/ledger/main"   # the public mirror the footer links
 
 
 def check_dev_key_exposure(cfg: dict, host: str) -> None:
@@ -117,9 +119,9 @@ def log_places(cfg: dict) -> tuple:
     return mirror, public, delay, witnesses
 
 
-def export_all(cfg: dict, log, key: R.SigningKey, dev: bool) -> None:
+def export_all(cfg: dict, log, key: R.SigningKey, dev: bool) -> bool:
     mirror, public, delay, _ = log_places(cfg)
-    export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay)
+    return export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay)
 
 
 def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
@@ -185,7 +187,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     store.log.signer = log_key
     mirror = cfg["data"] / "mirror"
     (mirror / "models").mkdir(parents=True, exist_ok=True)
-    store.log_open(log_places(cfg)[3])
+    store.log_open(log_places(cfg)[3], bool(cfg.get("log_unwitnessed")))
     if store.log.blocked:
         log.error("the log is blocked: %s", store.log.blocked)
     # No schema served either: the public doors are documented in deploy/README.md, not enumerated to callers.
@@ -313,7 +315,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if record["model"]["machine_key_id"] != key_id:
             raise HTTPException(422, "the record names another machine as its maker")
         serial, counter, already = store.register(signed, key_id, machine["account_id"],
-                                                  lambda n: R.countersign(signed, n, key, now_utc()))
+                                                  lambda n, at: R.countersign(signed, n, key, at or now_utc()))
         if not already:
             mirror_quietly(serial)
         return {"serial": serial, "countersignature": counter, "already": already,

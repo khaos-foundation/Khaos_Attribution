@@ -226,13 +226,15 @@
     const what = entry ? entry.kind + " entry" + (entry.serial ? " for No. " + entry.serial : "") : "entry";
     const lines = [["ok", "Proved: the " + what + " is leaf " + index + " of the log at size " + latest.tree_size + "."],
       ["", "Found by " + how + ". Newest head signed " + latest.timestamp + " (" + Math.round(age) + " hours ago) by log key " + latest.key_id + "."]];
-    if (age > STALE_HOURS) lines.push(["bad", "The newest head is " + Math.round(age) + " hours old; the log is re-signed daily, so this mirror may be stale."]);
+    if (age > STALE_HOURS) lines.push(["bad", "The newest head is " + Math.round(age) + " hours old; the log takes a heartbeat entry daily, so this mirror may be stale."]);
     if (!log.signed) lines.push(["bad", "This browser cannot check Ed25519 signatures: the proof holds, but check the head's signature with khaos-log-verify."]);
     if (!form.dataset.pinnedPem) lines.push(["bad", "The key is the one the register serves, not one committed in the contract."]);
     if (struck) lines.push(["bad", "Struck: " + (struck.withheld ? "its reason is withheld" : struck.reason || "") + (struck.sitting ? " (" + struck.sitting + ")" : "")]);
     if (log.withheld[leafHex]) lines.push(["", "The body is withheld, by a withhold entry in the log; the proof stands without it."]);
     else if (!log.entries[index]) lines.push(["", "The body is not yet published in this mirror; the proof stands without it."]);
-    if (log.pending !== null) lines.push(["bad", (log.leaves.length - log.pending) + " recent entries are not yet published in this mirror; a strike among them would not show yet."]);
+    let held = 0;
+    for (let i = index + 1; i < log.leaves.length; i++) if (!log.entries[i] && !log.withheld[log.leaves[i]]) held++;
+    if (held && !struck) lines.push(["bad", "Proved, but newer entries are not yet public; a strike among them would not show (" + held + " held back by the publication delay)."]);
     if (entry) lines.push(["", jcs(entry)]);
     show(lines);
   }

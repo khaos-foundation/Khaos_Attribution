@@ -2,7 +2,7 @@
     khaos-log-verify <entry.json | record.json | leaf hash | record hash> [--mirror URL-or-folder] [--key log-key.pub]
 It also checks the newest head is consistent with the last head this machine saw. The register itself is never asked.
 Exit codes: 0 proved; 1 the proof failed (the log or mirror is not what it claims); 2 not found or bad input;
-3 no key or no mirror could be read.
+3 no key or no mirror could be read; 4 proved, but newer entries are not yet public and a strike among them would not show.
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ from khaos_attribution import translog as T
 
 DEFAULT_MIRRORS = ("https://register.khaos.dev/mirror", "https://raw.githubusercontent.com/guild-register/ledger/main")
 STATE_FILE = Path.home() / ".khaos" / "log-verify-state.json"
-PROVED, FAILED, NOT_FOUND, UNREADABLE = 0, 1, 2, 3
-STALE_HOURS = 48   # the register signs a fresh head daily, quiet or not
+PROVED, FAILED, NOT_FOUND, UNREADABLE, HELD_BACK = 0, 1, 2, 3, 4
+HELD_BACK_NOTE = "proved, but newer entries are not yet public; a strike among them would not show"
+STALE_HOURS = 48   # the register appends a heartbeat entry daily, quiet or not
 DELAY_ALLOWANCE_DAYS = 9   # the public mirror holds new bodies back at most seven days; two more for the daily head
 
 
@@ -198,16 +199,15 @@ def prove(target: str, mirror: Mirror, pem: str, state: dict | None = None, now:
            "head_timestamp": head["timestamp"], "key_id": head["key_id"], "entry": log["entries"][index],
            "withheld": leaf_hex in log["withheld"], "pending": log["entries"][index] is None and leaf_hex not in log["withheld"],
            "struck": strike_of(log, index), "warnings": warnings}
-    if log["pending"] is not None and log["pending"] < len(log["leaves"]):
-        later = len(log["leaves"]) - max(log["pending"], index + 1)
-        if later > 0 or out["pending"]:
-            warnings.append(f"{len(log['leaves']) - log['pending']} recent entries are not yet published in this mirror "
-                            "(the publication delay); a strike among them would not show yet")
+    held = [i for i in range(index + 1, len(log["leaves"])) if log["entries"][i] is None and log["leaves"][i] not in log["withheld"]]
+    out["held_back_after"] = len(held)
+    if held and not out["struck"]:
+        warnings.append(f"{HELD_BACK_NOTE} ({len(held)} held back by the publication delay)")
     from datetime import datetime, timezone  # noqa: PLC0415
     out["stale_hours"] = round(_hours(latest["timestamp"], now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")), 1)
     if out["stale_hours"] > STALE_HOURS:
-        warnings.append(f"the newest head is {out['stale_hours']:.0f} hours old; the log is re-signed daily, so this mirror "
-                        "may be stale")
+        warnings.append(f"the newest head is {out['stale_hours']:.0f} hours old; the log takes a heartbeat entry daily, so "
+                        "this mirror may be stale")
     if state and state.get("tree_size"):
         seen = int(state["tree_size"])
         if seen > latest["tree_size"]:
@@ -308,6 +308,8 @@ def main(argv=None) -> int:
                 print(f"The newest head ({out['latest']['tree_size']}) extends the one seen before ({out['consistent_since']}).")
             for w in out["warnings"]:
                 print(f"WARNING: {w}")
+        if out["held_back_after"] and not out["struck"]:
+            return HELD_BACK
         return PROVED
     print(f"no mirror could be read: {last}", file=sys.stderr)
     return UNREADABLE

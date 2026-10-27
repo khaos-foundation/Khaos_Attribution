@@ -24,6 +24,12 @@ if [ -d "$WORK/mirror" ]; then
   chown -R register:register "$DATA/mirror"
 fi
 rm -rf "$WORK"
+# A fresh clone of the public mirror is the witness that survives a lost server: the register compares itself with it at start.
+if grep -q '^LEDGER_REPO=.' /etc/register.env; then
+  sudo -u register bash -c 'set -a; . /etc/register.env; set +a; rm -rf /srv/register/ledger-mirror
+    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/ledger_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+      git clone -q "$LEDGER_REPO" /srv/register/ledger-mirror' || echo "the public mirror could not be cloned; the public raw address is still asked"
+fi
 systemctl start register.service
 sudo -u register bash -c 'set -a; . /etc/register.env; set +a; cd /srv/register && exec venv/bin/python -m register_service check' || {
   echo "The restored database is behind or apart from the published log; the register takes no changes until it is fixed:"

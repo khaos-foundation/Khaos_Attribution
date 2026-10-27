@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from khaos_attribution.registry import FIRST_SERIAL, canonical_bytes, sha256_hex
-from register_service.translog import TransLog
+from register_service.translog import LogBlocked, TransLog
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL);
@@ -169,14 +169,20 @@ class Store:
         return max(FIRST_SERIAL, (row["m"] or 0) + 1, self.log.max_serial() + 1)
 
     def register(self, signed: dict, machine_key_id: str, account_id: int, countersign) -> tuple:
-        """The next serial, the countersignature and the row, as one transaction: (serial, counter, already)."""
+        """The next serial, the countersignature and the row, as one transaction: (serial, counter, already).
+        `countersign(serial, at)` signs; a record the log already admits keeps that admit's serial and time."""
         with self._tx():
             have = self.db.execute("SELECT serial, counter_json FROM records WHERE record_sha256 = ?",
                                    (signed["record_sha256"],)).fetchone()
             if have:
                 return have["serial"], json.loads(have["counter_json"]), True
+            if self.log.blocked:
+                raise LogBlocked(self.log.blocked)
+            admitted = self.log.admitted(signed["record_sha256"])
+            if admitted is not None:
+                return self._register_admitted(signed, machine_key_id, account_id, countersign, admitted)
             serial = self._next_serial()
-            counter = countersign(serial)
+            counter = countersign(serial, None)
             self.db.execute(
                 "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
                 " published_at, payload) VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?)",
@@ -186,6 +192,22 @@ class Store:
                          {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"]})
             self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"])
             return serial, counter, False
+
+    def _register_admitted(self, signed: dict, machine_key_id: str, account_id: int, countersign, admitted: dict) -> tuple:
+        """A record the log admitted before this database lost it: its row back under the same serial, nothing appended."""
+        serial = int(admitted["serial"])
+        counter = countersign(serial, admitted["countersignature"]["countersigned_at_utc"])
+        struck = not self.log.standing_admits(signed["record_sha256"])
+        self.db.execute(
+            "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
+            " published_at, payload, withdrawn_at, withdraw_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (serial, signed["record_sha256"], machine_key_id, account_id, json.dumps(signed, sort_keys=True),
+             json.dumps(counter, sort_keys=True), "withdrawn" if struck else "registered", counter["countersigned_at_utc"],
+             _payload_of(signed), now_utc() if struck else None, "struck in the log" if struck else None))
+        self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
+                     {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"],
+                      "restored_from_log": True})
+        return serial, counter, False
 
     def record(self, serial: int) -> dict | None:
         row = self.db.execute("SELECT * FROM records WHERE serial = ?", (serial,)).fetchone()
@@ -257,13 +279,14 @@ class Store:
 
     # ---- the log ----
 
-    def log_open(self, witnesses: list | None = None) -> int:
-        """Checks the database against the log it published; then the first entries, once, and a fresh head when the
-        log key changed. A database behind or apart from its published log is blocked, never appended to."""
-        for w in self.log.witness(witnesses or [], self.log.signer.public_pem()):
-            if w["state"] in ("behind", "forked"):
-                self.log.blocked = w["message"]
-                return 0
+    def log_open(self, witnesses: list | None = None, unwitnessed: bool = False) -> int:
+        """Checks the database against the log it published; then the first entries, once, and a heartbeat under a new
+        log key. A database no published copy vouches for is blocked, never appended to."""
+        with self._tx():
+            self.log.remember_key_locked()
+        self.log.blocked = self.log.open_verdict(self.log.witness(witnesses or [], self.log.signer.public_pem()), unwitnessed)
+        if self.log.blocked:
+            return 0
         with self._tx():
             n = self.log.genesis_locked()
             self.log.resign_locked()

@@ -86,8 +86,10 @@ in the public git mirror, while it is inside the publication delay), a record is
 admit entry, and a strike only through a proved revoke (or the withhold of one, which still names what it struck). It
 proves the entry's inclusion, says whether it was struck and why, checks that the newest head extends the last one this
 machine saw (kept in `~/.khaos/log-verify-state.json`), and warns when the newest head is more than 48 hours old: the
-register signs a fresh head every day, so an older one means the mirror may be stale. Exit codes: 0 proved, 1 the proof
-failed, 2 not found, 3 no key or mirror could be read. The same check runs in a browser at
+register appends a `heartbeat` entry (its time and nothing else) every day, so an older head means the mirror may be
+stale. Exit codes: 0 proved, 1 the proof failed, 2 not found, 3 no key or mirror could be read, 4 proved but newer entries
+are not yet public in this mirror (the publication delay), so a strike among them would not show. The same check runs
+in a browser at
 `https://register.khaos.dev/verify-entry`.
 
 What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/
@@ -97,8 +99,8 @@ SHA-256(0x00 || entry); nodes are SHA-256(0x01 || left || right); a signed tree 
 sends its strings in NFC, or the same name in two forms is two different entries. A strike is an appended `revoke` that
 names the admitted leaf; nothing is ever changed or deleted. A withheld entry keeps its leaf, so every proof and head
 stays valid while its body is no longer served. The public git mirror receives a new entry's body only seven days after
-it is appended (heads, leaf hashes and proofs at once), so a body withheld within that week never enters the public
-history; a body withheld later stays in that history, and withholding then hides it from the live register only.
+it is appended, counted from the signed head that first held it (heads, leaf hashes, proofs, withholds and heartbeats
+at once), so a body withheld within that week never enters the public history; a body withheld later stays in that history, and withholding then hides it from the live register only.
 
 ## Provenance record fields
 
