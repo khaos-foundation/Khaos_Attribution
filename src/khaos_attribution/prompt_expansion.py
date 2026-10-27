@@ -25,6 +25,9 @@ EMBEDDING_MODEL = "Qwen3-Embedding-0.6B"
 FEW_SHOT_COUNT = 3
 TEMPERATURE = 0.5
 
+# How many of the nearest catalogue captions a listener is offered as starting points.
+NEAREST_COUNT = 3
+
 # The band training captions sit in; the result is clipped to the exporter's
 # own limit so nothing longer than a training caption reaches the engine.
 CAPTION_WORDS = (45, 70)
@@ -132,27 +135,65 @@ def select_exemplars(request: str, exemplars: list[dict], attempt: int = 0,
     return chosen, method
 
 
+def nearest_captions(exemplars: list[dict], picks: list[int], track_names: dict | None = None,
+                     count: int = NEAREST_COUNT) -> list[dict]:
+    """The first ``count`` of ``picks`` (pool indices, most relevant first) as ``{text, section, track,
+    track_name}`` for a listener to start from; ``track_name`` only where the artist named the track."""
+    names = track_names or {}
+    out: list[dict] = []
+    for index in picks[:max(0, count)]:
+        entry = exemplars[index]
+        track = entry.get("track")
+        name = names.get(track) if isinstance(track, str) else None
+        out.append({"text": entry["text"], "section": entry.get("section"),
+                    "track": track if isinstance(track, str) else None,
+                    "track_name": name if isinstance(name, str) and name.strip() else None})
+    return out
+
+
 # ── the query ────────────────────────────────────────────────────────────
 
-def build_query(request: str, shots: list[str], instrumental: bool = True) -> str:
-    """The text handed to the 5Hz LM's Simple-mode entry; style and content
-    are separated on purpose."""
+# "translate" restates the request in the artist's own caption words; "elaborate" is the earlier
+# instruction (copy the style, not the content), kept so the judge can render both.
+QUERY_STYLES = ("translate", "elaborate")
+DEFAULT_QUERY_STYLE = "translate"
+
+_NO_METADATA = ("Do not mention BPM, key, time signature, duration, timestamps or clock times, "
+                "or any artist, band or song names.")
+
+
+def build_query(request: str, shots: list[str], instrumental: bool = True, *,
+                style: str = DEFAULT_QUERY_STYLE) -> str:
+    """The text handed to the 5Hz LM's Simple-mode entry: by default the request's meaning kept and
+    restated in the examples' own vocabulary, nothing added that the request does not imply."""
+    if style not in QUERY_STYLES:
+        raise ValueError(f"unknown query style {style!r}; expected one of {QUERY_STYLES}")
     lo, hi = CAPTION_WORDS
     examples = "\n".join(f"- {s}" for s in shots)
     vocals = ("The music is instrumental — no vocals, no singing."
               if instrumental else "The music has sung vocals.")
+    if style == "elaborate":
+        return (
+            "Here are example descriptions of this artist's music. Copy their "
+            "writing STYLE — vocabulary, sentence rhythm, level of detail — but "
+            "NOT their musical content:\n"
+            f"{examples}\n\n"
+            f"Request: {request.strip()}\n\n"
+            "Write one flowing prose music caption describing music that matches "
+            "the request's mood and character, in exactly the writing style of the "
+            f"examples: a single paragraph of roughly {lo}–{hi} words. {vocals} "
+            f"Every musical detail must serve the request. {_NO_METADATA}"
+        )
     return (
-        "Here are example descriptions of this artist's music. Copy their "
-        "writing STYLE — vocabulary, sentence rhythm, level of detail — but "
-        "NOT their musical content:\n"
+        "Here are descriptions of this artist's music, in the artist's own words:\n"
         f"{examples}\n\n"
         f"Request: {request.strip()}\n\n"
-        "Write one flowing prose music caption describing music that matches "
-        "the request's mood and character, in exactly the writing style of the "
-        f"examples: a single paragraph of roughly {lo}–{hi} words. {vocals} "
-        "Every musical detail must serve the request. Do not mention BPM, key, "
-        "time signature, duration, timestamps or clock times, or any artist, "
-        "band or song names."
+        "Translate the request into this artist's words. Keep exactly what the request "
+        "asks for — its mood, instruments, energy and character — and restate it the way "
+        "these descriptions would. Wherever they fit what was asked, reuse the examples' "
+        "own words for instruments, textures, moods and production. Add no musical detail "
+        "the request does not imply. Write one flowing prose music caption: a single "
+        f"paragraph of roughly {lo}–{hi} words. {vocals} {_NO_METADATA}"
     )
 
 

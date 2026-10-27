@@ -7,11 +7,14 @@ import pytest
 from khaos_attribution.prompt_expansion import (
     CAPTION_WORDS,
     FEW_SHOT_COUNT,
+    NEAREST_COUNT,
+    QUERY_STYLES,
     MAX_CAPTION_CHARS,
     build_query,
     clip_caption,
     harvest,
     lexical_score,
+    nearest_captions,
     normalise_exemplars,
     normalise_keyscale,
     normalise_timesignature,
@@ -91,6 +94,43 @@ def test_query_carries_shots_length_and_vocal_stance():
     assert f"{CAPTION_WORDS[0]}–{CAPTION_WORDS[1]} words" in q
     assert "no vocals" in q
     assert "sung vocals" in build_query("x", [INTRO], instrumental=False)
+
+
+def test_default_query_translates_into_the_artists_words():
+    """The default query keeps the request and asks for the examples' own words, adding nothing."""
+    q = build_query("a sad piano piece", [INTRO, GROOVE])
+    assert q == build_query("a sad piano piece", [INTRO, GROOVE], style="translate")
+    assert "Translate the request into this artist's words" in q
+    assert "reuse the examples' own words for instruments, textures, moods and production" in q
+    assert "Add no musical detail the request does not imply" in q
+    assert "NOT their musical content" not in q
+    for banned in ("BPM", "key", "timestamps", "artist, band or song names"):
+        assert banned in q
+
+
+def test_the_elaborate_query_is_kept_for_the_judge():
+    """The earlier instruction stays reachable by name, byte for byte, and an unknown style is refused."""
+    q = build_query("x", [INTRO], style="elaborate")
+    assert "Copy their writing STYLE" in q and "NOT their musical content" in q
+    assert "Every musical detail must serve the request" in q
+    assert QUERY_STYLES == ("translate", "elaborate")
+    with pytest.raises(ValueError):
+        build_query("x", [INTRO], style="poetic")
+
+
+def test_nearest_captions_offer_the_first_picks_with_named_tracks():
+    """The nearest captions follow the pick order, name a track only where the artist named it."""
+    ex = normalise_exemplars({"exemplars": [
+        {"text": INTRO, "section": "intro", "track": "t1"},
+        {"text": GROOVE, "section": "verse", "track": "t2"},
+        {"text": VOCAL, "section": "chorus", "track": "t3"},
+        {"text": "A fourth caption long enough to be read as one.", "track": ["odd"]}]})
+    out = nearest_captions(ex, [2, 0, 1, 3], {"t3": "Winner", "t1": "  "})
+    assert len(out) == NEAREST_COUNT == 3
+    assert [o["text"] for o in out] == [VOCAL, INTRO, GROOVE]
+    assert [o["track_name"] for o in out] == ["Winner", None, None]
+    assert nearest_captions(ex, [3])[0]["track"] is None
+    assert nearest_captions(ex, []) == []
 
 
 def test_timestamps_are_stripped_and_captions_clipped():
