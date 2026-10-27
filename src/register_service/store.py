@@ -165,7 +165,8 @@ class Store:
 
     def _next_serial(self) -> int:
         row = self.db.execute("SELECT MAX(serial) AS m FROM records").fetchone()
-        return max(FIRST_SERIAL, (row["m"] or 0) + 1)
+        # A serial the log already admitted is taken even when its row was lost to a restore.
+        return max(FIRST_SERIAL, (row["m"] or 0) + 1, self.log.max_serial() + 1)
 
     def register(self, signed: dict, machine_key_id: str, account_id: int, countersign) -> tuple:
         """The next serial, the countersignature and the row, as one transaction: (serial, counter, already)."""
@@ -216,10 +217,9 @@ class Store:
             self.db.execute("UPDATE records SET state = 'withdrawn', withdrawn_at = ?, withdraw_reason = ? WHERE serial = ?",
                             (at, reason[:400], serial))
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
-            leaf = self.log.admit_leaf_of(row["record_sha256"])
-            if leaf is None:
+            if self.log.admit_leaf_of(row["record_sha256"]) is None:
                 raise RuntimeError(f"record {serial} has no admit entry in the log")
-            if not self.log.struck().get(leaf):
+            for leaf in self.log.standing_admits(row["record_sha256"]):
                 self.log.revoke_locked(leaf, reason[:400].strip() or "withdrawn by the account that published it", time=at)
             return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
 
@@ -257,31 +257,44 @@ class Store:
 
     # ---- the log ----
 
-    def log_open(self) -> int:
-        """The log's first entries from the ledger and the records, once, and a fresh head when the log key changed."""
+    def log_open(self, witnesses: list | None = None) -> int:
+        """Checks the database against the log it published; then the first entries, once, and a fresh head when the
+        log key changed. A database behind or apart from its published log is blocked, never appended to."""
+        for w in self.log.witness(witnesses or [], self.log.signer.public_pem()):
+            if w["state"] in ("behind", "forked"):
+                self.log.blocked = w["message"]
+                return 0
         with self._tx():
             n = self.log.genesis_locked()
             self.log.resign_locked()
             return n
 
-    def log_append(self, entry: dict) -> dict:
-        """A warden's entry: an admit of a registered record, a revoke or a withhold, each naming its sitting."""
+    def log_append(self, entry: dict, key_id: str) -> dict:
+        """A warden's entry: an admit of a registered record, a revoke or a withhold, each naming its sitting and
+        signed into the leaf with the machine that appended it; the ledger gets the row in the same transaction."""
         kind = entry.get("kind")
         with self._tx():
             if kind == "admit":
-                row = self.db.execute("SELECT serial, record_sha256, counter_json FROM records WHERE record_sha256 = ?",
+                row = self.db.execute("SELECT serial, record_sha256, counter_json, state FROM records WHERE record_sha256 = ?",
                                       (str(entry.get("record_sha256") or ""),)).fetchone()
                 if row is None:
                     raise KeyError("no record is registered under that record_sha256")
-                return self.log.admit_locked(row["serial"], row["record_sha256"], json.loads(row["counter_json"]),
-                                             wardens=entry.get("wardens"), sitting=entry.get("sitting") or "")
-            if kind == "revoke":
-                return self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"),
-                                              wardens=entry.get("wardens"), sitting=entry.get("sitting") or "")
-            if kind == "withhold":
-                return self.log.withhold_locked(str(entry.get("withholds") or ""), entry.get("reason"),
-                                                wardens=entry.get("wardens"), sitting=entry.get("sitting") or "")
-        raise ValueError("kind is admit, revoke or withhold")
+                if row["state"] == "withdrawn":
+                    raise ValueError("that record is withdrawn; it is not admitted again")
+                if self.log.standing_admits(row["record_sha256"]):
+                    raise ValueError("that record already has an admit no revoke has struck")
+                out = self.log.admit_locked(row["serial"], row["record_sha256"], json.loads(row["counter_json"]),
+                                            wardens=entry.get("wardens"), sitting=entry.get("sitting") or "", appended_by=key_id)
+            elif kind == "revoke":
+                out = self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"), wardens=entry.get("wardens"),
+                                             sitting=entry.get("sitting") or "", appended_by=key_id)
+            elif kind == "withhold":
+                out = self.log.withhold_locked(str(entry.get("withholds") or ""), entry.get("reason"), wardens=entry.get("wardens"),
+                                               sitting=entry.get("sitting") or "", appended_by=key_id)
+            else:
+                raise ValueError("kind is admit, revoke or withhold")
+            self._ledger("log-append", None, None, key_id, {"kind": kind, "leaf_hash": out["leaf_hash"], "index": out["index"]})
+            return out
 
     def log_withhold(self, leaf_hex: str, reason: str) -> dict:
         """The operator's withhold: the body leaves public view, the withholding is itself an entry."""

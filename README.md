@@ -80,9 +80,14 @@ khaos-log-verify <leaf hash> --mirror ./ledger    # a clone of the public mirror
 
 The command uses only the log's public key committed in this package (`src/khaos_attribution/translog/log-key.pub`,
 placed after the log key's ceremony; until then pass the published key with `--key`) and the mirror's static files. It
-proves the entry's inclusion under a signed tree head, says whether the entry was struck and why, and checks that the
-newest head extends the last one this machine saw (kept in `~/.khaos/log-verify-state.json`). Exit codes: 0 proved, 1
-the proof failed, 2 not found, 3 no key or mirror could be read. The same check runs in a browser at
+trusts nothing the mirror says that the signed head does not prove: the leaf hashes must make the signed root, every
+published body must hash to its leaf, a missing body is accepted only when a withhold entry in the log names it (or,
+in the public git mirror, while it is inside the publication delay), a record is found only through its own proved
+admit entry, and a strike only through a proved revoke (or the withhold of one, which still names what it struck). It
+proves the entry's inclusion, says whether it was struck and why, checks that the newest head extends the last one this
+machine saw (kept in `~/.khaos/log-verify-state.json`), and warns when the newest head is more than 48 hours old: the
+register signs a fresh head every day, so an older one means the mirror may be stale. Exit codes: 0 proved, 1 the proof
+failed, 2 not found, 3 no key or mirror could be read. The same check runs in a browser at
 `https://register.khaos.dev/verify-entry`.
 
 What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/
@@ -91,7 +96,9 @@ SHA-256(0x00 || entry); nodes are SHA-256(0x01 || left || right); a signed tree 
 `{log_id, root_sha256, timestamp, tree_size, version}`. RFC 8785 does not normalise unicode: anyone writing an entry
 sends its strings in NFC, or the same name in two forms is two different entries. A strike is an appended `revoke` that
 names the admitted leaf; nothing is ever changed or deleted. A withheld entry keeps its leaf, so every proof and head
-stays valid while its body is no longer served.
+stays valid while its body is no longer served. The public git mirror receives a new entry's body only seven days after
+it is appended (heads, leaf hashes and proofs at once), so a body withheld within that week never enters the public
+history; a body withheld later stays in that history, and withholding then hides it from the live register only.
 
 ## Provenance record fields
 

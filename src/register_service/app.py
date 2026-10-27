@@ -26,7 +26,7 @@ from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of
 from register_service.store import Store, now_utc
-from register_service.translog import EntryRefused, export as export_log
+from register_service.translog import EntryRefused, LogBlocked, export as export_log
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
@@ -44,6 +44,8 @@ def settings() -> dict:
             "log_key_file": Path(os.environ.get("REGISTER_LOG_KEY_FILE", str(data / "log-key.pem"))),
             # The log key has its own ceremony, so its development setting is its own; unset, it follows the register's.
             "log_dev_key": os.environ.get("REGISTER_LOG_DEV_KEY", "1" if dev_key else "0") == "1",
+            "log_public_delay_days": float(os.environ.get("REGISTER_LOG_PUBLIC_DELAY_DAYS", "7")),
+            "log_witnesses": [w.strip() for w in os.environ.get("REGISTER_LOG_WITNESSES", "").split(",") if w.strip()],
             # A development key reachable from outside, by decision: the deploy sets it beside REGISTER_DEV_KEY.
             "dev_key_public": os.environ.get("REGISTER_DEV_KEY_PUBLIC") == "1",
             "public_url": os.environ.get("REGISTER_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")}
@@ -102,6 +104,22 @@ def load_log_key(cfg: dict) -> R.SigningKey:
     """The log's own key, which signs tree heads and nothing else."""
     path, dev = log_key_settings(cfg)
     return _load_key(path, dev, "log key", "REGISTER_LOG_DEV_KEY")
+
+
+PUBLIC_DELAY_MAX_DAYS = 7   # the verifiers allow this much, plus slack, for a body not yet in the public mirror
+
+
+def log_places(cfg: dict) -> tuple:
+    """(the full export, the delayed public export, the delay in days, every published copy that witnesses the log)."""
+    mirror, public = cfg["data"] / "mirror", cfg["data"] / "mirror-public"
+    delay = min(max(float(cfg.get("log_public_delay_days", PUBLIC_DELAY_MAX_DAYS)), 0.0), PUBLIC_DELAY_MAX_DAYS)
+    witnesses = [mirror, public, cfg["data"].parent / "ledger-mirror", *cfg.get("log_witnesses", [])]
+    return mirror, public, delay, witnesses
+
+
+def export_all(cfg: dict, log, key: R.SigningKey, dev: bool) -> None:
+    mirror, public, delay, _ = log_places(cfg)
+    export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay)
 
 
 def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
@@ -167,7 +185,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     store.log.signer = log_key
     mirror = cfg["data"] / "mirror"
     (mirror / "models").mkdir(parents=True, exist_ok=True)
-    store.log_open()
+    store.log_open(log_places(cfg)[3])
+    if store.log.blocked:
+        log.error("the log is blocked: %s", store.log.blocked)
     # No schema served either: the public doors are documented in deploy/README.md, not enumerated to callers.
     app = FastAPI(title="Guild Register", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.index, app.state.key, app.state.cfg = store, index, key, cfg
@@ -224,7 +244,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     def log_mirror_quietly() -> None:
         try:
-            export_log(store.log, mirror, log_key_doc(log_key, log_dev))
+            export_all(cfg, store.log, log_key, log_dev)
         except Exception as exc:  # noqa: BLE001
             log.error("log mirror not written: %s", exc)
 
@@ -673,6 +693,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(422, f"{name} must not be negative")
         return n
 
+    @app.exception_handler(LogBlocked)
+    async def log_blocked(request: Request, exc: LogBlocked):
+        return JSONResponse({"detail": f"the register is not taking changes: {exc}"}, status_code=503)
+
     @app.post("/log/append")
     async def log_append(request: Request):
         """A warden's entry, signed by the warden's enrolled machine: a strike, an admit or a withhold, naming the sitting."""
@@ -685,7 +709,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
         def work():
             try:
-                out = store.log_append(entry)
+                out = store.log_append(entry, key_id)
             except KeyError as e:
                 raise HTTPException(404, e.args[0]) from None
             except (EntryRefused, ValueError) as e:
@@ -706,7 +730,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         head = store.log.head(size)
         if head is None:
             raise HTTPException(404, "no head of that size")
-        return cached(request, head, 31536000)
+        # The newest size is signed again daily and after a key change; only older sizes never change.
+        return cached(request, head, 10 if size >= store.log.size() else 31536000)
 
     @app.api_route("/log/proof/{leaf_hash}", methods=["GET", "HEAD"])
     def log_proof(request: Request, leaf_hash: str, size: int | None = None):
@@ -718,7 +743,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             proof = store.log.inclusion(leaf_hash, size)
         except KeyError as e:
             raise HTTPException(404, e.args[0]) from None
-        return cached(request, proof, 31536000 if size is not None else 10)
+        return cached(request, proof, 31536000 if size is not None and size < store.log.size() else 10)
 
     @app.api_route("/log/consistency", methods=["GET", "HEAD"])
     def log_consistency(request: Request):
@@ -775,6 +800,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.get("/health")
     def health():
         return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": len(store.serials()), "outputs": index.count(),
+                             "log_blocked": store.log.blocked,
                              "development": bool(cfg["dev_key"])})
 
     softbinding.add_routes(app, index, cfg["public_url"])

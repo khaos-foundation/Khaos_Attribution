@@ -19,7 +19,11 @@ default="$(git -C "$CLONE" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/
 [ -n "$default" ] || default=main
 git -C "$CLONE" checkout -q -B "$default" "origin/$default" 2>/dev/null || git -C "$CLONE" checkout -q -B "$default"
 mkdir -p "$DATA/mirror/models"
-rsync -a --delete --exclude .git --exclude README.md "$DATA/mirror/" "$CLONE/"
+# The log goes from the delayed export: new bodies reach this public history only after the grace period.
+rsync -a --delete --exclude .git --exclude README.md --exclude /log/ --exclude .log-export.lock "$DATA/mirror/" "$CLONE/"
+if [ -d "$DATA/mirror-public/log" ]; then
+  rsync -a --delete --exclude '.log-export.lock' "$DATA/mirror-public/log/" "$CLONE/log/"
+fi
 if [ ! -f "$CLONE/README.md" ]; then
   printf '# The Guild Register, mirrored\n\nEvery registered model as a JSON record under `models/`, the hash-chained ledger as `ledger.jsonl`, and the signed append-only log under `log/` (signed tree heads, entries, inclusion and consistency proofs, the log key, anchor receipts), enough for `khaos-log-verify --mirror <this folder>`. Written by the register at https://register.khaos.dev and pushed here; nothing is edited by hand.\n' > "$CLONE/README.md"
 fi

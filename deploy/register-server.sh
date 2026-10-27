@@ -84,6 +84,10 @@ REGISTER_DEV_KEY_PUBLIC=1
 # The log's own key, which signs tree heads; 1 until register-log-key switch places the Guild's.
 REGISTER_LOG_KEY_FILE=$DATA/log-key.pem
 REGISTER_LOG_DEV_KEY=1
+# Days a new log entry's body waits before it reaches the public mirror's git history (0 to 7); a withhold inside it never lands there.
+REGISTER_LOG_PUBLIC_DELAY_DAYS=7
+# Further published copies that witness the log, comma-separated folders or URLs (the public mirror's raw address, say).
+REGISTER_LOG_WITNESSES=
 # The storage box for the nightly backup, as user@host:path over ssh (Hetzner: port 23); empty keeps backups local only.
 BACKUP_TARGET=
 BACKUP_PORT=23
@@ -187,7 +191,7 @@ UNIT
 for job in stamp upgrade; do
 cat > /etc/systemd/system/register-log-$job.service <<UNIT
 [Unit]
-Description=The Guild Register's log: $job the OpenTimestamps anchor of its root
+Description=The Guild Register's log: $job (stamp signs a fresh head, then anchors its root with OpenTimestamps)
 After=network-online.target
 Wants=network-online.target
 

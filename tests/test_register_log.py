@@ -148,13 +148,13 @@ def test_verification_succeeds_against_the_static_mirror_alone_and_fails_when_it
     out = json.loads(capsys.readouterr().out)
     assert out["struck"]["reason"] == "x" and out["consistent_since"] == 2
     leaf = store.log.admit_leaf_of(signed["record_sha256"])
-    body = copy / "log" / "entries" / f"{leaf}.json"
-    body.write_bytes(body.read_bytes().replace(b'"serial":', b'"serial":1'))
+    bundle = copy / "log" / "bodies.json"
+    bundle.write_text(bundle.read_text().replace('\\"serial\\":', '\\"serial\\":1'))
     assert V.main([leaf, "--mirror", str(copy), "--key", str(pem), "--state", "none"]) == V.FAILED
     other = R.SigningKey.generate().public_pem()
     (tmp_path / "other.pub").write_text(other, encoding="ascii")
     assert V.main([leaf, "--mirror", str(copy), "--key", str(tmp_path / "other.pub"), "--state", "none"]) == V.FAILED
-    assert V.main(["0" * 64, "--mirror", str(copy), "--key", str(pem), "--state", "none"]) == V.NOT_FOUND
+    assert V.main(["0" * 64, "--mirror", str(_mirror(app)), "--key", str(pem), "--state", "none"]) == V.NOT_FOUND
     assert V.main([leaf, "--mirror", str(tmp_path / "nowhere"), "--key", str(pem), "--state", "none"]) == V.UNREADABLE
 
 
@@ -254,7 +254,7 @@ def test_the_public_reads_cache_with_etags_and_are_bounded_per_address(register)
     assert http.get("/log/sth/99").status_code == 404 and http.get("/log/proof/xyz").status_code == 422
     first = http.get("/log/entries", params={"start": 1, "end": 2}).json()["entries"][0]["leaf_hash"]
     at_two = http.get(f"/log/proof/{first}", params={"size": 2})
-    assert at_two.status_code == 200 and at_two.json()["tree_size"] == 2 and "immutable" in at_two.headers["cache-control"]
+    assert at_two.status_code == 200 and at_two.json()["tree_size"] == 2 and "immutable" not in at_two.headers["cache-control"]
     assert http.get(f"/log/proof/{first}", params={"size": 1}).status_code == 404, "a leaf is not in a head from before it"
     assert store.log.leaf(first)["idx"] == 1
     assert http.get("/log/consistency", params={"from": 2, "to": 1}).status_code == 404
@@ -311,30 +311,42 @@ def test_the_commands_withhold_check_the_whole_log_and_record_the_log_key_never_
     assert main(["check"]) == 1 and "does not hash to its leaf" in capsys.readouterr().out
 
 
-def test_the_browser_verifier_proves_the_same_mirror_and_refuses_a_changed_body_or_another_key(register, tmp_path):
-    """The page's JavaScript under Node, with Node's WebCrypto: the same answers as the command."""
+def run_page_verifier(tmp_path, cases):
+    """The page's JavaScript under Node with Node's WebCrypto; skipped where Node is not installed."""
     import subprocess
+    from pathlib import Path
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
+    spec = tmp_path / "cases.json"
+    spec.write_text(json.dumps([{"mirror": str(m), "input": i, "pinned": k} for m, i, k in cases]))
+    js = Path("src/register_service/static/log-verify.js").resolve()
+    run = subprocess.run([node, "tests/js/log_verify_harness.mjs", str(js), str(spec)], capture_output=True, text=True,
+                         timeout=60, check=True)
+    return [json.loads(line) for line in run.stdout.strip().splitlines()]
+
+
+def test_the_browser_verifier_proves_the_same_mirror_and_refuses_a_changed_body_or_another_key(register, tmp_path):
     app, store, http = register
     _, _, signed, _ = _publish(register)
     _, client2, signed2, serial2 = _publish(register, account="artist-two", run_id="run_2")
     client2.withdraw(serial2, "asked to")
     entry = store.log.entries(2, 3)[0]["entry"]
-    info = tmp_path / "info.json"
-    info.write_text(json.dumps({"records": [signed["record_sha256"]], "struck_record": signed2["record_sha256"], "entry": entry,
-                                "leaf": store.log.admit_leaf_of(signed["record_sha256"])}))
-    from pathlib import Path
-    js = Path("src/register_service/static/log-verify.js").resolve()
-    run = subprocess.run([node, "tests/js/log_verify_harness.mjs", str(js), str(_mirror(app)), str(info)], capture_output=True,
-                         text=True, timeout=60, check=True)
-    first, struck, pasted, changed, other = [json.loads(line) for line in run.stdout.strip().splitlines()]
+    pem = store.log.signer.public_pem()
+    leaf = store.log.admit_leaf_of(signed["record_sha256"])
+    changed = tmp_path / "changed"
+    shutil.copytree(_mirror(app), changed)
+    bundle = changed / "log" / "bodies.json"
+    bundle.write_text(bundle.read_text().replace('\\"serial\\":', '\\"serial\\":1'))
+    other = R.SigningKey.generate().public_pem()
+    first, struck, pasted, tampered, wrong_key = run_page_verifier(tmp_path, [
+        (_mirror(app), signed["record_sha256"], pem), (_mirror(app), signed2["record_sha256"], pem),
+        (_mirror(app), json.dumps(entry), ""), (changed, leaf, pem), (_mirror(app), leaf, other)])
     assert first[0].startswith("ok|Proved: the admit entry for No. 65536") and not any("cannot check Ed25519" in x for x in first)
     assert any(x == "bad|Struck: asked to" for x in struck)
     assert pasted[0].startswith("ok|Proved: the admit entry for No. 65537") and "pasted, hashed here" in pasted[1]
-    assert changed == ["bad|Not proved: the entry's body does not hash to its leaf"]
-    assert other[0].startswith("bad|Not proved: the head is signed by key")
+    assert tampered[0].startswith("bad|Not proved: the body of entry") and "does not hash to its leaf" in tampered[0]
+    assert wrong_key[0].startswith("bad|Not proved: the head is signed by key")
 
 
 def test_the_opentimestamps_backend_round_trips_a_receipt_with_its_calendars_stood_in_for(monkeypatch):
