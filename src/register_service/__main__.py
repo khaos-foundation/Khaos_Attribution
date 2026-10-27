@@ -1,14 +1,19 @@
 """The register's commands: serve, and the operator's account and invite management.
     python -m register_service serve [--host 127.0.0.1] [--port 8912]
     python -m register_service account <name>
-    python -m register_service invite <account> [--role workshop|space]
+    python -m register_service invite <account> [--role workshop|space|warden]
     python -m register_service revoke <machine_key_id> <reason>
     python -m register_service check
     python -m register_service verify-key <holder> --kind authority|research|media    a key shown once
     python -m register_service verify-key <holder> --revoke
     python -m register_service make-key <path>            a new countersigning key, on the ceremony's machine
-    python -m register_service key --present "A, B, C"    the ledger's record of the key the service now signs with
+    python -m register_service key --present "A, B, C" [--log]    the ledger's record of a key the service now signs with
+    python -m register_service log-withhold <leaf_hash> <reason>    a body out of public view; proofs unchanged
+    python -m register_service log-stamp | log-upgrade    the day's heartbeat entry and the anchor of its root; the upgrade
+    python -m register_service log-recover    put back entries the published log holds and this database lost
 """
+
+from __future__ import annotations
 
 import argparse
 import sys
@@ -22,12 +27,17 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve"); s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=DEFAULT_PORT)
     sub.add_parser("account").add_argument("name")
-    i = sub.add_parser("invite"); i.add_argument("account"); i.add_argument("--role", choices=("workshop", "space"), default="workshop")
+    i = sub.add_parser("invite"); i.add_argument("account"); i.add_argument("--role", choices=("workshop", "space", "warden"), default="workshop")
     r = sub.add_parser("revoke"); r.add_argument("key_id"); r.add_argument("reason")
     sub.add_parser("check")
     v = sub.add_parser("verify-key"); v.add_argument("holder"); v.add_argument("--kind", default="research"); v.add_argument("--revoke", action="store_true")
     sub.add_parser("make-key").add_argument("path")
     k = sub.add_parser("key"); k.add_argument("--present", required=True, help="who was there, comma-separated"); k.add_argument("--note", default="")
+    k.add_argument("--log", action="store_true", help="the log key, not the countersigning key")
+    w = sub.add_parser("log-withhold"); w.add_argument("leaf_hash"); w.add_argument("reason")
+    sub.add_parser("log-stamp")
+    sub.add_parser("log-upgrade")
+    sub.add_parser("log-recover")
     a = p.parse_args(argv)
     cfg = settings()
     if a.cmd == "make-key":
@@ -61,17 +71,83 @@ def main(argv=None) -> int:
     elif a.cmd == "revoke":
         store.revoke_machine(a.key_id, a.reason); print("revoked")
     elif a.cmd == "key":
-        from register_service.app import load_register_key  # noqa: PLC0415
-        if cfg["dev_key"]:
-            raise SystemExit("REGISTER_DEV_KEY is set: a development key is never recorded as the Guild's")
-        key = load_register_key(cfg)
-        store.record_key(key.key_id, key.public_pem(), [x.strip() for x in a.present.split(",") if x.strip()], a.note)
-        print(f"recorded key {key.key_id}")
+        from register_service.app import load_log_key, load_register_key  # noqa: PLC0415
+        if cfg["log_dev_key" if a.log else "dev_key"]:
+            raise SystemExit(f"{'REGISTER_LOG_DEV_KEY' if a.log else 'REGISTER_DEV_KEY'} is set: a development key is never "
+                             "recorded as the Guild's")
+        key = load_log_key(cfg) if a.log else load_register_key(cfg)
+        note = ("log key" + (f": {a.note}" if a.note else "")) if a.log else a.note
+        store.record_key(key.key_id, key.public_pem(), [x.strip() for x in a.present.split(",") if x.strip()], note)
+        print(f"recorded {'log ' if a.log else ''}key {key.key_id}")
+    elif a.cmd == "log-withhold":
+        from register_service.app import export_all  # noqa: PLC0415
+        log_key = open_log(cfg, store, appending=True)
+        out = store.log_withhold(a.leaf_hash, a.reason)
+        export_all(cfg, store.log, log_key, cfg["log_dev_key"])
+        print(f"withheld {a.leaf_hash}; the withholding is leaf {out['index']} ({out['leaf_hash']}); the mirror is rewritten")
+    elif a.cmd == "log-recover":
+        from register_service.app import export_all, log_places  # noqa: PLC0415
+        from register_service.translog import recover  # noqa: PLC0415
+        log_key = open_log(cfg, store)
+        ok, lines = recover(store, log_places(cfg)[3], log_key.public_pem())
+        print("\n".join(lines))
+        if not ok:
+            return 1
+        export_all(cfg, store.log, log_key, cfg["log_dev_key"])
+        print("restart the service: systemctl restart register.service")
+    elif a.cmd in ("log-stamp", "log-upgrade"):
+        from register_service import anchor  # noqa: PLC0415
+        if a.cmd == "log-stamp":
+            refresh_head(cfg, store)
+            out = anchor.stamp_latest(store, anchor.OpenTimestamps())
+            print(f"stamped the root of size {out['tree_size']}" if out else "nothing new to stamp")
+        else:
+            done = anchor.upgrade_pending(store, anchor.OpenTimestamps())
+            print(f"completed: {done}" if done else "no receipt completed yet")
+        from register_service.translog import export_anchors  # noqa: PLC0415
+        for place in ("mirror", "mirror-public"):
+            export_anchors(store.log, cfg["data"] / place)
     elif a.cmd == "check":
+        from register_service.app import log_places  # noqa: PLC0415
         ok = store.ledger_ok()
+        pub = cfg["log_key_file"].with_suffix(".pub")
+        problems = store.log.problems(pub.read_text(encoding="ascii") if pub.is_file() else None)
+        if pub.is_file():
+            verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], pub.read_text(encoding="ascii")),
+                                             started=(cfg["data"] / "log-started").is_file())
+            problems += [verdict] if verdict else []
         print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {len(store.serials())} models")
-        return 0 if ok else 1
+        print(f"log {'whole' if not problems else 'BROKEN'}: {store.log.size()} entries"
+              + ("" if pub.is_file() else " (no log public key beside the key file; signatures not checked)"))
+        for p_ in problems[:20]:
+            print(f"  {p_}")
+        return 0 if ok and not problems else 1
     return 0
+
+
+def open_log(cfg: dict, store: Store, appending: bool = False):
+    """The log key loaded and the database checked against the published log; an append is refused when it is behind."""
+    from register_service.app import load_log_key, log_places  # noqa: PLC0415
+    key = load_log_key(cfg)
+    store.log.signer = key
+    with store._tx():
+        store.log.remember_key_locked()
+    verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], key.public_pem()),
+                                     started=(cfg["data"] / "log-started").is_file())
+    store.log.blocked = verdict
+    if verdict and appending:
+        raise SystemExit(verdict)
+    return key
+
+
+def refresh_head(cfg: dict, store: Store) -> dict | None:
+    """The day's heartbeat entry, appended and exported: a quiet log still shows it is alive."""
+    from register_service.app import export_all, log_key_settings  # noqa: PLC0415
+    key = open_log(cfg, store, appending=True)
+    with store._tx():
+        head = store.log.heartbeat_locked()
+    export_all(cfg, store.log, key, log_key_settings(cfg)[1])
+    return head
 
 
 if __name__ == "__main__":

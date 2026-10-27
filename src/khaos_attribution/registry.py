@@ -422,8 +422,9 @@ class RegisterClient:
         return self._post("/api/enrol", {"invite": invite, "machine_name": machine_name,
                                          "public_key_pem": self.key.public_pem(), "nonce": secrets.token_hex(8)})
 
-    def publish(self, signed: dict) -> dict:
-        return self._post("/api/records", signed)
+    def publish(self, signed: dict, countersignature: dict | None = None) -> dict:
+        """With the register's countersignature from an earlier answer, a record lost in a recovery gets its serial back."""
+        return self._post("/api/records", {**signed, "countersignature": countersignature} if countersignature else signed)
 
     def withdraw(self, serial: int, reason: str, nonce: str | None = None) -> dict:
         """An outbox entry carries its nonce from the day it was written, so a retry is the same body, not a replay."""
@@ -474,6 +475,10 @@ class RegisterClient:
                 return json.loads(r.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as e:
             raise RegisterError(e.code, (e.read().decode("utf-8", "replace") or e.reason)[:400]) from None
+
+    def log_append(self, entry: dict, nonce: str | None = None) -> dict:
+        """A warden's entry in the signed log: a revoke, admit or withhold naming its sitting; returns its leaf and index."""
+        return self._post("/log/append", {"entry": entry, "nonce": nonce or secrets.token_hex(8)})
 
     def served(self, serial: int, space_url: str, state: str, nonce: str | None = None) -> dict:
         return self._post("/api/served", {"serial": serial, "space_url": space_url, "state": state, "nonce": nonce or secrets.token_hex(8)})

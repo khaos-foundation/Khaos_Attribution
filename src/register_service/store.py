@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from khaos_attribution.registry import FIRST_SERIAL, canonical_bytes, sha256_hex
+from register_service.translog import LogBlocked, TransLog
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL);
@@ -28,12 +29,13 @@ CREATE TABLE IF NOT EXISTS records (serial INTEGER PRIMARY KEY, record_sha256 TE
   state TEXT NOT NULL, published_at TEXT NOT NULL, withdrawn_at TEXT, withdraw_reason TEXT);
 CREATE TABLE IF NOT EXISTS served (serial INTEGER NOT NULL, space_url TEXT NOT NULL, state TEXT NOT NULL,
   at TEXT NOT NULL, key_id TEXT NOT NULL, PRIMARY KEY (serial, space_url));
+CREATE TABLE IF NOT EXISTS register_keys (key_id TEXT PRIMARY KEY, public_pem TEXT NOT NULL, first_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, serial INTEGER, record_sha256 TEXT,
   key_id TEXT, at TEXT NOT NULL, detail_json TEXT NOT NULL, entry_sha256 TEXT NOT NULL, prev_sha256 TEXT);
 """
 
 
-ROLES = ("workshop", "space")
+ROLES = ("workshop", "space", "warden")
 
 
 def _payload_of(signed: dict) -> int:
@@ -54,6 +56,7 @@ class Store:
         self.db.executescript(SCHEMA)
         self._ledger_status = None
         self._add_payload_column()
+        self.log = TransLog(self)
 
     def _add_payload_column(self) -> None:
         """The watermark bucket as its own indexed column, so a bucket lookup never parses every record."""
@@ -102,7 +105,8 @@ class Store:
             return cur.lastrowid
 
     def create_invite(self, account_name: str, role: str = "workshop") -> str:
-        """An invite fixes the role the machine will have: a Workshop publishes and withdraws; a Space reports serving."""
+        """An invite fixes the role the machine will have: a Workshop publishes and withdraws; a Space reports serving;
+        a warden's machine appends the Guild's strikes and manual entries to the log."""
         if role not in ROLES:
             raise ValueError(f"role is one of {ROLES}")
         with self._tx():
@@ -162,17 +166,34 @@ class Store:
 
     def _next_serial(self) -> int:
         row = self.db.execute("SELECT MAX(serial) AS m FROM records").fetchone()
-        return max(FIRST_SERIAL, (row["m"] or 0) + 1)
+        # A serial the log already admitted is taken even when its row was lost to a restore.
+        return max(FIRST_SERIAL, (row["m"] or 0) + 1, self.log.max_serial() + 1, self.log.max_reserved() + 1)
 
-    def register(self, signed: dict, machine_key_id: str, account_id: int, countersign) -> tuple:
-        """The next serial, the countersignature and the row, as one transaction: (serial, counter, already)."""
+    def register(self, signed: dict, machine_key_id: str, account_id: int, countersign, presented: dict | None = None) -> tuple:
+        """The next serial, the countersignature and the row, as one transaction: (serial, counter, already).
+        `countersign(serial, at)` signs; a record the log already admits keeps that admit's serial and time, and one
+        presenting a valid countersignature (`presented`, checked by the caller) for a reserved serial gets it back."""
         with self._tx():
             have = self.db.execute("SELECT serial, counter_json FROM records WHERE record_sha256 = ?",
                                    (signed["record_sha256"],)).fetchone()
             if have:
                 return have["serial"], json.loads(have["counter_json"]), True
-            serial = self._next_serial()
-            counter = countersign(serial)
+            if self.log.blocked:
+                raise LogBlocked(self.log.blocked)
+            admitted = self.log.admitted(signed["record_sha256"])
+            if admitted is not None:
+                return self._register_admitted(signed, machine_key_id, account_id, countersign, admitted)
+            restores = None
+            if presented is not None and int(presented["serial"]) in self.log.reserved():
+                serial = int(presented["serial"])
+                counter = countersign(serial, presented["countersigned_at_utc"])
+                self.db.execute("UPDATE log_reserved SET returned_at = ?, returned_to = ? WHERE serial = ?",
+                                (now_utc(), signed["record_sha256"], serial))
+                restores = {"serial": serial, "countersigned_at_utc": presented["countersigned_at_utc"],
+                            "linked_by": "countersigned serial"}
+            else:
+                serial = self._next_serial()
+                counter = countersign(serial, None)
             self.db.execute(
                 "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
                 " published_at, payload) VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?)",
@@ -180,7 +201,28 @@ class Store:
                  json.dumps(counter, sort_keys=True), counter["countersigned_at_utc"], _payload_of(signed)))
             self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
                          {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"]})
+            # A record this database does not know may be one the recovery lost, its strike among the lost entries:
+            # its admit waits on every loss still open until the wardens answer, never on its own word.
+            pending = self.log.open_lost_global()
+            self.log.admit_locked(serial, signed["record_sha256"], counter, time=counter["countersigned_at_utc"], restores=restores,
+                                  pending_lost=pending or ([] if restores else None))
             return serial, counter, False
+
+    def _register_admitted(self, signed: dict, machine_key_id: str, account_id: int, countersign, admitted: dict) -> tuple:
+        """A record the log admitted before this database lost it: its row back under the same serial, nothing appended."""
+        serial = int(admitted["serial"])
+        counter = countersign(serial, admitted["countersignature"]["countersigned_at_utc"])
+        struck = set(self.log.admit_states(signed["record_sha256"]).values()) == {"struck"}
+        self.db.execute(
+            "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
+            " published_at, payload, withdrawn_at, withdraw_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (serial, signed["record_sha256"], machine_key_id, account_id, json.dumps(signed, sort_keys=True),
+             json.dumps(counter, sort_keys=True), "withdrawn" if struck else "registered", counter["countersigned_at_utc"],
+             _payload_of(signed), now_utc() if struck else None, "struck in the log" if struck else None))
+        self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
+                     {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"],
+                      "restored_from_log": True})
+        return serial, counter, False
 
     def record(self, serial: int) -> dict | None:
         row = self.db.execute("SELECT * FROM records WHERE serial = ?", (serial,)).fetchone()
@@ -212,6 +254,10 @@ class Store:
             self.db.execute("UPDATE records SET state = 'withdrawn', withdrawn_at = ?, withdraw_reason = ? WHERE serial = ?",
                             (at, reason[:400], serial))
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
+            if self.log.admit_leaf_of(row["record_sha256"]) is None:
+                raise RuntimeError(f"record {serial} has no admit entry in the log")
+            for leaf in [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]:
+                self.log.revoke_locked(leaf, reason[:400].strip() or "withdrawn by the account that published it", time=at)
             return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
 
     def served(self, serial: int, key_id: str, space_url: str, state: str) -> dict:
@@ -234,6 +280,25 @@ class Store:
         return [r["serial"] for r in self.db.execute(
             "SELECT serial FROM records WHERE payload = ? AND state != 'withdrawn' ORDER BY serial", (int(payload),))]
 
+    def remember_register_key(self, key_id: str, public_pem: str) -> None:
+        """Every countersigning key's public half, so a countersignature made before a key switch can still be checked."""
+        with self._tx():
+            self.db.execute("INSERT OR IGNORE INTO register_keys (key_id, public_pem, first_seen) VALUES (?, ?, ?)",
+                            (key_id, public_pem, now_utc()))
+
+    def register_key_pem(self, key_id: str) -> str | None:
+        row = self.db.execute("SELECT public_pem FROM register_keys WHERE key_id = ?", (str(key_id),)).fetchone()
+        return row["public_pem"] if row else None
+
+    def reserved_serials(self) -> list:
+        return self.log.reserved()
+
+    def unresolved_serials(self) -> list:
+        """Registered models the log holds unresolved after a recovery: not served until a warden answers."""
+        shas = self.log.unresolved_records()
+        return sorted(r["serial"] for r in self.db.execute("SELECT serial, record_sha256 FROM records").fetchall()
+                      if r["record_sha256"] in shas)
+
     def withdrawn_serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'withdrawn' ORDER BY serial")]
 
@@ -245,6 +310,62 @@ class Store:
         with self._tx():
             self._ledger("key", None, None, key_id, {"public_key_sha256": sha256_hex(public_pem.encode("utf-8")),
                                                      "present": [str(p)[:80] for p in present][:12], "note": note[:400]})
+
+    # ---- the log ----
+
+    def log_open(self, witnesses: list | None = None, unwitnessed: bool = False, started: bool = False) -> int:
+        """Checks the database against the log it published; then the first entries, once, and a heartbeat under a new
+        log key. A database no published copy vouches for is blocked, never appended to."""
+        with self._tx():
+            self.log.remember_key_locked()
+        self.log.blocked = self.log.open_verdict(self.log.witness(witnesses or [], self.log.signer.public_pem()), unwitnessed, started)
+        if self.log.blocked:
+            return 0
+        with self._tx():
+            n = self.log.genesis_locked()
+            self.log.resign_locked()
+            self.log.sync_reserved_locked()
+            return n
+
+    def log_append(self, entry: dict, key_id: str) -> dict:
+        """A warden's entry: an admit of a registered record, a revoke or a withhold, each naming its sitting and
+        signed into the leaf with the machine that appended it; the ledger gets the row in the same transaction."""
+        kind = entry.get("kind")
+        with self._tx():
+            if kind == "admit":
+                row = self.db.execute("SELECT serial, record_sha256, counter_json, state FROM records WHERE record_sha256 = ?",
+                                      (str(entry.get("record_sha256") or ""),)).fetchone()
+                if row is None:
+                    raise KeyError("no record is registered under that record_sha256")
+                if row["state"] == "withdrawn":
+                    raise ValueError("that record is withdrawn; it is not admitted again")
+                states = self.log.admit_states(row["record_sha256"])
+                if "unresolved" in states.values():
+                    raise ValueError('that record waits on a loss from a recovery; answer it with {"kind":"confirm","answers":'
+                                     '<lost leaf>,"confirms":<admit leaf>,"sitting":...}, or strike it, rather than admit it again')
+                if "standing" in states.values():
+                    raise ValueError("that record already has an admit no revoke has struck")
+                out = self.log.admit_locked(row["serial"], row["record_sha256"], json.loads(row["counter_json"]),
+                                            wardens=entry.get("wardens"), sitting=entry.get("sitting") or "", appended_by=key_id,
+                                            pending_lost=self.log.open_lost_global() or None)
+            elif kind == "revoke":
+                out = self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"), wardens=entry.get("wardens"),
+                                             sitting=entry.get("sitting") or "", appended_by=key_id)
+            elif kind == "confirm":
+                out = self.log.confirm_locked(str(entry.get("answers") or ""), entry.get("confirms"), wardens=entry.get("wardens"),
+                                              sitting=entry.get("sitting") or "", appended_by=key_id)
+            elif kind == "withhold":
+                out = self.log.withhold_locked(str(entry.get("withholds") or ""), entry.get("reason"), wardens=entry.get("wardens"),
+                                               sitting=entry.get("sitting") or "", appended_by=key_id)
+            else:
+                raise ValueError("kind is admit, revoke, confirm or withhold")
+            self._ledger("log-append", None, None, key_id, {"kind": kind, "leaf_hash": out["leaf_hash"], "index": out["index"]})
+            return out
+
+    def log_withhold(self, leaf_hex: str, reason: str) -> dict:
+        """The operator's withhold: the body leaves public view, the withholding is itself an entry."""
+        with self._tx():
+            return self.log.withhold_locked(leaf_hex, reason)
 
     # ---- the ledger ----
 

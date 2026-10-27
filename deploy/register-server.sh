@@ -5,6 +5,7 @@
 #   REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=v0.27.0 bash register-server.sh
 # Until the Guardians' key exists the register signs with a development key and says so on every page;
 # the ceremony replaces /srv/register/data/register-key.pem and clears REGISTER_DEV_KEY in /etc/register.env.
+# The signed append-only log has its own key and its own ceremony (register-log-key), and two timers anchor its root.
 set -euo pipefail
 
 DOMAIN="${REGISTER_DOMAIN:?set REGISTER_DOMAIN to the name people will open}"
@@ -80,6 +81,14 @@ REGISTER_PUBLIC_URL=https://$DOMAIN
 REGISTER_DEV_KEY=1
 # The development key is reachable at REGISTER_PUBLIC_URL through Caddy, by decision; nothing it signs is a Guild record.
 REGISTER_DEV_KEY_PUBLIC=1
+# The log's own key, which signs tree heads; 1 until register-log-key switch places the Guild's.
+REGISTER_LOG_KEY_FILE=$DATA/log-key.pem
+REGISTER_LOG_DEV_KEY=1
+# Days a new log entry's body waits before it reaches the public mirror's git history (0 to 7); a withhold inside it never lands there.
+REGISTER_LOG_PUBLIC_DELAY_DAYS=7
+# Published copies that witness the log beside this server's own, comma-separated folders or URLs. With none readable the
+# register appends nothing unless its log is new and nothing anywhere was published (fail closed).
+REGISTER_LOG_WITNESSES=https://raw.githubusercontent.com/guild-register/ledger/main
 # The storage box for the nightly backup, as user@host:path over ssh (Hetzner: port 23); empty keeps backups local only.
 BACKUP_TARGET=
 BACKUP_PORT=23
@@ -91,6 +100,12 @@ fi
 # A settings file from before the exposure check keeps its development key serving: the decision it already made.
 if grep -q '^REGISTER_DEV_KEY=1' "$ENV_FILE" && ! grep -q '^REGISTER_DEV_KEY_PUBLIC=' "$ENV_FILE"; then
   echo "REGISTER_DEV_KEY_PUBLIC=1" >> "$ENV_FILE"
+fi
+# A settings file from before the log gets the log's lines: its key is a development one until its own ceremony.
+if ! grep -q '^REGISTER_LOG_DEV_KEY=' "$ENV_FILE"; then
+  grep -q '^REGISTER_LOG_KEY_FILE=' "$ENV_FILE" || echo "REGISTER_LOG_KEY_FILE=$DATA/log-key.pem" >> "$ENV_FILE"
+  echo "REGISTER_LOG_DEV_KEY=1" >> "$ENV_FILE"
+  grep -q '^REGISTER_DEV_KEY_PUBLIC=' "$ENV_FILE" || echo "REGISTER_DEV_KEY_PUBLIC=1" >> "$ENV_FILE"
 fi
 
 echo "== systemd"
@@ -150,6 +165,7 @@ UNIT
 
 install -m 755 "$(dirname "$0")/register-mirror.sh" /usr/local/bin/register-mirror
 install -m 755 "$(dirname "$0")/register-key.sh" /usr/local/sbin/register-key
+install -m 755 "$(dirname "$0")/register-log-key.sh" /usr/local/sbin/register-log-key
 cat > /etc/systemd/system/register-mirror.service <<UNIT
 [Unit]
 Description=Push the Guild Register's public mirror
@@ -167,6 +183,51 @@ Description=The Guild Register's public mirror, every quarter hour
 [Timer]
 OnCalendar=*:0/15
 RandomizedDelaySec=2m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+for job in stamp upgrade; do
+cat > /etc/systemd/system/register-log-$job.service <<UNIT
+[Unit]
+Description=The Guild Register's log: $job (stamp appends the day's heartbeat entry, then anchors the root with OpenTimestamps)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=$USER_NAME
+EnvironmentFile=$ENV_FILE
+WorkingDirectory=$HOME_DIR
+ExecStart=$VENV/bin/python -m register_service log-$job
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$DATA
+PrivateTmp=true
+UNIT
+done
+cat > /etc/systemd/system/register-log-stamp.timer <<UNIT
+[Unit]
+Description=Anchor the Guild Register's log root once a day
+
+[Timer]
+OnCalendar=*-*-* 02:10:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+cat > /etc/systemd/system/register-log-upgrade.timer <<UNIT
+[Unit]
+Description=Complete the Guild Register's pending anchor receipts, four times a day
+
+[Timer]
+OnCalendar=*-*-* 00/6:40:00
+RandomizedDelaySec=10m
 Persistent=true
 
 [Install]
@@ -198,7 +259,7 @@ $DOMAIN {
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
-		Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
 		-Server
 	}
 	reverse_proxy 127.0.0.1:$PORT {
@@ -208,8 +269,8 @@ $DOMAIN {
 CADDY
 
 systemctl daemon-reload
-systemctl enable register.service register-backup.timer register-mirror.timer
-systemctl start register-backup.timer register-mirror.timer
+systemctl enable register.service register-backup.timer register-mirror.timer register-log-stamp.timer register-log-upgrade.timer
+systemctl start register-backup.timer register-mirror.timer register-log-stamp.timer register-log-upgrade.timer
 # A re-run serves the tag it just put in place: a running service is restarted, not left on the old code.
 systemctl restart register.service
 systemctl restart caddy
@@ -221,7 +282,7 @@ echo "Backup key (install on the storage box):   $(cat $HOME_DIR/.ssh/id_ed25519
 echo "Ledger deploy key (add to the repository, write access):   $(cat $HOME_DIR/.ssh/ledger_deploy.pub)"
 cat > /usr/local/bin/register-cli <<CLI
 #!/usr/bin/env bash
-# The register's commands as the service user with its settings: register-cli account <name> | invite <name> [--role space] | check | key ...
+# The register's commands as the service user with its settings: register-cli account <name> | invite <name> [--role space|warden] | check | key ...
 exec sudo -u $USER_NAME bash -c 'set -a; . $ENV_FILE; set +a; cd $HOME_DIR && exec $VENV/bin/python -m register_service "\$@"' -- "\$@"
 CLI
 chmod 755 /usr/local/bin/register-cli

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "khaos_attribution"
-version = "0.44.1"
+version = "0.45.0"
 description = "JSON schemas and validators for artist attribution: provenance records and model cards."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,21 +24,23 @@ test = ["pytest>=7", "soundfile>=0.12", "pillow>=10"]  # fingerprint survival te
 artwork = ["pillow>=10"]
 # gradient.py: features of a live training module; the engine itself is found at run time.
 gradient = ["torch>=2.2"]
-# registry.py: Ed25519 for machine keys and the register's countersignature.
-registry = ["cryptography>=42"]
+# registry.py: Ed25519 for machine keys and the register's countersignature; translog: RFC 8785 for the log's entries and heads.
+registry = ["cryptography>=42", "rfc8785==0.1.4"]
 # credentials.py: Content Credentials (C2PA) signed into every output.
 credentials = ["c2pa-python>=0.38; python_version >= '3.10'", "cryptography>=42"]
 # verify.py: the khaos-verify command reads the record and fingerprints the audio; `detector` adds the watermark.
 verify = ["soundfile>=0.12", "c2pa-python>=0.38; python_version >= '3.10'", "cryptography>=42"]
 # A room (the Workshop, a Space): the register client, Content Credentials and the verifier, in one word.
-rooms = ["cryptography>=42", "soundfile>=0.12", "c2pa-python>=0.38; python_version >= '3.10'"]
+rooms = ["cryptography>=42", "soundfile>=0.12", "c2pa-python>=0.38; python_version >= '3.10'", "rfc8785==0.1.4"]
 detector = ["audioseal>=0.2", "torch>=2.2", "torchaudio>=2.2"]
 # register_service: the register itself, on its own machine.
-# The soft-binding lookup decodes uploaded audio to fingerprint it.
-service = ["cryptography>=42", "fastapi>=0.110", "uvicorn>=0.27", "soundfile>=0.12", "numpy>=1.24"]
+# The soft-binding lookup decodes uploaded audio to fingerprint it; the log's daily anchor uses the OpenTimestamps library.
+service = ["cryptography>=42", "fastapi>=0.110", "uvicorn>=0.27", "soundfile>=0.12", "numpy>=1.24", "rfc8785==0.1.4",
+           "opentimestamps==0.5.0; python_version >= '3.11'"]
 
 [project.scripts]
 khaos-verify = "khaos_attribution.verify:main"
+khaos-log-verify = "khaos_attribution.translog.verify:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -46,5 +48,5 @@ where = ["src"]
 [tool.setuptools.package-data]
 khaos_attribution = ["schemas/*.json", "engines/*.json", "engines/*/engine.json", "legacy_watermark_ids.json", "watermark_resets.json",
                      "seal/glyphs.json", "seal/star.svg", "seal/OFL.txt", "seal/SPEC.md",
-                     "seal/assets/*.svg"]
-register_service = ["static/*.png"]
+                     "seal/assets/*.svg", "translog/log-key.pub"]
+register_service = ["static/*.png", "static/*.js"]

@@ -16,7 +16,26 @@ for db in register index; do
     install -o register -g register -m 640 "$WORK/$db.sqlite3" "$DATA/$db.sqlite3"
   fi
 done
-if [ -d "$WORK/mirror" ]; then rm -rf "$DATA/mirror"; cp -a "$WORK/mirror" "$DATA/mirror"; chown -R register:register "$DATA/mirror"; fi
+# The log as already published stays: it is the witness that tells the register it is behind and how to recover.
+if [ -d "$WORK/mirror" ]; then
+  [ -d "$DATA/mirror/log" ] && mv "$DATA/mirror/log" "$WORK/published-log"
+  rm -rf "$DATA/mirror"; cp -a "$WORK/mirror" "$DATA/mirror"
+  rm -rf "$DATA/mirror/log"; [ -d "$WORK/published-log" ] && mv "$WORK/published-log" "$DATA/mirror/log"
+  chown -R register:register "$DATA/mirror"
+fi
+# A restored register has started its log before, whether or not the archive says so.
+if [ -f "$WORK/log-started" ] || [ -d "$DATA/mirror/log" ]; then install -o register -g register -m 640 /dev/null "$DATA/log-started"; fi
 rm -rf "$WORK"
+# A fresh clone of the public mirror is the witness that survives a lost server: the register compares itself with it at start.
+if grep -q '^LEDGER_REPO=.' /etc/register.env; then
+  sudo -u register bash -c 'set -a; . /etc/register.env; set +a; rm -rf /srv/register/ledger-mirror
+    GIT_SSH_COMMAND="ssh -i $HOME/.ssh/ledger_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+      git clone -q "$LEDGER_REPO" /srv/register/ledger-mirror' || echo "the public mirror could not be cloned; the public raw address is still asked"
+fi
 systemctl start register.service
-sudo -u register bash -c 'set -a; . /etc/register.env; set +a; cd /srv/register && exec venv/bin/python -m register_service check'
+sudo -u register bash -c 'set -a; . /etc/register.env; set +a; cd /srv/register && exec venv/bin/python -m register_service check' || {
+  echo "The restored database is behind or apart from the published log; the register takes no changes until it is fixed:"
+  echo "  register-cli log-recover && systemctl restart register.service"
+  echo "If log-recover declares an INCIDENT, keep the register as it is and call the wardens."
+  exit 1
+}

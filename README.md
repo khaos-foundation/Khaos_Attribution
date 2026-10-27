@@ -67,6 +67,44 @@ is not proof either. **none**: no Khaos mark was found, which never proves a per
 than 20 minutes are not decoded. Authorities, researchers and the press can ask for a verify key at
 foundation@khaos.dev; it lifts the per-address limit (`--key` or `KHAOS_VERIFY_KEY`).
 
+## Verify an entry in the Guild Register
+
+The Guild Register is a tamper-evident public register: every model the Guild admits, and every strike, is an entry in
+a signed append-only log built the way Certificate Transparency logs are (RFC 6962 / RFC 9162). Nobody, the Foundation
+included, can change a past entry without every later signed head showing it; anyone can check an entry without asking
+the register; and the log's root is anchored daily with OpenTimestamps, so an entry can be shown to have existed by a date.
+
+```bash
+pip install "khaos-attribution[registry] @ git+https://github.com/khaos-foundation/Khaos_Attribution.git"
+khaos-log-verify record.json                      # a signed record, a log entry, a leaf hash or a record hash
+khaos-log-verify <leaf hash> --mirror ./ledger    # a clone of the public mirror; the register need not be up
+```
+
+The command uses only the log's public key committed in this package (`src/khaos_attribution/translog/log-key.pub`,
+placed after the log key's ceremony; until then pass the published key with `--key`) and the mirror's static files. It
+trusts nothing the mirror says that the signed head does not prove: the leaf hashes must make the signed root, every
+published body must hash to its leaf, a missing body is accepted only when a withhold entry in the log names it (or,
+in the public git mirror, while it is inside the publication delay), a record is found only through its own proved
+admit entry, and a strike only through a proved revoke (or the withhold of one, which still names what it struck). It
+proves the entry's inclusion, says whether it was struck and why, checks that the newest head extends the last one this
+machine saw (kept in `~/.khaos/log-verify-state.json`), and warns when the newest head is more than 48 hours old: the
+register appends a `heartbeat` entry (its time and nothing else) every day, so an older head means the mirror may be
+stale. Exit codes: 0 proved, 1 the proof failed, 2 not found, 3 no key or mirror could be read, 4 proved but a strike
+after it could be hidden (newer entries not yet public in this mirror, or an entry after it lost in a recovery and not
+since confirmed or struck by the wardens), 5 proved but the newest head is over 48 hours old, so this copy may be
+frozen. The same check runs in a browser at
+`https://register.khaos.dev/verify-entry`.
+
+What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/
+genesis, `time` in RFC 3339 UTC, a random 128-bit `salt`, and the kind's own fields); its leaf hash is
+SHA-256(0x00 || entry); nodes are SHA-256(0x01 || left || right); a signed tree head is Ed25519 over the RFC 8785 JSON of
+`{log_id, root_sha256, timestamp, tree_size, version}`. RFC 8785 does not normalise unicode: anyone writing an entry
+sends its strings in NFC, or the same name in two forms is two different entries. A strike is an appended `revoke` that
+names the admitted leaf; nothing is ever changed or deleted. A withheld entry keeps its leaf, so every proof and head
+stays valid while its body is no longer served. The public git mirror receives a new entry's body only seven days after
+it is appended, counted from the signed head that first held it (heads, leaf hashes, proofs, withholds and heartbeats
+at once), so a body withheld within that week never enters the public history; a body withheld later stays in that history, and withholding then hides it from the live register only.
+
 ## Provenance record fields
 
 A provenance record travels with a generated output and says exactly how it
