@@ -3,8 +3,8 @@
 Pure functions, no model: a smoothed unigram profile of the artist's captions,
 ``fit`` and ``margin`` against it, ``answered`` for what survived of a request,
 and ``meters`` for the two readouts the rooms show beside a prompt. All are claims
-about text, never about audio or weights. Latin script only; ``script_coverage``
-measures what the tokeniser missed and a profile under the guards claims no fit.
+about text, never about audio or weights. Words are letters of any script; a
+profile whose letters are under ``MIN_SCRIPT_COVERAGE`` Latin claims no fit.
 """
 
 from __future__ import annotations
@@ -21,19 +21,20 @@ __all__ = ["CAPTION_FIT_VERSION", "MIN_CORPUS_CAPTIONS", "MIN_SCRIPT_COVERAGE",
            "CorpusUnreadable", "tokens", "script_coverage", "profile",
            "require_claimable", "fit", "margin", "answered", "meters"]
 
-# 0.2.0: `margin` normalises both corpora to a common pseudo-total and support.
-CAPTION_FIT_VERSION = "0.2.0"
+# Readings compare only within a version: 0.3.0 reads accented letters, so non-ASCII text moves.
+CAPTION_FIT_VERSION = "0.3.0"
 
 # Below this many captions no fit is claimed (one track's worth of segments); a guard, not a calibration.
 MIN_CORPUS_CAPTIONS = 8
 
-# Below this share of the corpus's letters read by the tokeniser, no fit is claimed.
+# Below this share of the corpus's letters in Latin script, no fit is claimed.
 MIN_SCRIPT_COVERAGE = 0.8
 
 # Jeffreys rather than add-one: with corpora this small, add-one flattens the differences being read.
 SMOOTHING = 0.5
 
-_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*")
+# Letters of any script with inner apostrophes or hyphens; digits are never part of a word.
+_WORD_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['-])*")
 
 # Frozen: the measure's own stopwords, not the selection tokeniser's; a change needs a version bump.
 _STOPWORDS = frozenset("""
@@ -56,7 +57,7 @@ ANSWERED_LIMITS = (
 def tokens(text: str) -> list[str]:
     """The text's content words in order, with repeats; no stemming, so "drum" and "drums" stay apart."""
     out: list[str] = []
-    for word in _WORD_RE.findall(str(text).lower()):
+    for word in _WORD_RE.findall(unicodedata.normalize("NFC", str(text)).lower()):
         word = word.strip("'-")
         if len(word) < 3 or word in _STOPWORDS:
             continue
@@ -65,7 +66,7 @@ def tokens(text: str) -> list[str]:
 
 
 def script_coverage(texts: list[str]) -> dict:
-    """The share of the corpus's letters that are Latin A–Z, and the scripts that were skipped."""
+    """The share of the corpus's letters that are Latin script (accents included), and the scripts skipped."""
     letters = readable = 0
     unread: Counter[str] = Counter()
     for text in texts:
@@ -73,10 +74,11 @@ def script_coverage(texts: list[str]) -> dict:
             if not ch.isalpha():
                 continue
             letters += 1
-            if ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
+            script = unicodedata.name(ch, "UNKNOWN").split()[0]
+            if script == "LATIN":
                 readable += 1
             else:
-                unread[unicodedata.name(ch, "UNKNOWN").split()[0]] += 1
+                unread[script] += 1
     return {
         "letters": letters,
         "readable_letters": readable,
@@ -139,7 +141,7 @@ def require_claimable(prof: dict) -> None:
         raise CorpusUnreadable(
             f"{prof['label'] or 'corpus'}: the tokeniser reads "
             f"{'no' if coverage is None else f'{coverage:.0%} of'} this corpus's "
-            f"letters (Latin only; unread: {seen}), under "
+            f"letters (Latin script only; unread: {seen}), under "
             f"MIN_SCRIPT_COVERAGE={MIN_SCRIPT_COVERAGE:.0%} — no fit claimed")
 
 

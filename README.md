@@ -15,6 +15,8 @@ was generated) and `aspects` (per-aspect shares — harmony, rhythm, timbre —
 which are descriptor agreement, never causal influence), `embedding`,
 `lyric_align`, `prompt_expansion` (Simple mode's rules and exemplars),
 `caption_fit` (whether a prompt reads like the artist's captions and keeps the request),
+`caption_vocabulary` (the claim words captions and lints read), `translation` (Expand's translator:
+the prompt, the lint, the request check and the fallback to the listener's own words),
 and `catalogue` (the artist's usual tempo/key/time signature).
 
 Part of [Khaos](https://www.khaos.dev/), a free-to-use toolkit for music creators to train AI models on their own work. The method and its published results are at [khaos.dev/research](https://www.khaos.dev/research).
