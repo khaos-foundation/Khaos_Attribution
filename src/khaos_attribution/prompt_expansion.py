@@ -192,7 +192,8 @@ def build_query(request: str, shots: list[str], instrumental: bool = True, *,
         "asks for — its mood, instruments, energy and character — and restate it the way "
         "these descriptions would. Wherever they fit what was asked, reuse the examples' "
         "own words for instruments, textures, moods and production. Add no musical detail "
-        "the request does not imply. Write one flowing prose music caption: a single "
+        "the request does not imply, except that when the request names no genre you may name "
+        "one or two of these descriptions' own genres; when it names a genre, name no other. Write one flowing prose music caption: a single "
         f"paragraph of roughly {lo}–{hi} words. {vocals} {_NO_METADATA}"
     )
 

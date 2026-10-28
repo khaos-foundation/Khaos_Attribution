@@ -2,7 +2,8 @@
 
 A local instruction model rewrites TEXT only; it never hears audio. Its answer is linted in code on the
 body it wrote (a copy of the request counts for nothing): what it names must come from the request, the
-artist's pool lends only texture, production and mood words, nothing the request asks for may be dropped,
+artist's pool lends texture, production and mood words, up to two of its genres when the request names no
+genre, and its instruments when the request names neither; nothing the request asks for may be dropped,
 denied or turned into its opposite, and no voice, name, number, theory or clock time is added. The same
 request's meaning holds the 5Hz LM when the translator is not there. The contract loads no model: the rooms
 inject ``llm(prompt, temperature=, seed=, timeout=)``. When nothing passes, the request is the caption.
@@ -255,10 +256,14 @@ _NAMING = ("instrument", "genre", "vocal")
 _CHARACTER = (set(MOOD_ADJECTIVES) | set(TIMBRE_ADJECTIVES)) & set(GENRES)
 
 
+# A request that names no genre may borrow at most this many of the artist's own.
+MAX_BORROWED_GENRES = 2
+
+
 # Genres the caption vocabulary does not list but a translation names: claims all the same.
 _MORE_GENRES = re.compile(r"\b(?:raw[\s-])?(?:hardstyle|hard\s+dance|gabber|phonk|hyperpop|footwork|juke|bhangra|"
                           r"amapiano|afro\s+house|breakcore|drumstep|neurofunk|future\s+bass|moombahton|"
-                          r"hardcore\s+techno|big\s+room|dubstep|brostep)\b", re.IGNORECASE)
+                          r"hardcore\s+techno|big\s+room|electro\s+house|dubstep|brostep)\b", re.IGNORECASE)
 
 
 # Sound sources the caption vocabulary does not list, as the instrument each one names: claims all the same.
@@ -519,13 +524,14 @@ def _spaced(text: str) -> bool:
 _SYSTEM = (
     "You restate a listener's request for music in the words this artist's music is described in. "
     "You have NOT heard any recording. Keep everything the request asks for and nothing it does not: "
-    "never add an instrument, genre, vocal, effect or mood the request does not imply, never drop an "
+    "never add an instrument, vocal, effect or mood the request does not imply, never drop an "
     "instrument, genre or mood it names, and never contradict what it rules out. Use the request's own "
     "words for every instrument, genre and mood it names, inside your own sentence; do not repeat the "
-    "request as a phrase. Name no instrument, genre or voice the request does not name; when the request "
-    "names an instrument or a genre, describe everything else with texture, production and mood words. The "
-    "artist's descriptions are vocabulary, not content: borrow their texture, production and mood words, "
-    "and their instruments or genres only when the request names none. "
+    "request as a phrase. Name no instrument, genre or voice the request does not name, except as follows. "
+    "The artist's descriptions are vocabulary, not content: borrow their texture, production and mood words; "
+    "when the request names no genre you may name one or two of the descriptions' own genres, never one the "
+    "request rules out, and when it names a genre name no other; borrow their instruments only when the "
+    "request names no instrument and no genre. "
     "Never name a song, artist, band, film or album, never compare to anyone, and never state tempo, BPM, "
     "key, time signature, duration, timestamps or numbers. Write in English whatever language the request "
     "is in. Answer in exactly three lines:\n"
@@ -744,6 +750,11 @@ def _meaning_reasons(request: str, body: str, whole: str | None = None) -> list[
     for noun in sorted(asked.get("instrument", set())):
         if not _denies(noun, ruled) and not _kept(noun, kept, kept_words):
             reasons.append(f"dropped_noun:{noun}")
+    kept_genres = _claims(kept_text).get("genre", set())
+    for noun in sorted(asked.get("genre", set())):
+        if not _denies(noun, ruled) and not (all(p in kept_words for p in _singular(noun).split())
+                                             or any(_from(g, {noun}) or _from(noun, {g}) for g in kept_genres)):
+            reasons.append(f"dropped_genre:{noun}")
     mood_text = _HEDGE.sub(" ", said_text)
     said_moods = _moods(mood_text)
     hedged = _moods(" ".join(m.group(0) for m in _HEDGE.finditer(said_text)))
@@ -799,17 +810,26 @@ def lint_translation(request: str, output: str, *, instrumental: bool,
     pool_claims = _claims(pool_text)
     named = _Named({n for cat in _NAMING for n in asked.get(cat, set())}, _tokens(asked_text))
     names_nothing = not (asked.get("instrument") or asked.get("genre"))
+    borrowed: set[str] = set()
     for cat in ("instrument", "genre", "vocal", "production"):
         for noun in sorted(said.get(cat, set())):
             if _from(noun, _Named(named | asked.get("production", set()), named.words)):
                 continue
             if cat == "production" and _from(noun, pool_claims.get("production", set())):
                 continue
-            if cat in ("instrument", "genre") and names_nothing and _from(noun, pool_claims.get(cat, set())):
+            if cat == "instrument" and names_nothing and _from(noun, pool_claims.get("instrument", set())):
+                continue
+            # The artist's own genre may carry a request that names none; a named genre is never swapped.
+            if cat == "genre" and not asked.get("genre") and _from(noun, pool_claims.get("genre", set())):
+                borrowed.add(noun)
                 continue
             if cat == "vocal" and not instrumental and not asked.get("vocal"):
                 continue
             reasons.append(f"invented_noun:{noun}")
+    # "electro house" also claims "electro" and "house": a genre inside a longer one is not another genre.
+    distinct = {g for g in borrowed if not any(g != h and set(g.split()) <= set(h.split()) for h in borrowed)}
+    if len(distinct) > MAX_BORROWED_GENRES:
+        reasons.append(f"borrowed_genres:{len(distinct)}")
     reasons += _meaning_reasons(request, body, text)
     new = {_singular(w) for w in _tokens(body) if len(w) >= 3} - {_singular(w) for w in _tokens(request)} - _ENGLISH_GLUE
     if len(new) < MIN_NEW_WORDS:

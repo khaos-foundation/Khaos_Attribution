@@ -103,6 +103,7 @@ def test_default_query_translates_into_the_artists_words():
     assert "Translate the request into this artist's words" in q
     assert "reuse the examples' own words for instruments, textures, moods and production" in q
     assert "Add no musical detail the request does not imply" in q
+    assert "when the request names no genre you may name one or two of these descriptions' own genres" in q
     assert "NOT their musical content" not in q
     for banned in ("BPM", "key", "timestamps", "artist, band or song names"):
         assert banned in q

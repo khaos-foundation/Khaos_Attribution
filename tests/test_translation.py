@@ -109,8 +109,8 @@ def test_a_body_that_contradicts_its_kept_copy_is_refused():
     assert any(r.startswith("invented_noun:") for r in reasons(FUNK_REQ, FUNK.replace("electric guitar", "saxophone")))
 
 
-def test_the_pool_lends_no_instrument_or_genre_when_the_request_names_one():
-    """Asked for strings and a harp, a drone and dark ambient from the artist's pool are replacements."""
+def test_the_pool_lends_no_instrument_when_the_request_names_one():
+    """Asked for strings and a harp, a synth pad and bass from the artist's pool are replacements."""
     reasons = lint("warm strings and a soft harp", "Warm, soft strings beside a harp give way to a dark ambient "
                    "synth pad and distorted bass, slow and lush with reverb around the long warm notes.")
     assert "invented_noun:synth pad" in reasons and "invented_noun:bass" in reasons
@@ -210,6 +210,8 @@ def test_prompt_is_chatml_with_thinking_off_and_the_rule():
     assert "You have NOT heard any recording" in p and "never add an instrument" in p
     assert "Name no instrument, genre or voice the request does not name" in p and "Write in English" in p
     assert "Instrumental: do not mention vocals" in p and POOL[0] in p
+    assert "when the request names no genre you may name one or two of the descriptions' own genres" in p
+    assert "when it names a genre name no other" in p
     assert "Sung" in T.build_prompt("sad piano", POOL, instrumental=False)
 
 
@@ -662,3 +664,52 @@ def test_the_server_is_asked_for_one_caption_s_worth_of_tokens():
     assert T.answer_tokens("piano " * 300) == T.MAX_TOKENS
     assert T.CAPTION_TOKENS >= 1.4 * T.LINT_WORDS[1]
     assert getattr(T.http_llm("http://127.0.0.1:9"), "takes_max_tokens", False)
+
+
+GENRE_POOL = POOL + ["Hardstyle kicks and a screeching lead build to a euphoric drop with electro house stabs."]
+COUNTDOWN = "something tense for a countdown"
+TENSE_CUE = ("A tense, uneasy countdown cue in {g}, filtered synth pads and metallic percussion ticking, sparse "
+             "and dark with lush reverb around every hit.")
+
+
+def genre_lint(request, text):
+    return T.lint_translation(request, text, instrumental=True, pool=GENRE_POOL)[1]
+
+
+def test_the_pool_lends_a_genre_when_the_request_names_none():
+    """"Something tense" names no genre: the artist's own genre may carry it; one they never use may not."""
+    assert genre_lint(COUNTDOWN, TENSE_CUE.format(g="hardstyle")) == []
+    assert genre_lint(COUNTDOWN, TENSE_CUE.format(g="hardstyle and electro house")) == []
+    assert "invented_noun:jazz" in genre_lint(COUNTDOWN, TENSE_CUE.format(g="jazz"))
+
+
+def test_a_borrowed_genre_the_request_rules_out_is_refused():
+    assert "denied:hardstyle" in genre_lint("something tense, not hardstyle", TENSE_CUE.format(g="hardstyle"))
+
+
+def test_a_named_genre_borrows_no_other():
+    """Asked for dark techno, the artist's hardstyle is a second genre, not a translation."""
+    text = ("A dark techno track with a driving kick and hardstyle edges, filtered synth pads and metallic "
+            "percussion, tense and brooding with lush reverb.")
+    assert "invented_noun:hardstyle" in genre_lint("a dark techno track", text)
+
+
+def test_at_most_two_genres_are_borrowed():
+    text = TENSE_CUE.format(g="hardstyle, electro house and techno")
+    assert "borrowed_genres:3" in genre_lint(COUNTDOWN, text)
+
+
+def test_a_request_naming_only_an_instrument_still_borrows_a_genre_but_no_instrument():
+    """Genres and instruments are separate rules: a named piano frees the genre, never a second instrument."""
+    piano = "a tense piano piece for a countdown"
+    text = ("A tense, uneasy countdown piece of hardstyle piano, sparse and dark, each note ticking under lush "
+            "reverb and a dreamy texture.")
+    assert genre_lint(piano, text) == []
+    assert "invented_noun:synth pad" in genre_lint(piano, text.replace("dreamy texture", "filtered synth pad"))
+
+
+def test_a_named_genre_is_kept():
+    text = ("A dark, brooding track with filtered synth pads and metallic percussion, tense and cold with lush "
+            "reverb around every hit.")
+    assert "dropped_genre:techno" in genre_lint("a dark techno track", text)
+    assert "dropped_genre:techno" not in genre_lint("a dark techno track", "A dark techno" + text[len("A dark,"):])
