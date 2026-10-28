@@ -694,14 +694,46 @@ def _with_kin(request: str, body: str) -> str:
     return f"{body} {' '.join(extra)}" if extra else body
 
 
-def _split_copy(request: str, output: str) -> tuple[bool, str]:
-    """Whether the output opens with a copy of the request, and the output without it."""
+def _after_copy(request: str, output: str) -> tuple[bool, str]:
+    """Whether the output opens with a copy of the request, and what follows it as written."""
     words = _WORD.findall(_nfc(request))
     if not words:
         return False, output
-    copy = re.compile(r"^[\W_]*(?:(?:a|an|the)\s+)?" + r"[\W_]*".join(re.escape(w) for w in words), re.IGNORECASE)
-    rest, found = copy.subn(" ", _nfc(output).strip())
-    return bool(found), re.sub(r"^[\s,.;:!?—–-]+", "", rest).strip()
+    copy = re.compile(r"^[\W_]*(?:(?:a|an|the)\s+)?" + r"[\W_]*".join(re.escape(w) for w in words) + r"(?!\w)",
+                      re.IGNORECASE)
+    rest, found = copy.subn("", _nfc(output).strip())
+    return bool(found), rest
+
+
+def _split_copy(request: str, output: str) -> tuple[bool, str]:
+    """Whether the output opens with a copy of the request, and the output without it."""
+    found, rest = _after_copy(request, output)
+    return found, re.sub(r"^[\s,.;:!?—–-]+", "", rest).strip() if found else rest
+
+
+# Words that take back a copy of the request said just before them.
+_RETRACTION = re.compile(r"\b(?:no|not|nope|nah|forget|instead|rather|wrong|scratch|ignore|but|however|actually|"
+                         r"asked|requested)\b", re.IGNORECASE)
+# Words that leave a mood out: said after a copy of a mood request, they unsay it.
+_MOODLESS = frozenset({"neutral", "plain", "light", "lighter", "moodless", "unemotional", "flat"})
+
+
+def _copy_stands(request: str, output: str) -> bool:
+    """A leading copy counts as said only when the body neither retracts it nor states a contrary mood, and
+    still says at least one asked word itself."""
+    copied, rest = _after_copy(request, output)
+    body = re.sub(r"^[\s,.;:!?—–-]+", "", rest).strip()
+    if not (copied and body):
+        return False
+    joint = rest[:len(rest) - len(rest.lstrip(" ,.;:!?—–-"))]
+    if "?" in joint or _RETRACTION.search(" ".join(_WORD.findall(body)[:8])):
+        return False
+    said = _moods(_HEDGE.sub(" ", split_denials(body)[0])) | (set(_tokens(body)) & _MOODLESS)
+    for mood in _moods(split_denials(request)[0]):
+        if ((_opposites(mood) - _kin(mood)) | _MOODLESS) & said:
+            return False
+    share = answered(" ".join(_asked_words(request)), _with_kin(request, body).replace("-", " "))["answered"]
+    return share is None or share > 0
 
 
 def _body(request: str, output: str) -> str:
@@ -794,9 +826,10 @@ def lint_translation(request: str, output: str, *, instrumental: bool,
     request = _capped(request)
     if instrumental:
         text = clean_request(text, True)
-    copied, body = _split_copy(request, text)
+    _, body = _split_copy(request, text)
+    stands = _copy_stands(request, text)
     reasons = check_caption(request, _with_kin(request, body), instrumental=instrumental)
-    if copied and body:
+    if stands:
         reasons = [r for r in reasons if not r.startswith("answered:")]
         reasons += [r for r in check_caption(request, _with_kin(request, text), instrumental=instrumental)
                     if r.startswith("answered:")]
@@ -830,7 +863,7 @@ def lint_translation(request: str, output: str, *, instrumental: bool,
     distinct = {g for g in borrowed if not any(g != h and set(g.split()) <= set(h.split()) for h in borrowed)}
     if len(distinct) > MAX_BORROWED_GENRES:
         reasons.append(f"borrowed_genres:{len(distinct)}")
-    reasons += _meaning_reasons(request, body, text)
+    reasons += _meaning_reasons(request, body, text if stands else body)
     new = {_singular(w) for w in _tokens(body) if len(w) >= 3} - {_singular(w) for w in _tokens(request)} - _ENGLISH_GLUE
     if len(new) < MIN_NEW_WORDS:
         reasons.append(f"repeats_request:{len(new)}_new_words")
@@ -879,7 +912,8 @@ def deadline_seconds(environ: dict | None = None) -> float:
 
 def answer_tokens(request: str) -> int:
     """Tokens for the three answer lines: the frame, the request said back in English, and one caption."""
-    said_back = 2 * len(_WORD.findall(request)) if _spaced(request) else sum(1 for c in request if c.isalpha())
+    said_back = (max(2 * len(_WORD.findall(request)), -(-len(request) // 3)) if _spaced(request)
+                 else sum(1 for c in request if c.isalpha()))
     return min(MAX_TOKENS, ANSWER_FRAME_TOKENS + said_back + CAPTION_TOKENS)
 
 
@@ -1089,6 +1123,10 @@ def http_llm(url: str, *, timeout: float = DEFAULT_TIMEOUT_SEC, max_tokens: int 
         content = doc.get("content") if isinstance(doc, dict) else None
         if not isinstance(content, str):
             raise TranslatorUnavailable("the server's answer has no content")
+        # A caption stopped at its token budget is cut mid-sentence; it is no answer.
+        if (doc.get("stop_type") == "limit" or doc.get("stopped_limit") is True or doc.get("truncated") is True
+                or doc.get("finish_reason") == "length"):
+            raise TranslatorUnavailable("the answer stopped at its token limit")
         settings = doc.get("generation_settings") if isinstance(doc.get("generation_settings"), dict) else {}
         run.label = model_label(doc.get("model") or settings.get("model"))
         return content

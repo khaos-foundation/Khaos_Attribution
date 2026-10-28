@@ -337,6 +337,10 @@ def test_model_label_names_the_model_not_the_quantisation():
 
 # ── the server ──
 
+_CUT = {"limit": {"stop_type": "limit"}, "stopped": {"stopped_limit": True}, "truncated": {"truncated": True},
+        "length": {"finish_reason": "length"}}
+
+
 class _Server(BaseHTTPRequestHandler):
     bodies = []
     mode = "ok"
@@ -366,8 +370,11 @@ class _Server(BaseHTTPRequestHandler):
         elif _Server.mode == "slow":
             time.sleep(0.6)
             payload = json.dumps({"content": GOOD, "model": "/m/Qwen3-8B-Q4_K_M.gguf"}).encode()
+        elif _Server.mode in _CUT:
+            payload = json.dumps({"content": GOOD[:40], **_CUT[_Server.mode]}).encode()
         else:
-            payload = json.dumps({"content": GOOD, "model": "/m/Qwen3-8B-Q4_K_M.gguf"}).encode()
+            payload = json.dumps({"content": GOOD, "model": "/m/Qwen3-8B-Q4_K_M.gguf", "stop_type": "eos",
+                                  "stopped_limit": False, "truncated": False}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -403,6 +410,15 @@ def test_a_trickling_or_oversized_answer_is_cut_off(server):
     _Server.mode = "huge"
     with pytest.raises(T.TranslatorUnavailable):
         llm("p", timeout=5.0)
+
+
+def test_an_answer_cut_off_at_the_token_limit_is_unavailable(server):
+    """A caption the server stopped at its token budget is no caption: the call is unavailable."""
+    llm = T.http_llm(server)
+    for mode in _CUT:
+        _Server.mode = mode
+        with pytest.raises(T.TranslatorUnavailable, match="token limit"):
+            llm("p", timeout=5.0)
 
 
 def test_at_most_the_servers_slots_are_used_at_once(server):
@@ -662,6 +678,8 @@ def test_the_server_is_asked_for_one_caption_s_worth_of_tokens():
     T.translate(REQ, POOL, instrumental=True, pool=POOL, llm=llm)
     assert seen == [T.ANSWER_FRAME_TOKENS + 2 * 7 + T.CAPTION_TOKENS]
     assert T.answer_tokens("piano " * 300) == T.MAX_TOKENS
+    long_words = "orchestral cinematic percussion"
+    assert T.answer_tokens(long_words) == T.ANSWER_FRAME_TOKENS + -(-len(long_words) // 3) + T.CAPTION_TOKENS
     assert T.CAPTION_TOKENS >= 1.4 * T.LINT_WORDS[1]
     assert getattr(T.http_llm("http://127.0.0.1:9"), "takes_max_tokens", False)
 
@@ -713,3 +731,29 @@ def test_a_named_genre_is_kept():
             "reverb around every hit.")
     assert "dropped_genre:techno" in genre_lint("a dark techno track", text)
     assert "dropped_genre:techno" not in genre_lint("a dark techno track", "A dark techno" + text[len("A dark,"):])
+
+
+DARK_REQ = "dark melancholic piano"
+RETRACTED = [
+    (DARK_REQ, "dark melancholic piano? Forget that: a plain neutral piano piece with soft hammers, warm room tone "
+               "and an even, steady pulse through every bar."),
+    (DARK_REQ, "dark melancholic piano is the wrong idea; this is a plain neutral piano piece with soft hammers, warm "
+               "room tone and an even, steady pulse."),
+    (DARK_REQ, "dark melancholic piano was asked, but here a light neutral piano plays with soft hammers, warm room "
+               "tone and an even, steady pulse."),
+    ("dark piano", "dark piano no, a light piano piece with soft hammers, warm room tone and an even, steady pulse "
+                   "through every bar."),
+]
+
+
+def test_a_copy_the_body_retracts_says_nothing():
+    """A copy of the request followed by its retraction or a contrary mood is read on the body alone."""
+    for request, text in RETRACTED:
+        assert T.lint_translation(request, text, instrumental=True, pool=POOL)[1], text
+    assert T.lint_translation(FUNK_REQ, FUNK, instrumental=True, pool=FUNK_POOL) == (FUNK, [])
+
+
+def test_a_copy_ends_on_a_word_boundary():
+    """"dark" is no copy of itself inside "darkness"."""
+    assert T._split_copy("dark", "darkness falls over the piano") == (False, "darkness falls over the piano")
+    assert T._split_copy("dark piano", "dark pianos ring")[0] is False
