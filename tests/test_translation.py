@@ -69,9 +69,44 @@ def test_lint_passes_a_faithful_translation():
     assert lint(REQ, GOOD) == []
 
 
-def test_a_copied_request_counts_for_nothing():
-    """A leading copy of the request is taken out before the body is measured."""
-    assert any(r.startswith("answered") for r in lint(REQ, "Sad solo piano for a rainy night." + TAIL))
+def test_a_copied_request_is_no_translation_on_its_own():
+    """A leading copy of the request adds no new words: alone or with a few words it is refused."""
+    assert any(r.startswith("repeats_request") for r in lint(REQ, "Sad solo piano for a rainy night."))
+    assert any(r.startswith("repeats_request") for r in lint(REQ, "Sad solo piano for a rainy night, lush reverb."))
+    assert any(r.startswith("answered") for r in lint(REQ, "A" + TAIL))
+
+
+FUNK_REQ = "Upbeat funky guitar track with hip hop drums and bass"
+FUNK = (FUNK_REQ + ", featuring a driving, danceable groove, a punchy electric bass, and crisp drum kit that lock into "
+        "a steady beat, while a wah-wah–treated electric guitar adds rhythmic stabs and melodic fills with a warm, "
+        "tight swagger.")
+FUNK_POOL = POOL + ["Funky wah-wah guitar stabs over a tight breakbeat with warm tape saturation."]
+
+
+def test_a_kept_copy_of_the_request_says_what_it_asks():
+    """A caption opening with the request verbatim keeps its moods and words; the model's own body still adds them."""
+    assert T.lint_translation(FUNK_REQ, FUNK, instrumental=True, pool=FUNK_POOL) == (FUNK, [])
+    body_only = T.lint_translation(FUNK_REQ, "A" + FUNK[len(FUNK_REQ):], instrumental=True, pool=FUNK_POOL)[1]
+    assert "mood_dropped:upbeat" in body_only and any(r.startswith("answered") for r in body_only)
+    out = T.translate(FUNK_REQ, FUNK_POOL, instrumental=True, pool=FUNK_POOL, llm=fake(f"Caption: {FUNK}"))
+    assert out["caption"] == FUNK and out["attempts"] == 1
+
+
+def test_a_body_that_contradicts_its_kept_copy_is_refused():
+    """The copy says the request; a body that flips, denies or adds against it is still a changed request."""
+    def reasons(request, text):
+        return T.lint_translation(request, text, instrumental=True, pool=FUNK_POOL)[1]
+    assert "mood_opposite:upbeat->melancholic" in reasons(FUNK_REQ, FUNK.replace("danceable", "melancholic"))
+    assert "negated_request:upbeat" in reasons(FUNK_REQ, FUNK.replace("a driving, danceable groove",
+                                                                      "a groove that is no longer upbeat"))
+    assert "negated_request:bass" in reasons(FUNK_REQ, FUNK.replace("a punchy electric bass", "no bass at all"))
+    no_drums = "Upbeat funky guitar, no drums"
+    assert any(r.startswith("denied:") for r in reasons(no_drums, FUNK.replace(FUNK_REQ, no_drums)))
+    calm = "warm strings, no drums"
+    assert any(r.startswith("denied:") for r in reasons(calm, "Warm strings, no drums, then a driving kick and metallic "
+                                                        "percussion arrive with hats ticking over lush reverb and a "
+                                                        "dreamy texture."))
+    assert any(r.startswith("invented_noun:") for r in reasons(FUNK_REQ, FUNK.replace("electric guitar", "saxophone")))
 
 
 def test_the_pool_lends_no_instrument_or_genre_when_the_request_names_one():
@@ -232,8 +267,8 @@ def test_one_deadline_covers_every_call():
         out = T.translate(REQ, POOL, instrumental=True, pool=POOL, llm=slow, deadline=120.0)
     finally:
         T.time.monotonic = real
-    assert [round(c["timeout"]) for c in llm.calls] == [20, 12, 4]
-    assert out["attempts"] == 3
+    assert [round(c["timeout"]) for c in llm.calls] == [20, 12]
+    assert out["attempts"] == 2
     T.time.monotonic = lambda: clock["t"]
     try:
         out = T.translate(REQ, POOL, instrumental=True, pool=POOL, llm=slow, deadline=clock["t"] + 8.4)
@@ -400,7 +435,7 @@ def test_http_llm_unreachable_is_translator_unavailable():
 
 def test_no_url_means_no_translator_and_the_budget_reads_from_env():
     assert T.translator_from_env({}) is None
-    assert T.deadline_seconds({}) == 20.0 and T.deadline_seconds({T.TRANSLATOR_TIMEOUT_ENV: "45"}) == 45.0
+    assert T.deadline_seconds({}) == 30.0 and T.deadline_seconds({T.TRANSLATOR_TIMEOUT_ENV: "45"}) == 45.0
 
 
 def test_a_sung_request_served_by_the_translator_says_no_lyrics_were_drafted():
@@ -592,3 +627,38 @@ def test_an_empty_request_is_refused_never_an_empty_caption():
     for request in ("", "   ", "\n\t"):
         with pytest.raises(T.EmptyRequest):
             T.expand_checked(request, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL)
+
+
+def test_a_retry_that_cannot_finish_is_not_started_and_three_cpu_calls_fit_the_default():
+    """A retry starts only with at least the last call's time left; three ~9 s calls fit the default budget."""
+    clock = {"t": 0.0}
+    llm = fake("ambient techno with a kick")
+
+    def slow(prompt, **kw):
+        clock["t"] += 9.5
+        return llm(prompt, **kw)
+    real = T.time.monotonic
+    T.time.monotonic = lambda: clock["t"]
+    try:
+        out = T.translate(REQ, POOL, instrumental=True, pool=POOL, llm=slow, deadline=T.deadline_seconds({}))
+        assert out["attempts"] == 3 and clock["t"] <= T.deadline_seconds({})
+        clock["t"], llm.calls[:] = 0.0, []
+        out = T.translate(REQ, POOL, instrumental=True, pool=POOL, llm=slow, deadline=25.0)
+    finally:
+        T.time.monotonic = real
+    assert out["attempts"] == 2 and clock["t"] == 19.0 and not any(r.get("error") for r in out["rejects"])
+
+
+def test_the_server_is_asked_for_one_caption_s_worth_of_tokens():
+    """A translator that takes a token budget gets the answer's three lines, never more than the ceiling."""
+    seen = []
+
+    def llm(prompt, **kw):
+        seen.append(kw.get("max_tokens"))
+        return f"Caption: {GOOD}"
+    llm.takes_max_tokens = True
+    T.translate(REQ, POOL, instrumental=True, pool=POOL, llm=llm)
+    assert seen == [T.ANSWER_FRAME_TOKENS + 2 * 7 + T.CAPTION_TOKENS]
+    assert T.answer_tokens("piano " * 300) == T.MAX_TOKENS
+    assert T.CAPTION_TOKENS >= 1.4 * T.LINT_WORDS[1]
+    assert getattr(T.http_llm("http://127.0.0.1:9"), "takes_max_tokens", False)

@@ -31,7 +31,7 @@ __all__ = ["TRANSLATOR_URL_ENV", "TRANSLATOR_TIMEOUT_ENV", "MODEL_REPO", "MODEL_
            "MAX_REQUEST_CHARS", "MAX_OUTPUT_CHARS",
            "build_prompt", "parse_answer", "extract_answer", "clean_request", "split_denials", "vocal_hits",
            "check_caption", "lint_translation", "translate", "expand_checked", "request_fallback",
-           "model_label", "http_llm", "translator_from_env", "deadline_seconds"]
+           "model_label", "http_llm", "translator_from_env", "deadline_seconds", "answer_tokens"]
 
 TRANSLATOR_URL_ENV = "KHAOS_TRANSLATOR_URL"
 # Seconds one Expand may spend in total; every call gets what is left.
@@ -47,7 +47,11 @@ DEFAULT_LABEL = "qwen3-8b"
 MAX_ATTEMPTS = 3
 RETRY_TEMPERATURE = 0.7
 RETRY_SEED = 1000
+# The ceiling on one answer; each call asks for its three lines' worth (`answer_tokens`), the caption at most
+# `CAPTION_TOKENS`: a caption past `LINT_WORDS` fails anyway, so generating it only spends CPU time.
 MAX_TOKENS = 200
+CAPTION_TOKENS = 110
+ANSWER_FRAME_TOKENS = 16
 # Shorter than a training caption: past this, a restatement can only grow by inventing.
 TRANSLATION_WORDS = (25, 55)
 # The lint's band around the asked one: the model drifts a little either way.
@@ -55,8 +59,8 @@ LINT_WORDS = (15, 75)
 # Scripts written without spaces are measured in characters.
 LINT_CHARS_UNSPACED = (20, 200)
 
-# One Expand's whole budget: on six CPU cores one call took up to 14 s, and most pass on the first.
-DEFAULT_TIMEOUT_SEC = 20.0
+# One Expand's whole budget: three CPU calls of about 9 s each must fit.
+DEFAULT_TIMEOUT_SEC = 30.0
 # Requests sent to one server at once (compose: --parallel 1): on CPU two at once took 20 s each, one after the other 6 and 11.
 SERVER_PARALLEL = 1
 MAX_RESPONSE_BYTES = 1 << 20
@@ -684,13 +688,19 @@ def _with_kin(request: str, body: str) -> str:
     return f"{body} {' '.join(extra)}" if extra else body
 
 
-def _body(request: str, output: str) -> str:
-    """The output without a leading copy of the request: only what the model wrote itself is measured."""
+def _split_copy(request: str, output: str) -> tuple[bool, str]:
+    """Whether the output opens with a copy of the request, and the output without it."""
     words = _WORD.findall(_nfc(request))
     if not words:
-        return output
+        return False, output
     copy = re.compile(r"^[\W_]*(?:(?:a|an|the)\s+)?" + r"[\W_]*".join(re.escape(w) for w in words), re.IGNORECASE)
-    return re.sub(r"^[\s,.;:!?—–-]+", "", copy.sub(" ", _nfc(output).strip())).strip()
+    rest, found = copy.subn(" ", _nfc(output).strip())
+    return bool(found), re.sub(r"^[\s,.;:!?—–-]+", "", rest).strip()
+
+
+def _body(request: str, output: str) -> str:
+    """The output without a leading copy of the request: only what the model wrote itself is measured."""
+    return _split_copy(request, output)[1]
 
 
 def _kept(noun: str, said: set[str], said_words: set[str]) -> bool:
@@ -710,8 +720,8 @@ def _kept(noun: str, said: set[str], said_words: set[str]) -> bool:
 
 
 def _meaning_reasons(request: str, body: str, whole: str | None = None) -> list[str]:
-    """What a caption changed in the request: a ruled-out noun or mood said, a request noun denied, a named
-    instrument dropped (read on ``whole``, copy included), an asked mood dropped, hedged or flipped."""
+    """What a caption changed in the request: a ruled-out noun or mood said, a request noun or mood denied, a
+    named instrument or asked mood dropped (read on ``whole``, copy included), an asked mood hedged or flipped."""
     reasons: list[str] = []
     asked_text, ruled_out = split_denials(request)
     asked, denied_by_request = _claims(asked_text), _claims(ruled_out)
@@ -737,14 +747,18 @@ def _meaning_reasons(request: str, body: str, whole: str | None = None) -> list[
     mood_text = _HEDGE.sub(" ", said_text)
     said_moods = _moods(mood_text)
     hedged = _moods(" ".join(m.group(0) for m in _HEDGE.finditer(said_text)))
-    body_words = set(_tokens(mood_text)) | said_moods
+    kept_moods = _HEDGE.sub(" ", kept_text)
+    body_words = set(_tokens(kept_moods)) | _moods(kept_moods)
     asked_moods = _moods(asked_text)
+    negated_moods = _moods(said_denied)
     implied = {_IMPLIED_MOODS[w] for w in _tokens(asked_text) if w in _IMPLIED_MOODS}
     for mood in sorted(asked_moods | implied):
         if mood not in implied and not ({mood, _singular(mood)} | _kin(mood)) & body_words:
             reasons.append(f"mood_dropped:{mood}")
         if ({mood} | _kin(mood)) & hedged:
             reasons.append(f"mood_hedged:{mood}")
+        if ({mood} | _kin(mood)) & negated_moods:
+            reasons.append(f"negated_request:{mood}")
         flipped = sorted((_opposites(mood) - _kin(mood)) & said_moods)
         if flipped:
             reasons.append(f"mood_opposite:{mood}->{flipped[0]}")
@@ -759,8 +773,8 @@ def _meaning_reasons(request: str, body: str, whole: str | None = None) -> list[
 
 def lint_translation(request: str, output: str, *, instrumental: bool,
                      pool: Iterable[str]) -> tuple[str | None, list[str]]:
-    """(caption, []) when the translation passes, else (None, reasons), all read on the body the model wrote:
-    the request check, what it names, what it denies, the request's moods, names, numbers, theory, length."""
+    """(caption, []) when the translation passes, else (None, reasons). What the caption still says is read
+    whole (a kept copy of the request says it); what the model added or contradicted is read on its own body."""
     text = (output or "").strip()
     if not text:
         return None, ["empty"]
@@ -769,8 +783,12 @@ def lint_translation(request: str, output: str, *, instrumental: bool,
     request = _capped(request)
     if instrumental:
         text = clean_request(text, True)
-    body = _body(request, text)
+    copied, body = _split_copy(request, text)
     reasons = check_caption(request, _with_kin(request, body), instrumental=instrumental)
+    if copied and body:
+        reasons = [r for r in reasons if not r.startswith("answered:")]
+        reasons += [r for r in check_caption(request, _with_kin(request, text), instrumental=instrumental)
+                    if r.startswith("answered:")]
     if instrumental and not any(r.startswith("vocal_on_instrumental") for r in reasons) and vocal_hits(text):
         reasons.append(f"vocal_on_instrumental:{vocal_hits(text)[0]}")
     pool_text = " ".join(pool)
@@ -839,6 +857,12 @@ def deadline_seconds(environ: dict | None = None) -> float:
     return value if value > 0 else DEFAULT_TIMEOUT_SEC
 
 
+def answer_tokens(request: str) -> int:
+    """Tokens for the three answer lines: the frame, the request said back in English, and one caption."""
+    said_back = 2 * len(_WORD.findall(request)) if _spaced(request) else sum(1 for c in request if c.isalpha())
+    return min(MAX_TOKENS, ANSWER_FRAME_TOKENS + said_back + CAPTION_TOKENS)
+
+
 def _label(llm, fallback: str) -> str:
     return getattr(llm, "label", None) or fallback
 
@@ -846,20 +870,24 @@ def _label(llm, fallback: str) -> str:
 def translate(request: str, shots: list[str] | Callable[[int], list[str]], *, instrumental: bool,
               pool: Iterable[str], llm: LLM, label: str = DEFAULT_LABEL, deadline: float | None = None) -> dict:
     """Up to ``MAX_ATTEMPTS`` linted translations before the monotonic ``deadline``, try ``n`` on ``shots(n)``:
-    ``{caption | None, attempts, rejects, label, translated_from}``. Raises `TranslatorUnavailable` when none answers."""
+    ``{caption | None, attempts, rejects, label, translated_from}``. Raises `TranslatorUnavailable` when none answers.
+    A retry whose time left is shorter than the last call took is not started."""
     pool = list(pool)
     deadline = time.monotonic() + DEFAULT_TIMEOUT_SEC if deadline is None else deadline
     rejects: list[dict] = []
+    budget = {"max_tokens": answer_tokens(request)} if getattr(llm, "takes_max_tokens", False) else {}
+    last_call = 0.0
     for n in range(MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
-        if remaining <= 0.5:
+        if remaining <= 0.5 or (n and remaining < last_call):
             if not n:
                 raise TranslatorUnavailable("no time left")
             break
         prompt = build_prompt(request, shots(n) if callable(shots) else shots, instrumental)
         temperature, seed = (0.0, None) if n == 0 else (RETRY_TEMPERATURE, RETRY_SEED + n)
+        started = time.monotonic()
         try:
-            raw = llm(prompt, temperature=temperature, seed=seed, timeout=remaining)
+            raw = llm(prompt, temperature=temperature, seed=seed, timeout=remaining, **budget)
         except Exception as exc:  # noqa: BLE001 — any backend failure is the same fallback
             if not n:
                 raise exc if isinstance(exc, TranslatorUnavailable) else \
@@ -867,6 +895,7 @@ def translate(request: str, shots: list[str] | Callable[[int], list[str]], *, in
             rejects.append({"by": _label(llm, label), "attempt": n + 1, "reasons": [f"unavailable:{exc}"[:200]],
                             "error": True})
             break
+        last_call = time.monotonic() - started
         parsed = parse_answer(raw)
         english, language = _rendered(request, parsed)
         text, reasons = lint_translation(english, parsed["caption"], instrumental=instrumental, pool=pool)
@@ -1012,7 +1041,8 @@ def http_llm(url: str, *, timeout: float = DEFAULT_TIMEOUT_SEC, max_tokens: int 
     `TranslatorUnavailable`; ``timeout`` per call is what the caller has left."""
     base = url.rstrip("/")
 
-    def run(prompt: str, temperature: float = 0.0, seed: int | None = None, timeout: float = timeout) -> str:
+    def run(prompt: str, temperature: float = 0.0, seed: int | None = None, timeout: float = timeout,
+            max_tokens: int = max_tokens) -> str:
         deadline = time.monotonic() + max(0.1, float(timeout))
         if not _healthy(base, deadline - time.monotonic()):
             raise TranslatorUnavailable(f"{base} is not answering")
@@ -1044,6 +1074,7 @@ def http_llm(url: str, *, timeout: float = DEFAULT_TIMEOUT_SEC, max_tokens: int 
         return content
 
     run.label = DEFAULT_LABEL
+    run.takes_max_tokens = True
     return run
 
 
