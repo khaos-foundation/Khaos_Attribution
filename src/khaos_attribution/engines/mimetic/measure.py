@@ -169,9 +169,13 @@ def parameter_count(handle: Handle) -> tuple:
 
 
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
-               timestep_norm: bool = False, param_filter: str | None = None, on_row=None) -> tuple:
+               timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
+               on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
+    if latent_transform:
+        from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+        raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker")
     if timestep_norm:
         raise NotImplementedError("per-timestep normalisation is not built on the mimetic-a0 worker")
     if param_filter:
@@ -218,6 +222,8 @@ def _index_refusal(index_meta: dict) -> str | None:
 def output_feature(handle: Handle, index_meta: dict, files):
     import numpy as np  # noqa: PLC0415
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    if index_meta.get("latent_transform"):
+        raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker; rebuild the index without it")
     why = _index_refusal(index_meta)
     if why:
         raise GradientUnavailable(why)

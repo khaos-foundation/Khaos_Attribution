@@ -204,6 +204,10 @@ def run(req: dict) -> dict:
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
     from khaos_attribution.engines.sa3.measure import ROW_PREFIX  # noqa: PLC0415
+    # The research settings are built on the torch worker; the MLX reading never differs from it silently.
+    for key in ("timestep_norm", "param_filter", "latent_transform"):
+        if req.get(key):
+            raise RuntimeError(f"{key} is not built on the MLX worker")
     mx, nn = _imports()
     convention = str(req.get("convention") or "mlx")
     if convention not in CONVENTIONS:
@@ -215,10 +219,6 @@ def run(req: dict) -> dict:
     timesteps = [float(t) for t in req["timesteps"]]
     noise_seed = int(req["noise_seed"])
     target = str(req.get("target") or "vnorm")
-    # The research settings are built on the torch worker; the MLX reading never differs from it silently.
-    for key in ("timestep_norm", "param_filter"):
-        if req.get(key):
-            raise RuntimeError(f"{key} is not built on the MLX worker")
     if target not in ("vnorm", "loss"):
         raise RuntimeError(f"target {target!r} is not built on the MLX worker")
     files = [Path(f) for f in req["files"]]

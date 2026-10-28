@@ -1,7 +1,8 @@
 """Gradient features on Stable Audio 3, inside the engine's environment: the request as JSON on stdin, the reply as
 one JSON line last on stdout. ``index`` writes one projected adapter gradient per clip (the D-TRAK feature, the
 contract's count-sketch), ``feature`` the mean feature of an output's clips, ``loss`` the output's rectified-flow
-loss with the adapter at full strength and with it off. The forward is the trainer's with the randomness fixed,
+loss with the adapter at full strength and with it off, ``latent_stats`` a research latent transform measured
+over the training clips. The forward is the trainer's with the randomness fixed,
 as the held-out worker takes it; the adapter's parameters are the ones Stability's trainer trains."""
 
 from __future__ import annotations
@@ -43,9 +44,8 @@ def _load(req: dict):
     return wrapped, model, params, torch, sorted(state), names, decomposed
 
 
-def _clip(model, torch, wav: Path, device, pair_seed: int):
-    """One clip as the trainer sees it: latents, conditioning with an empty inpaint mask, the padding mask, the
-    seeded noise."""
+def _encode(model, torch, wav: Path, device):
+    """(latents, sample count, valid frame count) of one clip through the engine's autoencoder."""
     import soundfile as sf  # noqa: PLC0415
     sr = int(model.sample_rate)
     ratio = int(model.pretransform.downsampling_ratio)
@@ -57,11 +57,19 @@ def _clip(model, torch, wav: Path, device, pair_seed: int):
     padded = ((n + ratio - 1) // ratio) * ratio
     if padded != n:
         x = torch.nn.functional.pad(x, (0, padded - n))
-    caption = wav.with_suffix(".txt").read_text(encoding="utf-8").strip() if wav.with_suffix(".txt").exists() else ""
     with torch.no_grad():
         with torch.autocast(device_type=device if isinstance(device, str) else device.type, enabled=str(device).startswith("cuda")):
             latents = model.pretransform.encode(x)
     latents = latents.float().detach()
+    return latents, n, max(1, min(int(round(n / ratio)), latents.shape[-1]))
+
+
+def _clip(model, torch, wav: Path, device, pair_seed: int):
+    """One clip as the trainer sees it: latents, conditioning with an empty inpaint mask, the padding mask, the
+    seeded noise."""
+    sr = int(model.sample_rate)
+    latents, n, valid = _encode(model, torch, wav, device)
+    caption = wav.with_suffix(".txt").read_text(encoding="utf-8").strip() if wav.with_suffix(".txt").exists() else ""
     # The conditioning is taken once and detached: the feature is the DiT adapter's gradient, and a conditioner
     # graph reused across timesteps would be walked twice.
     from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
@@ -70,7 +78,6 @@ def _clip(model, torch, wav: Path, device, pair_seed: int):
     cond = _detached(cond, torch)
     cond["inpaint_mask"] = [torch.zeros(1, 1, latents.shape[-1], dtype=torch.bool, device=latents.device)]
     cond["inpaint_masked_input"] = [torch.zeros_like(latents)]
-    valid = max(1, min(int(round(n / ratio)), latents.shape[-1]))
     mask = torch.zeros(1, latents.shape[-1], dtype=torch.bool, device=latents.device)
     mask[:, :valid] = True
     from khaos_attribution import gradient as G  # noqa: PLC0415
@@ -99,8 +106,17 @@ def _forward(model, torch, latents, cond, mask, noise, t: float):
 TARGETS = ("vnorm", "loss", "vdelta")
 
 
+def _squared(torch, diff, where, lmap=None):
+    """Mean square of ``diff`` over the valid frames, taken after the latent map over channels when one is given."""
+    if lmap is not None:
+        if lmap.shape[1] != diff.shape[1]:
+            raise RuntimeError(f"the latent transform was measured on {lmap.shape[1]} channels; this latent has {diff.shape[1]}")
+        diff = torch.einsum("kc,bct->bkt", lmap, diff)
+    return diff[where.expand_as(diff)].pow(2).mean()
+
+
 def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=None, timestep_norm: bool = False,
-              keep=None):
+              keep=None, lmap=None):
     """The mean adapter gradient over the timesteps, flat, float32, on the CPU. ``vdelta`` differentiates the
     squared norm of the velocity the adapter adds over the base's; ``keep`` zeroes the tensors a filter drops."""
     from khaos_attribution import gradient as G  # noqa: PLC0415
@@ -119,11 +135,11 @@ def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=Non
         with torch.enable_grad():
             out = _forward(model, torch, latents, cond, mask, noise, float(t))
             if target == "vnorm":
-                loss = out[where.expand_as(out)].pow(2).mean()
+                loss = _squared(torch, out, where, lmap)
             elif target == "vdelta":
-                loss = (out - base)[where.expand_as(out)].pow(2).mean()
+                loss = _squared(torch, out - base, where, lmap)
             else:
-                loss = ((out - (noise - latents)) ** 2)[where.expand_as(out)].mean()
+                loss = _squared(torch, out - (noise - latents), where, lmap)
         grads = torch.autograd.grad(loss, params, allow_unused=True)
         parts = [(g if g is not None else torch.zeros_like(p)).reshape(-1).detach().to("cpu", torch.float32)
                  for g, p in zip(grads, params)]
@@ -133,6 +149,23 @@ def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=Non
     return G.combine_timesteps(flats, timestep_norm=timestep_norm)
 
 
+def _latent_stats(model, torch, files, device, kind: str, variance: float) -> dict:
+    """Channel moments of the valid latent frames over ``files``, in float64, made into the transform."""
+    import numpy as np  # noqa: PLC0415
+    from khaos_attribution import gradient as G  # noqa: PLC0415
+    n, total, outer = 0, None, None
+    for wav in files:
+        latents, _n, valid = _encode(model, torch, wav, device)
+        x = latents[0, :, :valid].to("cpu", torch.float64).numpy()
+        total = x.sum(axis=1) if total is None else total + x.sum(axis=1)
+        outer = x @ x.T if outer is None else outer + x @ x.T
+        n += x.shape[1]
+    if total is None:
+        raise RuntimeError("the latent transform needs at least one clip")
+    return G.latent_transform_from_moments(kind, n, total, outer, variance=variance)
+
+
+# The truth's loss is the trainer's, so a research latent transform never reaches it.
 def _loss(model, torch, clip, timesteps) -> float:
     latents, cond, mask, noise = clip
     total = 0.0
@@ -192,12 +225,17 @@ def run(req: dict) -> dict:
     timestep_norm = bool(req.get("timestep_norm", False))
     param_filter = req.get("param_filter") or None
     keep = G.param_filter_mask(names, param_filter) if param_filter else None
+    transform = req.get("latent_transform") or None
+    lmap = torch.from_numpy(G.latent_map(transform)).to(device) if transform else None
     files = [Path(f) for f in req["files"]]
     n_params = int(sum(int(p.numel()) for p in params))
     signature = G.parameter_signature(params)
     command = req["command"]
-    filtered = {"param_filter": param_filter, "tensors_kept": int(sum(keep)) if keep else len(params),
+    filtered = {"latent_transform": (transform or {}).get("kind"), "param_filter": param_filter, "tensors_kept": int(sum(keep)) if keep else len(params),
                 "parameters_kept": int(sum(int(p.numel()) for p, ok in zip(params, keep) if ok)) if keep else n_params}
+    if command == "latent_stats":
+        return {"transform": _latent_stats(model, torch, files, device, str(req["latent_kind"]),
+                                           float(req.get("latent_variance", 0.9)))}
     if command == "parameters":
         return {"n_params": n_params, "n_tensors": len(params), "signature": signature, "device": str(device).split(":")[0],
                 "compute_dtype": _base_dtype(model), "names": names}
@@ -210,7 +248,7 @@ def run(req: dict) -> dict:
         for i, wav in enumerate(files):
             clip = _clip(model, torch, wav, device, G.pair_noise_seed(noise_seed, wav.name))
             flat = _gradient(model, torch, params, clip, timesteps, target, wrapped=wrapped, timestep_norm=timestep_norm,
-                             keep=keep)
+                             keep=keep, lmap=lmap)
             if req.get("keep_flat"):
                 raw.append(flat)
             projected = G.project(flat, projection)

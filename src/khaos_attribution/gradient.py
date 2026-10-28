@@ -137,6 +137,46 @@ def combine_timesteps(flats: Sequence[np.ndarray], *, timestep_norm: bool) -> np
     return (np.sum(rows, axis=0) / float(len(rows))).astype(np.float32)
 
 
+LATENT_TRANSFORMS = ("whiten", "pca")
+
+
+def latent_transform_from_moments(kind: str, n: int, total, outer, *, variance: float = 0.9) -> dict:
+    """A research latent transform from the training latents' frame count, channel sums and channel outer-product
+    sums: ``whiten`` scales each channel by 1/std, ``pca`` keeps the fewest top directions reaching ``variance``."""
+    if kind not in LATENT_TRANSFORMS:
+        raise GradientUnavailable(f"latent transform must be one of {LATENT_TRANSFORMS}, not {kind!r}")
+    if int(n) <= 1:
+        raise GradientUnavailable("no latent frames to measure the transform's statistics on")
+    n = int(n)
+    mean = np.asarray(total, dtype=np.float64) / n
+    cov = np.asarray(outer, dtype=np.float64) / n - np.outer(mean, mean)
+    base = {"kind": kind, "channels": int(mean.size), "frames": n}
+    if kind == "whiten":
+        std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        # A dead channel keeps its scale rather than being blown up by a zero spread.
+        scale = 1.0 / np.where(std > 1e-6, std, 1.0)
+        return {**base, "std": std.tolist(), "scale": scale.tolist()}
+    vals, vecs = np.linalg.eigh(cov)
+    order = np.argsort(vals)[::-1]
+    vals, vecs = np.clip(vals[order], 0.0, None), vecs[:, order]
+    share = np.cumsum(vals) / max(float(vals.sum()), 1e-300)
+    k = int(np.searchsorted(share, float(variance) - 1e-12) + 1)
+    comps = vecs[:, :k].T
+    # Each direction's largest entry positive, so the same statistics always give the same map.
+    comps *= np.sign(comps[np.arange(k), np.argmax(np.abs(comps), axis=1)])[:, None]
+    return {**base, "k": k, "variance_target": float(variance), "explained": float(share[k - 1]),
+            "components": comps.tolist()}
+
+
+def latent_map(transform: dict) -> np.ndarray:
+    """The transform as a (k, channels) matrix applied over a latent's channels."""
+    if transform.get("kind") == "whiten":
+        return np.diag(np.asarray(transform["scale"], dtype=np.float32))
+    if transform.get("kind") == "pca":
+        return np.asarray(transform["components"], dtype=np.float32)
+    raise GradientUnavailable(f"latent transform must be one of {LATENT_TRANSFORMS}, not {transform.get('kind')!r}")
+
+
 def l2_normalise(vector: Sequence[float] | np.ndarray) -> np.ndarray:
     v = np.asarray(vector, dtype=np.float32).reshape(-1)
     norm = float(np.linalg.norm(v))
@@ -322,6 +362,8 @@ def output_feature(module: Any, meta: dict, files: Sequence[Path | str], *,
     target = str(meta.get("target", "vnorm"))
     if meta.get("param_filter"):
         raise GradientUnavailable("a parameter filter is not built on this engine's measure; rebuild the index without it")
+    if meta.get("latent_transform"):
+        raise GradientUnavailable("a latent transform is not built on this engine's measure; rebuild the index without it")
     params = list(params) if params is not None else adapter_parameters(module)
     # The features are read as the index was built, normalisation included.
     vecs = [project(pair_gradient(module, load_sample(p), timesteps=timesteps,

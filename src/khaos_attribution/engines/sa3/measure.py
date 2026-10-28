@@ -11,7 +11,7 @@ SYSTEM_RESERVE_GB = 6.0
 LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
 
 __all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
-           "index_rows", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb"]
+           "index_rows", "latent_stats", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb"]
 
 
 _SCORER = DESCRIPTOR.memory.get("scorer") or {}
@@ -101,7 +101,7 @@ def _env(handle: Handle) -> dict:
 
 
 _REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("rows", "matrix"), "feature": ("feature",),
-               "loss": ("with", "without")}
+               "loss": ("with", "without"), "latent_stats": ("transform",)}
 
 
 ROW_PREFIX = "khaos-row "
@@ -170,6 +170,7 @@ def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:
             # Research settings travel with the index, so an output's feature is taken as the rows were.
             "timestep_norm": bool(index_meta.get("timestep_norm", False)),
             "param_filter": index_meta.get("param_filter") or None,
+            "latent_transform": index_meta.get("latent_transform") or None,
             "index_meta": {k: index_meta[k] for k in ("projection",) if k in index_meta}}
 
 
@@ -179,7 +180,8 @@ def parameter_count(handle: Handle) -> tuple:
 
 
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
-               timestep_norm: bool = False, param_filter: str | None = None, on_row=None) -> tuple:
+               timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
+               on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
     out = Path(files[0]).resolve().parent / ".khaos_index_rows.tmp.npy" if files else Path(".khaos_index_rows.tmp.npy")
@@ -191,7 +193,8 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
             on_row(row["row"], Path(files[row["row"]]), row.get("gradient_norm"))
 
     r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target,
-                                       "timestep_norm": timestep_norm, "param_filter": param_filter}, files, "index"),
+                                       "timestep_norm": timestep_norm, "param_filter": param_filter,
+                                       "latent_transform": latent_transform}, files, "index"),
                       "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
              on_progress=progress)
     from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
@@ -209,6 +212,18 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
             if row["row"] not in seen:
                 on_row(row["row"], Path(files[row["row"]]), row["gradient_norm"])
     return matrix.astype(np.float32), r["rows"]
+
+
+def latent_stats(handle: Handle, files, *, kind: str, variance: float = 0.9) -> dict:
+    """A research latent transform measured once over ``files`` (the training pairs), for the index to carry."""
+    from khaos_attribution.gradient import LATENT_TRANSFORMS, GradientUnavailable  # noqa: PLC0415
+    if kind not in LATENT_TRANSFORMS:
+        raise GradientUnavailable(f"latent transform must be one of {LATENT_TRANSFORMS}, not {kind!r}")
+    if handle.runtime == "mlx":
+        raise GradientUnavailable("a latent transform is not built on the MLX worker")
+    r = _ask(handle, {**_base(handle, {"timesteps": [0.5], "noise_seed": 0}, files, "latent_stats"),
+                      "latent_kind": kind, "latent_variance": float(variance)})
+    return dict(r["transform"])
 
 
 def _index_refusal(index_meta: dict) -> str | None:
