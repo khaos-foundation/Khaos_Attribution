@@ -84,3 +84,37 @@ def settled(sizes: dict, path: Path, final: bool) -> bool:
 def epoch_of(start_epoch: int, per_epoch: int, step: int) -> int:
     """The epoch a trainer step belongs to, counted from the epoch a resume started at; never below the first."""
     return start_epoch + max(1, round(step / per_epoch))
+
+
+class HeldoutNotScored(RuntimeError):
+    """A held-out score was asked at an epoch whose weights the trainer did not save."""
+
+
+def due_checkpoint(step: int, steps: dict) -> bool:
+    """Whether the trainer saves its weights at ``step`` of its process: on the cadence and at the last step."""
+    return step % steps["checkpoint_every"] == 0 or step == steps["total"]
+
+
+def releasable(queue: list, laid_out: set, steps: dict, alive: bool) -> list:
+    """The queued ``(step, order, update)`` events in step order, held at the first epoch whose checkpoint is due but
+    not yet laid out, so a held-out score taken at that epoch reads that epoch's weights."""
+    queue.sort(key=lambda e: (e[0], e[1]))
+    out = []
+    while queue:
+        step, order, _update = queue[0]
+        if alive and order == 0 and due_checkpoint(step, steps) and not any(s >= step for s in laid_out):
+            break
+        out.append(queue.pop(0)[2])
+    return out
+
+
+def scored_adapter(session, named, engine_name: str):
+    """The adapter a held-out score reads: the one named, else the checkpoint of the epoch just finished."""
+    if named is not None:
+        return named
+    epoch = int(getattr(session, "epoch_done", 0) or 0)
+    adapter = session.checkpoint_by_epoch.get(epoch)
+    if adapter is None:
+        raise HeldoutNotScored(f"{engine_name} saved no weights at epoch {epoch}; its held-out loss is scored only "
+                               "on the epochs it saves (HELDOUT_ON_CHECKPOINTS)")
+    return adapter

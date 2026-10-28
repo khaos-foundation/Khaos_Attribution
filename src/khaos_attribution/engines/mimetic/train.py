@@ -33,8 +33,11 @@ TRAIN_DRIVER = Path(__file__).with_name("train_driver.py")
 LOSSES_CSV = "khaos_losses.csv"
 POLL_SECONDS = 2.0
 MIN_PAIRS = 2
+# The trainer saves weights only on its checkpoint cadence, so a held-out score exists only there.
+HELDOUT_ON_CHECKPOINTS = True
 
-__all__ = ["LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs", "heldout_summary",
+__all__ = ["HELDOUT_ON_CHECKPOINTS",
+           "LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs", "heldout_summary",
            "open_module", "open_session", "pair_files", "preprocess_pairs", "run_refusal", "training_api"]
 
 
@@ -197,6 +200,8 @@ class Session:
         self.latest_adapter: Path | None = None
         self.latest_epoch = 0
         self.start_epoch = 0
+        self.epoch_done = 0
+        self.checkpoint_by_epoch: dict = {}
         self._sizes: dict = {}
         self.module = None
         self.training_config = None
@@ -232,6 +237,7 @@ class Session:
                                       + "\n".join(done.stderr.strip().splitlines()[-4:]))
         self.latest_adapter = target
         self.latest_epoch = epoch
+        self.checkpoint_by_epoch[epoch] = target
         return target_dir
 
     def train(self):
@@ -265,10 +271,11 @@ class Session:
         last_loss = 0.0
         start = time.monotonic()
         per_epoch = self.steps["per_epoch"]
+        run_steps = self.steps
+        events: list = []
         while True:
             alive = self.process.poll() is None
             losses = losses_from_csv(self.save_dir)
-            events: list = []
             for step, loss in losses[seen:]:
                 last_loss = loss
                 by_step[step] = loss
@@ -290,7 +297,10 @@ class Session:
                 target_dir = self._lay_out(step, path, loss_at)
                 events.append((step, 1, TrainingUpdate(step=step, loss=loss_at, msg="[OK] Checkpoint", kind="checkpoint",
                                                        epoch=self._epoch_of(step), checkpoint_path=str(target_dir))))
-            for _step, _order, update in sorted(events, key=lambda e: (e[0], e[1])):
+            # In step order, a checkpoint after the epoch it closes; an epoch that saves waits for its weights.
+            for update in PT.releasable(events, laid_out, run_steps, alive):
+                if update.kind == "epoch":
+                    self.epoch_done = update.epoch
                 yield update
             if not alive:
                 break
@@ -339,7 +349,7 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
 
 class HeldoutEvaluator:
     """The trainer's velocity MSE on the held-out clips at fixed timesteps with seeded noise, under the adapter
-    named last (the newest checkpoint, else the base alone)."""
+    named, else the checkpoint of the epoch just finished."""
 
     def __init__(self, session: Session, tensor_val_dir: Path, *, n_buckets: int) -> None:
         self.session = session
@@ -356,7 +366,7 @@ class HeldoutEvaluator:
         return True
 
     def evaluate(self) -> dict:
-        adapter = self.adapter or self.session.latest_adapter
+        adapter = PT.scored_adapter(self.session, self.adapter, DESCRIPTOR.name)
         return heldout_summary(self.session.api, self.tensor_val_dir, adapter, seed=self.session.seed,
                                timesteps=self.timesteps, checkpoint_root=self.session.checkpoint_root)
 

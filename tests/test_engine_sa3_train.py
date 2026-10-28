@@ -300,3 +300,55 @@ def test_the_heldout_loss_of_any_clips_under_any_adapter_comes_from_the_trainers
     assert set(out["by_track"]) == {"trk_a", "trk_b"} and out["mean"] == 1.5
     T.heldout_summary(api, tmp_path / "clips", None, seed=3, timesteps=[0.5], checkpoint_root=None)
     assert json.loads(seen.read_text())["adapter"] is None
+
+
+LATE_CHECKPOINT_TRAINER = '''
+import csv, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+def arg(name):
+    return args[args.index(name) + 1]
+save_dir = Path(arg("--save_dir") if "--save_dir" in args else arg("--save-dir"))
+steps = int(arg("--steps"))
+every = int(arg("--checkpoint_every") if "--checkpoint_every" in args else arg("--checkpoint-every"))
+save_dir.mkdir(parents=True, exist_ok=True)
+with (save_dir / "khaos_losses.csv").open("w", newline="") as fh:
+    w = csv.DictWriter(fh, fieldnames=["step", "loss"]); w.writeheader()
+    for s in range(1, steps + 1):
+        w.writerow({"step": s, "loss": f"{1.0 / s:.4f}"}); fh.flush()
+        if s % every == 0:
+            time.sleep(0.6)
+            (save_dir / f"epoch=0-step={s}.ckpt").write_bytes(b"step%d" % s)
+        time.sleep(0.05)
+'''
+
+
+@pytest.mark.parametrize("engine", ["sa3", "mimetic"])
+def test_the_heldout_at_an_epoch_reads_that_epochs_weights_or_is_not_scored(api, tmp_path, monkeypatch, engine):
+    """A late checkpoint holds its epoch back; an epoch the trainer did not save is refused, never scored on older weights."""
+    from khaos_attribution.engines import process_trainer as PT
+    from khaos_attribution.engines.mimetic import train as MT
+    mod = T if engine == "sa3" else MT
+    driver = tmp_path / "late.py"
+    driver.write_text(LATE_CHECKPOINT_TRAINER)
+    monkeypatch.setattr(mod, "TRAIN_DRIVER", driver)
+    monkeypatch.setattr(mod, "CONVERT_WORKER", T.CONVERT_WORKER)
+    monkeypatch.setattr(mod, "POLL_SECONDS", 0.1)
+    scored = []
+    monkeypatch.setattr(mod, "heldout_summary", lambda api, clips, adapter, **kw: {"adapter": adapter})
+    tensors = tmp_path / "run" / "tensors"
+    _clips(tensors, 2)
+    eng_api = api if engine == "sa3" else MT.TrainingApi(root=tmp_path, runtime="torch", python=sys.executable)
+    session = mod.open_session(eng_api, {**RECIPE, "max_epochs": 4, "checkpoint_every_n_epochs": 2},
+                               checkpoint_root=tmp_path, tensor_dir=tensors, output_dir=tmp_path / "run",
+                               device="cuda", precision="bf16", seed=1)
+    evaluator = session.heldout_evaluator(tensors, n_buckets=2)
+    for update in session.train():
+        if update.kind == "epoch":
+            try:
+                adapter = evaluator.evaluate()["adapter"]
+            except getattr(PT, "HeldoutNotScored", LookupError):
+                adapter = None
+            scored.append((update.epoch, adapter.read_bytes() if adapter else None))
+    assert scored == [(1, None), (2, b"converted:step4"), (3, None), (4, b"converted:step8")]
+    assert mod.HELDOUT_ON_CHECKPOINTS is True
