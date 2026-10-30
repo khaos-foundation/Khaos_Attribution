@@ -57,6 +57,11 @@ class Descriptor:
         return self.doc["default_variant"]
 
     @property
+    def adapter_strength(self) -> float:
+        """The default artist strength, one number for both rooms."""
+        return float(self.doc.get("adapter_strength", 0.85))
+
+    @property
     def render_setting_keys(self) -> tuple:
         return tuple(self.doc.get("render_setting_keys") or ())
 

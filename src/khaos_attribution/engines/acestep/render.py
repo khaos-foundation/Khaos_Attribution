@@ -78,6 +78,28 @@ def force_codec_fp32(handler_cls) -> None:
     handler_cls._khaos_codec_fp32_installed = True
 
 
+def lift_turbo_step_clamp(handler_cls) -> None:
+    """The engine's service path clamps a turbo render to 8 steps; the descriptor's row asks for more, so the
+    requested count is restored after the engine's normalisation. Idempotent."""
+    if getattr(handler_cls, "_khaos_step_clamp_lifted", False):
+        return
+    orig = getattr(handler_cls, "_normalize_service_generate_inputs", None)
+    if orig is None:
+        log.warning("The engine has no _normalize_service_generate_inputs: its turbo step clamp, if any, stands")
+        return
+    signature = inspect.signature(orig)
+
+    def unclamped(self, *args, **kwargs):
+        out = orig(self, *args, **kwargs)
+        asked = signature.bind_partial(self, *args, **kwargs).arguments.get("infer_steps")
+        if asked is not None and isinstance(out, dict) and "infer_steps" in out:
+            out["infer_steps"] = int(asked)
+        return out
+
+    handler_cls._normalize_service_generate_inputs = unclamped
+    handler_cls._khaos_step_clamp_lifted = True
+
+
 def engine_device(device: str) -> str:
     """ACE-Step wants an indexed CUDA device ("cuda:0") and a bare string for mps/cpu."""
     return "cuda:0" if device == "cuda" else device
@@ -130,12 +152,12 @@ class AceStepRenderer:
     """The weights once per process, an adapter per variant, one render at a time (the caller serialises)."""
 
     def __init__(self, repo_dir, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float = 0.85):
+                 base_resident: bool = False, default_adapter_scale: float | None = None):
         self.repo_dir = Path(repo_dir).resolve()
         self.checkpoint_dir = Path(checkpoint_dir).resolve() if checkpoint_dir else None
         self.device = device
         self.base_resident = bool(base_resident)
-        self.default_adapter_scale = float(default_adapter_scale)
+        self.default_adapter_scale = float(DESCRIPTOR.adapter_strength if default_adapter_scale is None else default_adapter_scale)
         self._base_checkpoint = Path(base_checkpoint).resolve() if base_checkpoint else None
         self.handler = None                  # the serving (turbo) handler
         self.llm = None                      # the 5 Hz LM, loaded only when a request thinks
@@ -210,6 +232,7 @@ class AceStepRenderer:
         if self._resolved_device() == "mps":
             force_mps_bf16(AceStepHandler)
         force_codec_fp32(AceStepHandler)
+        lift_turbo_step_clamp(AceStepHandler)
         handler = AceStepHandler()
         config_path = DESCRIPTOR.variant_config(variant)
         if variant == "base":
@@ -236,6 +259,7 @@ class AceStepRenderer:
         if self._resolved_device() == "mps":
             force_mps_bf16(AceStepHandler)
         force_codec_fp32(AceStepHandler)
+        lift_turbo_step_clamp(AceStepHandler)
         path = self.base_checkpoint_path()
         config_path = path.name if path.parent == self.checkpoints_root().resolve() else str(path)
         handler = AceStepHandler()

@@ -23,15 +23,16 @@ def test_the_acestep_descriptor_carries_the_facts_the_rooms_pinned_as_constants(
     d = E.descriptor("acestep-1.5")
     assert d.commit == "ca1e85fe9430179831e6bc6be790c332190a3866" and pins.is_sha(d.commit)
     assert d.variant_config("turbo") == "acestep-v15-turbo" and d.variant_config("base") == "acestep-v15-base"
-    assert d.render_defaults("turbo") == {"steps": 8, "shift": 3.0, "guidance_scale": 7.0, "cfg_interval_start": 0.0,
-                                          "cfg_interval_end": 1.0, "dcw_enabled": True}
+    assert d.render_defaults("turbo") == {"steps": 20, "shift": 3.0, "guidance_scale": 7.0, "cfg_interval_start": 0.0,
+                                          "cfg_interval_end": 1.0, "dcw_enabled": False}
+    assert d.adapter_strength == 0.75
     assert d.render_defaults("base")["steps"] == 32 and d.render_defaults("base")["dcw_enabled"] is False
     assert d.render_settings("turbo", steps=0, shift=None) == d.render_defaults("turbo")
     assert d.render_settings("base", steps=20, dcw_enabled=True)["steps"] == 20
-    assert d.render_settings("nowhere")["steps"] == 8, "an unknown variant resolves on the default's row"
+    assert d.render_settings("nowhere")["steps"] == 20, "an unknown variant resolves on the default's row"
     with pytest.raises(TypeError):
         d.render_settings("turbo", colour="blue")
-    assert d.step_clamp("turbo") == 8 and d.step_clamp("base") is None
+    assert d.step_clamp("turbo") is None and d.step_clamp("base") is None, "the renderer lifts the engine's clamp"
     assert d.bound("duration_seconds") == (5, 600) and d.bound("takes") == (1, 16)
     assert list(d.vocal_languages) == ["en", "es", "fr", "de", "it", "pt", "ja", "ko", "zh"] and d.default_vocal_language == "en"
     assert d.sings and d.conditioning["lyrics"] and "repaint" in d.rework_modes
@@ -71,7 +72,7 @@ def test_capabilities_say_what_a_form_may_offer_and_explain_each_control_it_must
     """Both rooms hide a control the engine lacks and say why in the contract's words."""
     ace = E.capabilities("acestep-1.5")
     assert ace["sings"] and ace["musical"] and ace["absent"] == {} and ace["bounds"]["duration"] == [5, 600]
-    assert ace["variants"]["turbo"]["step_clamp"] == 8 and ace["default_variant"] == "turbo"
+    assert ace["variants"]["turbo"]["step_clamp"] is None and ace["default_variant"] == "turbo"
     sa3 = E.capabilities("stable-audio-3")
     assert not sa3["sings"] and not sa3["musical"] and sa3["bounds"]["duration"] == [5, 120]
     assert sa3["absent"]["lyrics"].startswith("Stable Audio 3 Medium does not sing")

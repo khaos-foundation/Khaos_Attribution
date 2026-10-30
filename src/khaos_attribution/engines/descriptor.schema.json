@@ -222,6 +222,11 @@
     "default_variant": {
       "type": "string"
     },
+    "adapter_strength": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "the default artist strength both rooms apply"
+    },
     "render_setting_keys": {
       "type": "array",
       "items": {
