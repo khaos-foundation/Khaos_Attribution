@@ -63,6 +63,21 @@ def force_mps_bf16(handler_cls) -> None:
     handler_cls._khaos_mps_bf16_installed = True
 
 
+def force_codec_fp32(handler_cls) -> None:
+    """The codec (VAE) runs in fp32 on every device: in bf16 or fp16 its decoder adds a high-frequency hash that
+    quiet material exposes. The engine's own rule picks half precision on CUDA and MPS and every codec call site
+    consults it, so the rule itself is replaced; the DiT keeps its precision. Idempotent."""
+    import torch  # noqa: PLC0415
+    if getattr(handler_cls, "_khaos_codec_fp32_installed", False):
+        return
+
+    def _get_vae_dtype(self, device=None):
+        return torch.float32
+
+    handler_cls._get_vae_dtype = _get_vae_dtype
+    handler_cls._khaos_codec_fp32_installed = True
+
+
 def engine_device(device: str) -> str:
     """ACE-Step wants an indexed CUDA device ("cuda:0") and a bare string for mps/cpu."""
     return "cuda:0" if device == "cuda" else device
@@ -194,6 +209,7 @@ class AceStepRenderer:
         from acestep.handler import AceStepHandler  # noqa: PLC0415
         if self._resolved_device() == "mps":
             force_mps_bf16(AceStepHandler)
+        force_codec_fp32(AceStepHandler)
         handler = AceStepHandler()
         config_path = DESCRIPTOR.variant_config(variant)
         if variant == "base":
@@ -219,6 +235,7 @@ class AceStepRenderer:
         from acestep.handler import AceStepHandler  # noqa: PLC0415
         if self._resolved_device() == "mps":
             force_mps_bf16(AceStepHandler)
+        force_codec_fp32(AceStepHandler)
         path = self.base_checkpoint_path()
         config_path = path.name if path.parent == self.checkpoints_root().resolve() else str(path)
         handler = AceStepHandler()

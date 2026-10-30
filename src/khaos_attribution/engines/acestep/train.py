@@ -82,9 +82,27 @@ def training_api(repo_dir: Path | str) -> TrainingApi:
     except ImportError as exc:
         raise TrainingUnavailable(f"ACE-Step's training modules are not importable from {root}: {exc}") from exc
     patch_mps_precision()
+    patch_vae_precision()
     return TrainingApi(preprocess=preprocess_audio_files, Trainer=FixedLoRATrainer, TrainingConfig=TrainingConfigV2,
                        LoRAConfig=LoRAConfigV2, LoKRConfig=LoKRConfigV2, load_decoder=load_decoder_for_training,
                        save_final=save_final, Module=FixedLoRAModule, select_dtype=_select_compute_dtype)
+
+
+def patch_vae_precision() -> None:
+    """Preprocessing encodes the training latents with the codec (VAE) in fp32 whatever the pass runs in: in bf16
+    the encoder drifts a quarter from the fp32 latents and adds a high-frequency hash. The preprocessor imports the
+    loader by name at call time, so the loader is replaced; the text encoder keeps its precision. Idempotent."""
+    from acestep.training_v2 import model_loader as _ml  # noqa: PLC0415
+
+    if getattr(_ml, "_khaos_vae_fp32", False):
+        return
+    orig = _ml.load_vae
+
+    def load_vae(checkpoint_dir, device="cpu", precision="bf16"):
+        return orig(checkpoint_dir, device, "fp32")
+
+    _ml.load_vae = load_vae
+    _ml._khaos_vae_fp32 = True
 
 
 def patch_mps_precision() -> None:
