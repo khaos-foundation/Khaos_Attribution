@@ -248,8 +248,9 @@ class Watermarker:
 
     @staticmethod
     def embed_verified(audio, sample_rate: int, watermark_id: int):
-        """(marked audio, strength): the mark at the first strength whose id reads back clean, or the strongest
-        with a warning, since a present mark whose id cannot be read is still a mark."""
+        """(marked audio, strength): the first strength whose id reads back clean, else the strongest whose id reads
+        back corrected, else the strongest with a warning, since a present mark whose id cannot be read is still a
+        mark."""
         import torch
         import torchaudio
 
@@ -261,13 +262,17 @@ class Watermarker:
         with torch.inference_mode():
             delta16 = generator.get_watermark(mono16, _SAMPLE_RATE, message=message)
         delta = torchaudio.functional.resample(delta16, _SAMPLE_RATE, sample_rate)[0, 0][: wav.shape[-1]]
-        marked = None
+        marked = corrected_read = None
         for strength in Watermarker.STRENGTHS:
             marked = (wav + strength * delta).clamp(-1.0, 1.0).T.contiguous().numpy()
             _, read, corrected = Watermarker.detect_array(marked, sample_rate)
             if read == watermark_id and not corrected:
                 return marked, strength
-        log.warning("watermark %d does not read back clean at strength %s; the strongest mark is kept",
+            if read == watermark_id:
+                corrected_read = (marked, strength)
+        if corrected_read:
+            return corrected_read
+        log.warning("watermark %d does not read back at strength %s; the strongest mark is kept",
                     watermark_id, Watermarker.STRENGTHS[-1])
         return marked, Watermarker.STRENGTHS[-1]
 

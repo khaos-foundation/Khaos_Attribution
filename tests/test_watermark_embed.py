@@ -21,22 +21,24 @@ class _Generator:
 
 
 class _Detector:
-    """Reads the id correctly only when the mark is at least ``needs`` strong; below that two bits come back wrong."""
+    """Reads the id clean from ``needs`` strong, with one bit wrong from ``needs_one``, and with two wrong below."""
 
-    def __init__(self, needs: float):
-        self.needs = needs
+    def __init__(self, needs: float, needs_one: float = 0.0):
+        self.needs, self.needs_one = needs, needs_one
 
     def detect_watermark(self, x, sample_rate=None):
         strength = float(x.abs().max()) / 1e-3
         bits = [(WATERMARK_ID >> (15 - i)) & 1 for i in range(16)]
         if strength + 1e-6 < self.needs:
             bits[3] ^= 1
-            bits[9] ^= 1
+            if strength + 1e-6 < self.needs_one:
+                bits[9] ^= 1
         return torch.tensor(0.99), torch.tensor([bits], dtype=torch.float32)
 
 
-def _install(monkeypatch, needs):
-    monkeypatch.setattr(W, "_load_models", lambda: (_Generator(), _Detector(needs)))
+def _install(monkeypatch, needs, needs_one=None):
+    needs_one = needs if needs_one is None else needs_one
+    monkeypatch.setattr(W, "_load_models", lambda: (_Generator(), _Detector(needs, needs_one)))
 
 
 def test_a_mark_that_reads_back_at_the_default_strength_stays_at_it(monkeypatch):
@@ -56,10 +58,20 @@ def test_a_mark_two_bits_short_is_strengthened_until_the_id_reads_back_clean(mon
     assert W.Watermarker.embed_array(np.zeros((SR, 2), dtype=np.float32), SR, WATERMARK_ID).max() == pytest.approx(1.5e-3)
 
 
+def test_a_mark_that_only_reads_back_corrected_is_kept_at_the_strongest_corrected_read_without_a_warning(monkeypatch, caplog):
+    _install(monkeypatch, needs=10.0, needs_one=1.4)
+    with caplog.at_level("WARNING"):
+        marked, strength = W.Watermarker.embed_verified(np.zeros((SR, 2), dtype=np.float32), SR, WATERMARK_ID)
+    assert strength == 2.0 and np.allclose(marked, 2e-3, atol=1e-6)
+    _, read, corrected = W.Watermarker.detect_array(marked, SR)
+    assert read == WATERMARK_ID and corrected
+    assert "does not read back" not in caplog.text
+
+
 def test_a_mark_that_never_reads_back_is_kept_at_the_strongest_with_a_warning(monkeypatch, caplog):
     _install(monkeypatch, needs=10.0)
     with caplog.at_level("WARNING"):
         marked, strength = W.Watermarker.embed_verified(np.zeros((SR, 2), dtype=np.float32), SR, WATERMARK_ID)
     assert strength == W.Watermarker.STRENGTHS[-1] == 2.0
     assert np.allclose(marked, 2e-3, atol=1e-6)
-    assert "does not read back clean" in caplog.text
+    assert "does not read back" in caplog.text
