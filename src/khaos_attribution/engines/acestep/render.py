@@ -44,7 +44,7 @@ def flush_accelerator() -> None:
 
 
 def force_mps_bf16(handler_cls) -> None:
-    """Run the DiT and VAE in bf16 on Apple silicon: ACE-Step hardcodes float32 on MPS and exposes no dtype hook, and
+    """Run the DiT in bf16 on Apple silicon: ACE-Step hardcodes float32 on MPS and exposes no dtype hook, and
     `self.dtype` is assigned inline mid-method, so the class gets a property that answers bf16 on MPS. Idempotent;
     CUDA and CPU untouched."""
     import torch  # noqa: PLC0415

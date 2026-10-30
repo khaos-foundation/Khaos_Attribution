@@ -1,7 +1,7 @@
-"""ACE-Step's training side behind the socket: the one door to its training_v2 modules, the precision rule on
-Apple silicon, the adapter and training configs built from a recipe, the preprocessing call, and a live module
-with an adapter's weights loaded, which is the object the gradient feature is taken on. Both rooms call these;
-neither imports ACE-Step's training code by itself."""
+"""ACE-Step's training side behind the socket: the one door to its training_v2 modules, the precision rules (the
+trainer's on Apple silicon, the codec's everywhere), the adapter and training configs built from a recipe, the
+preprocessing call, and a live module with an adapter's weights loaded, which is the object the gradient feature
+is taken on. Both rooms call these; neither imports ACE-Step's training code by itself."""
 
 from __future__ import annotations
 
@@ -88,10 +88,26 @@ def training_api(repo_dir: Path | str) -> TrainingApi:
                        save_final=save_final, Module=FixedLoRAModule, select_dtype=_select_compute_dtype)
 
 
+CODEC_FP32_SINCE = "0.45.8"   # latents made by this contract or later were encoded with the codec in fp32
+_codec_precision = "fp32"     # what the patched codec loader encodes in during the current preprocess call
+
+
+def codec_precision_for(contract_version: str | None) -> str:
+    """What the codec encoded a run's latents in: fp32 from CODEC_FP32_SINCE, bf16 before it or when the run
+    recorded no version. A query encoded the other way does not match its index."""
+    try:
+        parts = tuple(int(x) for x in str(contract_version or "").split(".")[:3])
+    except ValueError:
+        return "bf16"
+    since = tuple(int(x) for x in CODEC_FP32_SINCE.split("."))
+    return "fp32" if len(parts) == 3 and parts >= since else "bf16"
+
+
 def patch_vae_precision() -> None:
-    """Preprocessing encodes the training latents with the codec (VAE) in fp32 whatever the pass runs in: in bf16
-    the encoder drifts a quarter from the fp32 latents and adds a high-frequency hash. The preprocessor imports the
-    loader by name at call time, so the loader is replaced; the text encoder keeps its precision. Idempotent."""
+    """Preprocessing loads the codec (VAE) in the codec precision of the current call, fp32 unless an older run's
+    latents are being matched: in bf16 the encoder drifts a quarter from the fp32 latents and adds a high-frequency
+    hash. The preprocessor imports the loader by name at call time, so the loader is replaced; the text encoder
+    keeps the pass's precision. Idempotent."""
     from acestep.training_v2 import model_loader as _ml  # noqa: PLC0415
 
     if getattr(_ml, "_khaos_vae_fp32", False):
@@ -99,7 +115,7 @@ def patch_vae_precision() -> None:
     orig = _ml.load_vae
 
     def load_vae(checkpoint_dir, device="cpu", precision="bf16"):
-        return orig(checkpoint_dir, device, "fp32")
+        return orig(checkpoint_dir, device, _codec_precision)
 
     _ml.load_vae = load_vae
     _ml._khaos_vae_fp32 = True
@@ -193,7 +209,8 @@ def measure_precision(requested: str, device_type: str) -> str:
 
 
 def preprocess_precision(device_type: str) -> str:
-    """What preprocessing runs in: bf16 on MPS, the engine's own choice elsewhere."""
+    """What the text encoder and the rest of preprocessing run in: bf16 on MPS, the engine's own choice elsewhere.
+    The codec has its own rule (patch_vae_precision)."""
     return PRECISION if device_type == "mps" else "auto"
 
 
@@ -228,15 +245,21 @@ def adapter_file_in(directory: Path | str) -> Path | None:
 
 def preprocess_pairs(api: TrainingApi, *, out_dir: Path | str, checkpoint_root: Path | str, variant: str,
                      dataset_json: Path | str | None, device: str, precision: str | None = None,
-                     audio_dir: Path | str | None = None) -> dict:
+                     audio_dir: Path | str | None = None, codec_precision: str = "fp32") -> dict:
     """The engine's preprocessing of a dataset into pairs under ``out_dir``, with only the kwargs this revision
-    takes; its own counts come back."""
+    takes; its own counts come back. ``codec_precision`` is what the codec encodes in: fp32 for new latents, or
+    an older run's (codec_precision_for) so a query matches its index."""
+    global _codec_precision
     device_type = str(device).split(":")[0]
     kwargs = {"audio_dir": None if audio_dir is None else str(audio_dir), "output_dir": str(out_dir),
               "checkpoint_dir": str(checkpoint_root), "variant": str(variant),
               "dataset_json": None if dataset_json is None else str(dataset_json), "device": str(device),
               "precision": precision or preprocess_precision(device_type)}
-    return api.preprocess(**accepted_kwargs(api.preprocess, kwargs, what="preprocess_audio_files")) or {}
+    _codec_precision = codec_precision
+    try:
+        return api.preprocess(**accepted_kwargs(api.preprocess, kwargs, what="preprocess_audio_files")) or {}
+    finally:
+        _codec_precision = "fp32"
 
 
 def open_module(api: TrainingApi, cfg: dict, adapter_file: Path | str, *, checkpoint_root: Path | str, device: str,
