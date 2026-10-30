@@ -236,9 +236,20 @@ class Watermarker:
             return False
         return True
 
+    # The mark's strengths, tried in order until the id reads back clean: quiet, sparse material can flip two bits
+    # of the message at the default strength, one more than the code corrects; 1.5 has read back clean where 1.0
+    # did not, and the mark then still sits about 30 dB under the music.
+    STRENGTHS = (1.0, 1.5, 2.0)
+
     @staticmethod
     def embed_array(audio, sample_rate: int, watermark_id: int):
-        """Return a watermarked copy of (frames, channels) float32 audio."""
+        """Return a watermarked copy of (frames, channels) float32 audio whose id reads back."""
+        return Watermarker.embed_verified(audio, sample_rate, watermark_id)[0]
+
+    @staticmethod
+    def embed_verified(audio, sample_rate: int, watermark_id: int):
+        """(marked audio, strength): the mark at the first strength whose id reads back clean, or the strongest
+        with a warning, since a present mark whose id cannot be read is still a mark."""
         import torch
         import torchaudio
 
@@ -249,9 +260,16 @@ class Watermarker:
         mono16 = torchaudio.functional.resample(mono, sample_rate, _SAMPLE_RATE)
         with torch.inference_mode():
             delta16 = generator.get_watermark(mono16, _SAMPLE_RATE, message=message)
-        delta = torchaudio.functional.resample(delta16, _SAMPLE_RATE, sample_rate)[0, 0]
-        marked = (wav + delta[: wav.shape[-1]]).clamp(-1.0, 1.0)
-        return marked.T.contiguous().numpy()
+        delta = torchaudio.functional.resample(delta16, _SAMPLE_RATE, sample_rate)[0, 0][: wav.shape[-1]]
+        marked = None
+        for strength in Watermarker.STRENGTHS:
+            marked = (wav + strength * delta).clamp(-1.0, 1.0).T.contiguous().numpy()
+            _, read, corrected = Watermarker.detect_array(marked, sample_rate)
+            if read == watermark_id and not corrected:
+                return marked, strength
+        log.warning("watermark %d does not read back clean at strength %s; the strongest mark is kept",
+                    watermark_id, Watermarker.STRENGTHS[-1])
+        return marked, Watermarker.STRENGTHS[-1]
 
     @staticmethod
     def decode_consistent(audio, sample_rate: int, *, window_s: float = 6.0,
