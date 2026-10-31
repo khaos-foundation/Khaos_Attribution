@@ -131,3 +131,21 @@ def test_capabilities_say_what_a_form_may_offer_and_explain_each_control_it_must
     assert E.capabilities("mock")["absent"] == {}
     with pytest.raises(E.EngineUnavailable):
         E.capabilities("no-such-engine")
+
+
+def test_an_adapter_renders_at_the_row_of_the_contract_it_was_trained_under():
+    """A default chosen later for other adapters never reaches an older one; no version means the oldest row."""
+    from khaos_attribution.engines import descriptor
+
+    d = descriptor("acestep-1.5")
+    old = d.render_row("turbo", "0.20.0")
+    assert (old["steps"], old["dcw_enabled"], old["adapter_strength"]) == (8, True, 0.85)
+    assert d.render_row("turbo", None)["steps"] == 8
+    assert d.render_row("turbo", "0.45.11")["steps"] == 8
+    new = d.render_row("turbo", "0.46.0")
+    assert (new["steps"], new["dcw_enabled"], new["adapter_strength"]) == (20, False, 0.75)
+    assert d.render_row("turbo", "0.46.3") == new
+    base_old, base_new = d.render_row("base", "0.30.0"), d.render_row("base", "0.46.2")
+    assert base_old["adapter_strength"] == 0.85 and base_new["adapter_strength"] == 0.75
+    assert base_old["steps"] == base_new["steps"], "the base row itself did not change"
+    assert set(new) == set(d.render_setting_keys) | {"adapter_strength"}

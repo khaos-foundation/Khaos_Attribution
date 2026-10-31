@@ -4,6 +4,7 @@ schema. Both rooms read the same file; the Engine Room pins their copies equal."
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -88,6 +89,20 @@ class Descriptor:
                 out[k] = float(default if given is None else given)
         return out
 
+    def render_row(self, variant: str, trained_under: str | None = None) -> dict:
+        """Every render setting and the strength for an adapter trained under contract *trained_under*: the row
+        of its day, so a default chosen later for other adapters never reaches it. No version means the oldest."""
+        row = dict(self.render_defaults(variant))
+        strength = self.adapter_strength
+        history = sorted((self.variants.get(variant) or {}).get("render_history") or [],
+                         key=lambda h: _version_tuple(h["until"]))
+        for h in history:
+            if not trained_under or _version_tuple(trained_under) <= _version_tuple(h["until"]):
+                row.update(h.get("render") or {})
+                strength = float(h.get("adapter_strength", strength))
+                break
+        return {**row, "adapter_strength": strength}
+
     def variant_config(self, variant: str) -> str | None:
         return (self.variants.get(variant) or {}).get("config")
 
@@ -167,6 +182,10 @@ def _schema() -> dict:
     return json.loads(resources.files("khaos_attribution.engines").joinpath(SCHEMA_NAME).read_text(encoding="utf-8"))
 
 
+def _version_tuple(version: str | None) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", str(version or ""))[:3])
+
+
 def validate_descriptor(doc: dict) -> dict:
     import jsonschema  # noqa: PLC0415
     try:
@@ -180,6 +199,12 @@ def validate_descriptor(doc: dict) -> dict:
         missing = [k for k in keys if k not in v["render"]]
         if missing:
             raise DescriptorError(f"engine descriptor: variant {name!r} lacks render settings {missing}")
+    for name, v in doc["variants"].items():
+        for h in v.get("render_history") or []:
+            unknown = set(h.get("render") or {}) - set(keys)
+            if unknown or not _version_tuple(h.get("until")):
+                raise DescriptorError(f"engine descriptor: variant {name!r} has a render_history entry with "
+                                      f"unknown settings {sorted(unknown)} or no contract version")
     for name, b in doc["bounds"].items():
         if not isinstance(b, dict):
             continue

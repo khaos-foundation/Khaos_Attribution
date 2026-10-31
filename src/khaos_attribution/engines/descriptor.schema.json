@@ -217,6 +217,20 @@
           "note": {
             "type": "string"
           },
+          "render_history": {
+            "type": "array",
+            "description": "earlier rows, oldest last to hold: an adapter trained under a contract up to `until` renders at that row and strength",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["until", "render"],
+              "properties": {
+                "until": {"type": "string"},
+                "render": {"type": "object", "additionalProperties": {"type": ["number", "boolean"]}},
+                "adapter_strength": {"type": "number", "exclusiveMinimum": 0}
+              }
+            }
+          },
           "notes": {
             "type": "array",
             "items": {

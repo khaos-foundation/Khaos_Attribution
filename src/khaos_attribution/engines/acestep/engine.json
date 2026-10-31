@@ -93,6 +93,16 @@
         "Turbo ignores classifier-free guidance: guidance_scale and the CFG interval have no effect on it.",
         "Turbo renders at 20 steps; the engine's own service path clamps it to 8 and the renderer lifts that clamp.",
         "The strength default is 0.75."
+      ],
+      "render_history": [
+        {
+          "until": "0.45.11",
+          "render": {
+            "steps": 8,
+            "dcw_enabled": true
+          },
+          "adapter_strength": 0.85
+        }
       ]
     },
     "base": {
@@ -105,7 +115,14 @@
         "cfg_interval_end": 1.0,
         "dcw_enabled": false
       },
-      "note": "the undistilled weights: CFG over an interval, DCW off, a separate download"
+      "note": "the undistilled weights: CFG over an interval, DCW off, a separate download",
+      "render_history": [
+        {
+          "until": "0.45.11",
+          "render": {},
+          "adapter_strength": 0.85
+        }
+      ]
     }
   },
   "default_variant": "turbo",
