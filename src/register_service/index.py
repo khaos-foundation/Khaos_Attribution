@@ -10,7 +10,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from khaos_attribution.fingerprint import best_phase_stats, dominant, is_confident
+from khaos_attribution.fingerprint import best_phase_profile, dominant, is_confident
 from register_service.store import now_utc
 
 SCHEMA = """
@@ -157,13 +157,13 @@ class Index:
         query_len = len(phases[0]) if phases else 0
         scored = []
         for g, fps in self._candidates(phases, payload).items():
-            votes, distinct = best_phase_stats(phases, fps)
-            scored.append((votes, distinct, g))
+            votes, distinct, offset_runner = best_phase_profile(phases, fps)
+            scored.append((votes, distinct, offset_runner, g))
         scored.sort(reverse=True)
         if scored:
-            votes, distinct, g = scored[0]
+            votes, distinct, offset_runner, g = scored[0]
             runner = scored[1][0] if len(scored) > 1 else 0
-            if is_confident(votes, query_len, distinct) and dominant(votes, runner):
+            if is_confident(votes, query_len, distinct, offset_runner) and dominant(votes, runner):
                 out = self.output(g) or {}
                 return {"grade": "output", "output": out, "votes": votes, "runner_up": runner, "searched": "bucket" if payload is not None else "all"}
         if payload is not None:
@@ -184,9 +184,9 @@ class Index:
         out = []
         for c in sorted(rows, key=lambda c: len(rows[c]), reverse=True)[:CANDIDATES]:
             claim = dict(self.db.execute("SELECT * FROM claims WHERE claim_id = ?", (c,)).fetchone())
-            votes, distinct = best_phase_stats(phases, rows[c])
+            votes, distinct, offset_runner = best_phase_profile(phases, rows[c])
             # The shared rows vote; confidence still reads against the claim's whole fingerprint, as stored.
-            if is_confident(votes, min(query_len, int(claim["landmarks"])), distinct):
+            if is_confident(votes, min(query_len, int(claim["landmarks"])), distinct, offset_runner):
                 out.append((votes, claim))
         out.sort(key=lambda m: m[0], reverse=True)
         return out

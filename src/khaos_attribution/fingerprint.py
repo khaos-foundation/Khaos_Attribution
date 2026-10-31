@@ -7,7 +7,10 @@ independent; landmarks pair each peak with up to 5 later peaks, hashed as
 (f1, f2, dt) in (10, 10, 5) bits; matching votes shared hashes onto a time
 offset. Same-tempo percussive loops can be pairwise-confident against each
 other, so closed-set callers must also require dominance (best candidate
->= 2x the runner-up). Heavy deps stay lazy.
+>= 2x the runner-up). Sustained material (a drone, a held chord) votes almost
+evenly onto many offsets, so ``match_profile`` also reports the best offset
+outside the winner's neighbourhood and ``is_confident`` wants the winner at
+``_MATCH_MIN_PROMINENCE`` times it. Heavy deps stay lazy.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ _FREQ_BITS, _DT_BITS = 10, 5
 _MATCH_MIN_VOTES = 12
 _MATCH_MIN_FRACTION = 0.05
 _MATCH_MIN_DISTINCT = 8
+_MATCH_MIN_PROMINENCE = 1.5
+_PROMINENCE_GUARD_BUCKETS = 20  # 2 s either side of the winner belongs to it: a copy's votes smear over its own beat grid
 
 
 def _spectral_peaks(audio, sample_rate: int):
@@ -106,9 +111,14 @@ def query_phases(audio, sample_rate: int, phases: int = QUERY_PHASES) -> list:
     return [fingerprint_array(audio[k * hop // phases:], sample_rate) for k in range(phases)]
 
 
+def best_phase_profile(phases: list, candidate_fps: list) -> tuple:
+    """(votes, distinct, runner_up) for a candidate against the query's best phase."""
+    return max((match_profile(q, candidate_fps) for q in phases), key=lambda t: t[0]) if phases else (0, 0, 0)
+
+
 def best_phase_stats(phases: list, candidate_fps: list) -> tuple:
     """(votes, distinct) for a candidate against the query's best phase."""
-    return max((match_stats(q, candidate_fps) for q in phases), key=lambda t: t[0]) if phases else (0, 0)
+    return best_phase_profile(phases, candidate_fps)[:2]
 
 
 def dominant(votes: int, runner_up: int, ratio: float = 2.0) -> bool:
@@ -131,9 +141,10 @@ def query_phases_file(path, phases: int = QUERY_PHASES) -> list:
     return query_phases(audio, sample_rate, phases)
 
 
-def match_stats(query_fps: list, candidate_fps: list) -> tuple:
-    """(votes, distinct_hashes) for the best-aligned offset between two
-    fingerprint lists (both [(hash, offset_ms)])."""
+def match_profile(query_fps: list, candidate_fps: list) -> tuple:
+    """(votes, distinct_hashes, runner_up) for the best-aligned offset between two
+    fingerprint lists (both [(hash, offset_ms)]); ``runner_up`` is the strongest
+    offset outside the winner's neighbourhood, the plateau test's other side."""
     by_hash: dict = {}
     for landmark, offset in candidate_fps:
         by_hash.setdefault(landmark, []).append(offset)
@@ -146,16 +157,25 @@ def match_stats(query_fps: list, candidate_fps: list) -> tuple:
             votes[bucket] = votes.get(bucket, 0) + 1
             hashes.setdefault(bucket, set()).add(landmark)
     if not votes:
-        return 0, 0
+        return 0, 0, 0
     best = max(votes, key=votes.get)
-    return votes[best], len(hashes[best])
+    runner_up = max((v for b, v in votes.items() if abs(b - best) > _PROMINENCE_GUARD_BUCKETS), default=0)
+    return votes[best], len(hashes[best]), runner_up
+
+
+def match_stats(query_fps: list, candidate_fps: list) -> tuple:
+    """(votes, distinct_hashes) for the best-aligned offset between two fingerprint lists."""
+    return match_profile(query_fps, candidate_fps)[:2]
 
 
 def is_confident(votes: int, query_landmarks: int,
-                 distinct: int | None = None) -> bool:
-    """``distinct`` is the winning bucket's distinct-hash count; pass it
-    whenever available, as the defence against loop/drone material."""
+                 distinct: int | None = None, runner_up: int | None = None) -> bool:
+    """``distinct`` is the winning bucket's distinct-hash count, the defence against
+    loops; ``runner_up`` is ``match_profile``'s third value, the defence against
+    drones. Pass both whenever available."""
     if distinct is not None and distinct < _MATCH_MIN_DISTINCT:
+        return False
+    if runner_up is not None and votes < _MATCH_MIN_PROMINENCE * runner_up:
         return False
     return (votes >= _MATCH_MIN_VOTES
             and query_landmarks > 0

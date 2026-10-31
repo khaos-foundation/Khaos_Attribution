@@ -102,11 +102,15 @@ from the artist bundle, never just asserted.
 In-house landmark constellation (`khaos_attribution/fingerprint.py`,
 format v1, numpy-only): spectral peaks → paired landmarks → 25-bit
 hashes; matching is aligned-offset voting. A confident match needs ≥12
-aligned votes, ≥5% of the query's landmarks, ≥8 distinct hashes, **and
-dominance** — the winner must double the runner-up. Proven against
-excerpts and 128k MP3. Known limitation, documented in the contract:
-same-tempo percussive loops are near-identical to this whole algorithm
-class; dominance is what separates the true source.
+aligned votes, ≥5% of the query's landmarks, ≥8 distinct hashes,
+**prominence** — the winning offset at 1.5× the best offset outside its
+2 s neighbourhood — **and dominance** — the winner must double the
+runner-up candidate. Proven against excerpts and 128k MP3. Known
+limitations, documented in the contract: same-tempo percussive loops are
+near-identical to this whole algorithm class, and dominance is what
+separates the true source; a sustained chord aligns at any offset, and
+prominence is what separates a copied passage from the same chord played
+again.
 
 ## The provenance index
 

@@ -97,3 +97,34 @@ def test_repetitive_audio_limitation_is_known_and_dominance_separates():
     other_votes, other_distinct = match_stats(
         a, fingerprint_array(click_loop(440.0, 0.73), sr))
     assert not is_confident(other_votes, len(a), distinct=other_distinct)
+
+
+def _drone(lfo_seed: int, seconds: float = 40.0, sr: int = 44100):
+    """An F-minor chord held throughout; each partial's level drifts slowly, so one
+    rendering of it differs from another only in that drift."""
+    rng = np.random.default_rng(lfo_seed)
+    t = np.arange(int(seconds * sr)) / sr
+    audio = np.zeros_like(t)
+    for base_hz in (174.6, 207.7, 261.6, 349.2, 415.3, 523.3):
+        for k in (1, 2, 3):
+            walk = np.cumsum(rng.normal(0, 1, int(seconds * 8)))
+            level = np.interp(t, np.linspace(0, seconds, len(walk)), walk)
+            level = (level - level.min()) / (np.ptp(level) + 1e-9)
+            audio += level * np.sin(2 * np.pi * base_hz * k * t + rng.uniform(0, 6.28)) / k
+    return (0.5 * audio / np.max(np.abs(audio))).astype("float32")
+
+
+def test_a_held_chord_played_again_is_a_plateau_and_an_excerpt_of_it_a_peak():
+    """A drone aligns at any offset: votes and distinct hashes pass on their own, and prominence is
+    what refuses the chord played again while a true excerpt still passes."""
+    from khaos_attribution.fingerprint import match_profile
+    sr = 44100
+    full = fingerprint_array(_drone(1), sr)
+    excerpt = fingerprint_array(_drone(1)[int(10 * sr):int(25 * sr)], sr)
+    again = fingerprint_array(_drone(2, seconds=15.0), sr)
+    votes, distinct, runner = match_profile(excerpt, full)
+    assert is_confident(votes, len(excerpt), distinct, runner), (votes, distinct, runner)
+    votes, distinct, runner = match_profile(again, full)
+    assert is_confident(votes, len(again), distinct), (votes, distinct)        # the limitation
+    assert not is_confident(votes, len(again), distinct, runner), (votes, runner)
+    assert match_stats(again, full) == (votes, distinct)
