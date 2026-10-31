@@ -88,7 +88,7 @@
         "cfg_interval_end": 1.0,
         "dcw_enabled": false
       },
-      "note": "the serving weights: the engine's service path clamps steps to 8 and forces guidance 1.0; the renderer lifts the clamp (20 steps, strength 0.75, DCW off: the settings of the May 2026 outputs the artist holds as the benchmark, chosen by ear on 30 October 2026)",
+      "note": "the serving weights: the engine's service path clamps steps to 8 and forces guidance 1.0; the renderer lifts the clamp",
       "notes": [
         "Turbo ignores classifier-free guidance: guidance_scale and the CFG interval have no effect on it.",
         "Turbo renders at 20 steps; the engine's own service path clamps it to 8 and the renderer lifts that clamp.",
