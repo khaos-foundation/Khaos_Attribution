@@ -96,7 +96,7 @@
       ],
       "render_history": [
         {
-          "until": "0.45.11",
+          "until": "0.45.6",
           "render": {
             "steps": 8,
             "dcw_enabled": true
@@ -118,7 +118,7 @@
       "note": "the undistilled weights: CFG over an interval, DCW off, a separate download",
       "render_history": [
         {
-          "until": "0.45.11",
+          "until": "0.45.6",
           "render": {},
           "adapter_strength": 0.85
         }

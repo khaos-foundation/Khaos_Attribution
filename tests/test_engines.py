@@ -141,7 +141,8 @@ def test_an_adapter_renders_at_the_row_of_the_contract_it_was_trained_under():
     old = d.render_row("turbo", "0.20.0")
     assert (old["steps"], old["dcw_enabled"], old["adapter_strength"]) == (8, True, 0.85)
     assert d.render_row("turbo", None)["steps"] == 8
-    assert d.render_row("turbo", "0.45.11")["steps"] == 8
+    assert d.render_row("turbo", "0.45.6")["steps"] == 8, "the September adapters' row holds through the 27 October contract"
+    assert d.render_row("turbo", "0.45.7")["steps"] == 20, "the adapters heard on 30 October were trained under 0.45.7"
     new = d.render_row("turbo", "0.46.0")
     assert (new["steps"], new["dcw_enabled"], new["adapter_strength"]) == (20, False, 0.75)
     assert d.render_row("turbo", "0.46.3") == new
