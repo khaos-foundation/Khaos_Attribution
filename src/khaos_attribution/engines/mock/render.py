@@ -20,10 +20,10 @@ class Renderer:
     """The surface the rooms drive: load, resolve_variant, apply_adapter, generate; nothing heavier than wave."""
 
     def __init__(self, repo_dir=None, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float = 0.85):
+                 base_resident: bool = False, default_adapter_scale: float | None = None):
         self.repo_dir = repo_dir
         self.device = "cpu" if device == "auto" else device
-        self.default_adapter_scale = float(default_adapter_scale)
+        self.default_adapter_scale = float(DESCRIPTOR.adapter_strength if default_adapter_scale is None else default_adapter_scale)
         self.loaded: str | None = None
         self.adapter: tuple | None = None
 

@@ -17,6 +17,7 @@
     "sample_rate",
     "variants",
     "default_variant",
+    "adapter_strength",
     "bounds",
     "rework_modes",
     "adapter",
@@ -215,6 +216,14 @@
           },
           "note": {
             "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "short lines a room may show about rendering on this variant"
           }
         }
       }
@@ -225,7 +234,7 @@
     "adapter_strength": {
       "type": "number",
       "exclusiveMinimum": 0,
-      "description": "the default artist strength both rooms apply"
+      "description": "the default artist strength both rooms apply; stated, never assumed"
     },
     "render_setting_keys": {
       "type": "array",
@@ -235,13 +244,25 @@
     },
     "bounds": {
       "type": "object",
+      "description": "Each lever's [low, high]; steps may instead be set per variant, as {variant: [low, high]} naming every variant.",
+      "properties": {
+        "steps": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/bound"
+            },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "$ref": "#/$defs/bound"
+              }
+            }
+          ]
+        }
+      },
       "additionalProperties": {
-        "type": "array",
-        "items": {
-          "type": "number"
-        },
-        "minItems": 2,
-        "maxItems": 2
+        "$ref": "#/$defs/bound"
       }
     },
     "rework_modes": {
@@ -385,6 +406,17 @@
     },
     "status_note": {
       "type": "string"
+    }
+  },
+  "$defs": {
+    "bound": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[low, high]"
     }
   }
 }

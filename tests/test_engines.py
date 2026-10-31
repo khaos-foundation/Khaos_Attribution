@@ -7,7 +7,7 @@ import pytest
 
 from khaos_attribution import engines as E
 from khaos_attribution.engines import pins
-from khaos_attribution.engines.descriptor import DescriptorError, validate_descriptor
+from khaos_attribution.engines.descriptor import Descriptor, DescriptorError, validate_descriptor
 
 
 def test_every_known_engine_has_a_valid_descriptor_read_as_data():
@@ -49,6 +49,53 @@ def test_a_descriptor_that_says_too_little_or_contradicts_itself_is_refused():
         validate_descriptor({**good, "variants": {"turbo": {"render": {"steps": 8}}}})
     with pytest.raises(DescriptorError):
         validate_descriptor({k: v for k, v in good.items() if k != "licence"})
+
+
+def test_a_descriptor_states_its_strength_or_is_refused():
+    """No fallback: a descriptor that leaves the artist strength unsaid does not load, and every shipped one says it."""
+    good = E.descriptor("mock").doc
+    with pytest.raises(DescriptorError, match="adapter_strength"):
+        validate_descriptor({k: v for k, v in good.items() if k != "adapter_strength"})
+    with pytest.raises(DescriptorError, match="adapter_strength"):
+        validate_descriptor({**good, "adapter_strength": 0})
+    assert {e: E.descriptor(e).adapter_strength for e in E.KNOWN_ENGINES} == {
+        "acestep-1.5": 0.75, "stable-audio-3": 0.85, "mimetic-a0": 0.85, "mock": 0.85}
+    from khaos_attribution.engines.mock.render import Renderer  # noqa: PLC0415
+    assert Renderer().default_adapter_scale == 0.85 and Renderer(default_adapter_scale=0.6).default_adapter_scale == 0.6
+
+
+def test_the_steps_bound_reads_per_variant_and_as_one_bound():
+    """A bound set per variant reads for the variant and as the envelope when none is named; one bound still reads;
+    a per-variant bound must name every variant and hold the variant's own default."""
+    good = E.descriptor("mock").doc
+    two = {**good, "variants": {"turbo": good["variants"]["turbo"], "base": {"render": {**good["variants"]["turbo"]["render"], "steps": 32}}}}
+    d = Descriptor(validate_descriptor({**two, "bounds": {**good["bounds"], "steps": {"turbo": [1, 60], "base": [8, 200]}}}))
+    assert d.bound("steps", "turbo") == (1, 60) and d.bound("steps", "base") == (8, 200)
+    assert d.bound("steps") == (1, 200), "the envelope, so a caller that knows no variant refuses nothing"
+    assert d.bound("steps", "nowhere") == (1, 60), "an unknown variant resolves on the default's bound"
+    assert d.bound("takes") == (1, 16) and d.bound("takes", "turbo") == (1, 16), "one bound reads with or without a variant"
+    single = Descriptor(validate_descriptor(two))
+    assert single.bound("steps") == single.bound("steps", "base") == (1, 200)
+    with pytest.raises(DescriptorError, match="covers every variant"):
+        validate_descriptor({**two, "bounds": {**good["bounds"], "steps": {"turbo": [1, 60]}}})
+    with pytest.raises(DescriptorError, match="outside its own bound"):
+        validate_descriptor({**two, "bounds": {**good["bounds"], "steps": {"turbo": [1, 60], "base": [1, 20]}}})
+    with pytest.raises(DescriptorError):
+        validate_descriptor({**good, "bounds": {**good["bounds"], "steps": {"turbo": [1]}}})
+    ace = E.descriptor("acestep-1.5")
+    assert ace.bound("steps", "turbo") == (1, 200) and ace.bound("steps", "base") == (1, 200) and ace.bound("steps") == (1, 200)
+    caps = E.capabilities("acestep-1.5")
+    assert caps["bounds"]["steps"] == [1, 200] and caps["variants"]["base"]["steps"] == [1, 200]
+
+
+def test_the_turbo_notes_say_what_a_room_shows():
+    ace = E.descriptor("acestep-1.5")
+    notes = ace.variant_notes("turbo")
+    assert len(notes) == 3 and ace.variant_notes("base") == () and ace.variant_notes("nowhere") == ()
+    assert "classifier-free guidance" in notes[0] and "20 steps" in notes[1] and "lifts" in notes[1] and "0.75" in notes[2]
+    assert E.capabilities("acestep-1.5")["variants"]["turbo"]["notes"] == list(notes)
+    with pytest.raises(DescriptorError):
+        validate_descriptor({**ace.doc, "variants": {**ace.variants, "turbo": {**ace.variants["turbo"], "notes": [""]}}})
 
 
 def test_the_engine_object_carries_its_descriptor_and_an_unknown_id_is_refused():

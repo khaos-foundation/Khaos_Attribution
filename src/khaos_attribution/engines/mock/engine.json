@@ -64,6 +64,7 @@
     }
   },
   "default_variant": "turbo",
+  "adapter_strength": 0.85,
   "render_setting_keys": [
     "steps",
     "shift",

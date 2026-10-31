@@ -58,8 +58,8 @@ class Descriptor:
 
     @property
     def adapter_strength(self) -> float:
-        """The default artist strength, one number for both rooms."""
-        return float(self.doc.get("adapter_strength", 0.85))
+        """The default artist strength, one number for both rooms; every descriptor states it."""
+        return float(self.doc["adapter_strength"])
 
     @property
     def render_setting_keys(self) -> tuple:
@@ -94,8 +94,19 @@ class Descriptor:
     def step_clamp(self, variant: str) -> int | None:
         return (self.variants.get(variant) or {}).get("step_clamp")
 
-    def bound(self, name: str) -> tuple:
-        lo, hi = self.doc["bounds"][name]
+    def variant_notes(self, variant: str) -> tuple:
+        return tuple((self.variants.get(variant) or {}).get("notes") or ())
+
+    def bound(self, name: str, variant: str | None = None) -> tuple:
+        """(low, high) for *name*. A bound set per variant reads for *variant* (an unknown one resolves on the
+        default's); with no variant it is the envelope of every variant, so a caller that knows no variant
+        refuses nothing a variant allows."""
+        b = self.doc["bounds"][name]
+        if isinstance(b, dict):
+            if variant is None:
+                return min(lo for lo, _ in b.values()), max(hi for _, hi in b.values())
+            b = b.get(variant) or b[self.default_variant]
+        lo, hi = b
         return lo, hi
 
     @property
@@ -169,6 +180,17 @@ def validate_descriptor(doc: dict) -> dict:
         missing = [k for k in keys if k not in v["render"]]
         if missing:
             raise DescriptorError(f"engine descriptor: variant {name!r} lacks render settings {missing}")
+    for name, b in doc["bounds"].items():
+        if not isinstance(b, dict):
+            continue
+        if set(b) != set(doc["variants"]):
+            raise DescriptorError(f"engine descriptor: the {name} bound names {sorted(b)} but the variants are "
+                                  f"{sorted(doc['variants'])}; a bound set per variant covers every variant and no other")
+        for variant, (lo, hi) in b.items():
+            default = doc["variants"][variant]["render"].get(name)
+            if default is not None and not lo <= default <= hi:
+                raise DescriptorError(f"engine descriptor: variant {variant!r} renders {name} {default} by default, "
+                                      f"outside its own bound [{lo}, {hi}]")
     return doc
 
 

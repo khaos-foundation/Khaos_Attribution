@@ -65,12 +65,12 @@ class Renderer:
     """The surface the rooms drive; every render is one worker process in the engine's environment."""
 
     def __init__(self, repo_dir=None, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float = 0.85):
+                 base_resident: bool = False, default_adapter_scale: float | None = None):
         self.root = find_root(repo_dir)
         self.checkpoint_dir = Path(checkpoint_dir).resolve() if checkpoint_dir else None
         self.device = device
         self.runtime = runtime_for(device)
-        self.default_adapter_scale = float(default_adapter_scale)
+        self.default_adapter_scale = float(DESCRIPTOR.adapter_strength if default_adapter_scale is None else default_adapter_scale)
         self.loaded: str | None = None
         self.adapter: tuple | None = None
         self.descriptor = DESCRIPTOR

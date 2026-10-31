@@ -90,6 +90,7 @@
     }
   },
   "default_variant": "base",
+  "adapter_strength": 0.85,
   "render_setting_keys": [
     "steps",
     "guidance_scale",

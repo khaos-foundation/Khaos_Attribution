@@ -103,7 +103,9 @@ def capabilities(engine_id: str) -> dict:
         "rework_modes": list(d.rework_modes),
         "bounds": {"duration": list(d.bound("duration_seconds")), "steps": list(d.bound("steps")),
                    "bpm": list(d.bound("bpm")), "takes": list(d.bound("takes"))},
-        "variants": {name: {"step_clamp": d.step_clamp(name), "note": v.get("note")} for name, v in d.variants.items()},
+        "variants": {name: {"step_clamp": d.step_clamp(name), "steps": list(d.bound("steps", name)),
+                            "note": v.get("note"), "notes": list(d.variant_notes(name))}
+                     for name, v in d.variants.items()},
         "default_variant": d.default_variant,
         "vocal_languages": d.vocal_languages,
         "default_vocal_language": d.default_vocal_language,
