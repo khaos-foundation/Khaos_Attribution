@@ -49,6 +49,37 @@ def pair_noise(seed: int, shape: Sequence[int]) -> np.ndarray:
     return np.random.default_rng(int(seed)).standard_normal(tuple(int(s) for s in shape)).astype(np.float32)
 
 
+# Shared noise is drawn once at this many latent frames and cut to each clip, so every clip of any length shares it.
+SHARED_NOISE_FRAMES = 4096
+
+
+def shared_noise_seed(seed: int, timestep_index: int) -> int:
+    """The seed of the noise every pair and every output share at one timestep: the run seed and the timestep's
+    place, never the file."""
+    return pair_noise_seed(seed, f"shared-noise:{int(timestep_index)}")
+
+
+def shared_noise(seed: int, timestep_index: int, shape: Sequence[int]) -> np.ndarray:
+    """The shared draw at one timestep cut to ``shape`` (batch, channels, frames): the same values in the frames
+    two clips have in common, whatever their lengths."""
+    shape = tuple(int(s) for s in shape)
+    if len(shape) != 3:
+        raise GradientUnavailable(f"shared noise is drawn over (batch, channels, frames), not {shape}")
+    if shape[2] > SHARED_NOISE_FRAMES:
+        raise GradientUnavailable(f"a clip of {shape[2]} latent frames is longer than the shared noise ({SHARED_NOISE_FRAMES})")
+    full = pair_noise(shared_noise_seed(seed, timestep_index), (shape[0], shape[1], SHARED_NOISE_FRAMES))
+    return np.ascontiguousarray(full[:, :, :shape[2]])
+
+
+def residual_over_timesteps(values: Sequence[float]) -> float:
+    """One residual per pair from its timesteps' residuals: each divided by their norm, then the mean."""
+    r = np.asarray(values, dtype=np.float64).reshape(-1)
+    if r.size == 0:
+        raise GradientUnavailable("a residual needs at least one timestep")
+    norm = float(np.linalg.norm(r))
+    return float(np.mean(r / norm)) if norm > NORM_EPS else 0.0
+
+
 def checkpoint_order(names: Sequence[str], checkpoint_keys: Sequence[str]) -> list:
     """The positions of a runtime's adapter parameters sorted by the adapter file's own keys, so every runtime
     flattens one adapter in one order; a parameter the file lacks, or a key no parameter carries, is refused."""
@@ -377,6 +408,8 @@ def output_feature(module: Any, meta: dict, files: Sequence[Path | str], *,
         raise GradientUnavailable("a latent transform is not built on this engine's measure; rebuild the index without it")
     if research_int(meta.get("latent_pool"), "latent_pool") > 1 or research_int(meta.get("noise_draws"), "noise_draws") > 1:
         raise GradientUnavailable("latent pooling and noise draws are not built on this engine's measure; rebuild the index without them")
+    if meta.get("noise_shared"):
+        raise GradientUnavailable("shared noise is not built on this engine's measure; rebuild the index without it")
     params = list(params) if params is not None else adapter_parameters(module)
     # The features are read as the index was built, normalisation included.
     vecs = [project(pair_gradient(module, load_sample(p), timesteps=timesteps,

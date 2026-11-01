@@ -103,7 +103,9 @@ def _forward(model, torch, latents, cond, mask, noise, t: float):
         return model(noised, tt, cond=cond, cfg_dropout_prob=0.0, padding_mask=mask).float()
 
 
-TARGETS = ("vnorm", "loss", "vdelta")
+# vmean and dmean take the gradient of the signed mean of the prediction (or of the adapter's delta): the scalar
+# output function a leave-one-out kernel differentiates, where the norm targets differentiate a magnitude.
+TARGETS = ("vnorm", "loss", "vdelta", "vmean", "dmean")
 
 
 def _squared(torch, diff, where, lmap=None, pool: int = 1):
@@ -122,19 +124,33 @@ def _squared(torch, diff, where, lmap=None, pool: int = 1):
     return diff[where.expand_as(diff)].pow(2).mean()
 
 
+def _signed_mean(torch, diff, where, lmap=None, pool: int = 1):
+    """Mean of ``diff`` over the valid frames, after the same latent map and pooling as the square."""
+    if lmap is not None:
+        diff = torch.einsum("kc,bct->bkt", lmap, diff)
+    if pool > 1:
+        valid = int(where[0, 0].sum())
+        blocks = max(1, valid // pool)
+        size = pool if valid >= pool else valid
+        return diff[:, :, :blocks * size].reshape(diff.shape[0], diff.shape[1], blocks, size).mean(-1).mean()
+    return diff[where.expand_as(diff)].mean()
+
+
 def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=None, timestep_norm: bool = False,
-              keep=None, lmap=None, pool: int = 1):
-    """The mean adapter gradient over the timesteps, flat, float32, on the CPU. ``vdelta`` differentiates the
-    squared norm of the velocity the adapter adds over the base's; ``keep`` zeroes the tensors a filter drops."""
+              keep=None, lmap=None, pool: int = 1, noises=None):
+    """(flat gradient, residual) of one clip: the mean adapter gradient over the timesteps, flat, float32, on the
+    CPU, and the clip's training residual over the same timesteps. ``noises`` gives each timestep its own noise in
+    place of the clip's; ``keep`` zeroes the tensors a filter drops."""
     from khaos_attribution import gradient as G  # noqa: PLC0415
     if target not in TARGETS:
         raise RuntimeError(f"target must be one of {TARGETS}, not {target!r}")
-    latents, cond, mask, noise = clip
+    latents, cond, mask, clip_noise = clip
     where = mask.unsqueeze(1)
-    flats = []
-    for t in timesteps:
+    flats, residuals = [], []
+    for i, t in enumerate(timesteps):
+        noise = clip_noise if noises is None else noises[i]
         base = None
-        if target == "vdelta":
+        if target in ("vdelta", "dmean"):
             wrapped.set_lora_strength(0.0)
             with torch.no_grad():
                 base = _forward(model, torch, latents, cond, mask, noise, float(t))
@@ -145,15 +161,28 @@ def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=Non
                 loss = _squared(torch, out, where, lmap, pool)
             elif target == "vdelta":
                 loss = _squared(torch, out - base, where, lmap, pool)
+            elif target == "vmean":
+                loss = _signed_mean(torch, out, where, lmap, pool)
+            elif target == "dmean":
+                loss = _signed_mean(torch, out - base, where, lmap, pool)
             else:
                 loss = _squared(torch, out - (noise - latents), where, lmap, pool)
+        # The residual is the trainer's, prediction minus the flow target, whatever the output function.
+        with torch.no_grad():
+            residuals.append(float(_signed_mean(torch, out.detach() - (noise - latents), where)))
         grads = torch.autograd.grad(loss, params, allow_unused=True)
         parts = [(g if g is not None else torch.zeros_like(p)).reshape(-1).detach().to("cpu", torch.float32)
                  for g, p in zip(grads, params)]
         if keep is not None:
             parts = [part if ok else torch.zeros_like(part) for part, ok in zip(parts, keep)]
         flats.append(torch.cat(parts).numpy())
-    return G.combine_timesteps(flats, timestep_norm=timestep_norm)
+    return G.combine_timesteps(flats, timestep_norm=timestep_norm), G.residual_over_timesteps(residuals)
+
+
+def _shared_noises(torch, noise_seed: int, draw: int, timesteps, shape, device):
+    """One noise per timestep, the same for every clip and output of the request, cut to this clip's frames."""
+    from khaos_attribution import gradient as G  # noqa: PLC0415
+    return [torch.from_numpy(G.shared_noise(noise_seed + draw, i, shape)).to(device) for i in range(len(timesteps))]
 
 
 def _latent_stats(model, torch, files, device, kind: str, variance: float) -> dict:
@@ -236,12 +265,13 @@ def run(req: dict) -> dict:
     lmap = torch.from_numpy(G.latent_map(transform)).to(device) if transform else None
     pool = G.research_int(req.get("latent_pool"), "latent_pool")
     draws = G.research_int(req.get("noise_draws"), "noise_draws")
+    noise_shared = bool(req.get("noise_shared", False))
     files = [Path(f) for f in req["files"]]
     n_params = int(sum(int(p.numel()) for p in params))
     signature = G.parameter_signature(params)
     command = req["command"]
     filtered = {"latent_transform": (transform or {}).get("kind"), "param_filter": param_filter, "latent_pool": pool,
-                "noise_draws": draws, "tensors_kept": int(sum(keep)) if keep else len(params),
+                "noise_draws": draws, "noise_shared": noise_shared, "tensors_kept": int(sum(keep)) if keep else len(params),
                 "parameters_kept": int(sum(int(p.numel()) for p, ok in zip(params, keep) if ok)) if keep else n_params}
     if command == "latent_stats":
         return {"transform": _latent_stats(model, torch, files, device, str(req["latent_kind"]),
@@ -257,19 +287,24 @@ def run(req: dict) -> dict:
         rows, vectors, raw = [], [], []
         for i, wav in enumerate(files):
             # Draw 0 is the index's own noise, so one draw reads exactly as an index built without the option.
-            flats = []
+            flats, residuals = [], []
             for d in range(draws):
                 clip = _clip(model, torch, wav, device, G.pair_noise_seed(noise_seed + d, wav.name))
-                flats.append(_gradient(model, torch, params, clip, timesteps, target, wrapped=wrapped,
-                                       timestep_norm=timestep_norm, keep=keep, lmap=lmap, pool=pool))
+                noises = _shared_noises(torch, noise_seed, d, timesteps, clip[0].shape, device) if noise_shared else None
+                flat_d, residual_d = _gradient(model, torch, params, clip, timesteps, target, wrapped=wrapped,
+                                               timestep_norm=timestep_norm, keep=keep, lmap=lmap, pool=pool, noises=noises)
+                flats.append(flat_d)
+                residuals.append(residual_d)
             flat = flats[0] if draws == 1 else np.mean(np.stack(flats), axis=0).astype(np.float32)
+            residual = float(np.mean(residuals))
             if req.get("keep_flat"):
                 raw.append(flat)
             projected = G.project(flat, projection)
             if command == "index":
                 norm = float(np.linalg.norm(projected))
                 vectors.append(G.l2_normalise(projected))
-                rows.append({"row": i, "pair_id": wav.stem, "track_id": G.track_of_pair(wav.stem), "gradient_norm": round(norm, 8)})
+                rows.append({"row": i, "pair_id": wav.stem, "track_id": G.track_of_pair(wav.stem), "gradient_norm": round(norm, 8),
+                             "residual": round(residual, 8)})
                 sys.stdout.write(ROW_PREFIX + json.dumps(rows[-1]) + "\n")
                 sys.stdout.flush()
             else:

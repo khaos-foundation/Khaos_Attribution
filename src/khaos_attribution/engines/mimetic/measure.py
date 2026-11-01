@@ -170,12 +170,15 @@ def parameter_count(handle: Handle) -> tuple:
 
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
-               latent_pool: int | None = None, noise_draws: int | None = None, on_row=None) -> tuple:
+               latent_pool: int | None = None, noise_draws: int | None = None, noise_shared: bool = False,
+               on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as _G  # noqa: PLC0415
     if _G.research_int(latent_pool, "latent_pool") > 1 or _G.research_int(noise_draws, "noise_draws") > 1:
         raise _G.GradientUnavailable("latent pooling and noise draws are not built on the mimetic-a0 worker")
+    if noise_shared:
+        raise _G.GradientUnavailable("shared noise is not built on the mimetic-a0 worker")
     if latent_transform:
         from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
         raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker")
