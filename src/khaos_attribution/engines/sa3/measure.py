@@ -171,6 +171,8 @@ def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:
             "timestep_norm": bool(index_meta.get("timestep_norm", False)),
             "param_filter": index_meta.get("param_filter") or None,
             "latent_transform": index_meta.get("latent_transform") or None,
+            "latent_pool": index_meta.get("latent_pool") or None,
+            "noise_draws": index_meta.get("noise_draws") or None,
             "index_meta": {k: index_meta[k] for k in ("projection",) if k in index_meta}}
 
 
@@ -181,7 +183,7 @@ def parameter_count(handle: Handle) -> tuple:
 
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
-               on_row=None) -> tuple:
+               latent_pool: int | None = None, noise_draws: int | None = None, on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
     out = Path(files[0]).resolve().parent / ".khaos_index_rows.tmp.npy" if files else Path(".khaos_index_rows.tmp.npy")
@@ -194,7 +196,8 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
 
     r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target,
                                        "timestep_norm": timestep_norm, "param_filter": param_filter,
-                                       "latent_transform": latent_transform}, files, "index"),
+                                       "latent_transform": latent_transform, "latent_pool": latent_pool,
+                                       "noise_draws": noise_draws}, files, "index"),
                       "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
              on_progress=progress)
     from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415

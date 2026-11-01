@@ -106,17 +106,24 @@ def _forward(model, torch, latents, cond, mask, noise, t: float):
 TARGETS = ("vnorm", "loss", "vdelta")
 
 
-def _squared(torch, diff, where, lmap=None):
-    """Mean square of ``diff`` over the valid frames, taken after the latent map over channels when one is given."""
+def _squared(torch, diff, where, lmap=None, pool: int = 1):
+    """Mean square of ``diff`` over the valid frames, after the latent map over channels and the mean over blocks
+    of ``pool`` frames when either is given."""
     if lmap is not None:
         if lmap.shape[1] != diff.shape[1]:
             raise RuntimeError(f"the latent transform was measured on {lmap.shape[1]} channels; this latent has {diff.shape[1]}")
         diff = torch.einsum("kc,bct->bkt", lmap, diff)
+    if pool > 1:
+        # The valid frames are a prefix; a tail shorter than one block is dropped unless it is all there is.
+        valid = int(where[0, 0].sum())
+        blocks = max(1, valid // pool)
+        size = pool if valid >= pool else valid
+        return diff[:, :, :blocks * size].reshape(diff.shape[0], diff.shape[1], blocks, size).mean(-1).pow(2).mean()
     return diff[where.expand_as(diff)].pow(2).mean()
 
 
 def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=None, timestep_norm: bool = False,
-              keep=None, lmap=None):
+              keep=None, lmap=None, pool: int = 1):
     """The mean adapter gradient over the timesteps, flat, float32, on the CPU. ``vdelta`` differentiates the
     squared norm of the velocity the adapter adds over the base's; ``keep`` zeroes the tensors a filter drops."""
     from khaos_attribution import gradient as G  # noqa: PLC0415
@@ -135,11 +142,11 @@ def _gradient(model, torch, params, clip, timesteps, target: str, *, wrapped=Non
         with torch.enable_grad():
             out = _forward(model, torch, latents, cond, mask, noise, float(t))
             if target == "vnorm":
-                loss = _squared(torch, out, where, lmap)
+                loss = _squared(torch, out, where, lmap, pool)
             elif target == "vdelta":
-                loss = _squared(torch, out - base, where, lmap)
+                loss = _squared(torch, out - base, where, lmap, pool)
             else:
-                loss = _squared(torch, out - (noise - latents), where, lmap)
+                loss = _squared(torch, out - (noise - latents), where, lmap, pool)
         grads = torch.autograd.grad(loss, params, allow_unused=True)
         parts = [(g if g is not None else torch.zeros_like(p)).reshape(-1).detach().to("cpu", torch.float32)
                  for g, p in zip(grads, params)]
@@ -227,11 +234,14 @@ def run(req: dict) -> dict:
     keep = G.param_filter_mask(names, param_filter) if param_filter else None
     transform = req.get("latent_transform") or None
     lmap = torch.from_numpy(G.latent_map(transform)).to(device) if transform else None
+    pool = G.research_int(req.get("latent_pool"), "latent_pool")
+    draws = G.research_int(req.get("noise_draws"), "noise_draws")
     files = [Path(f) for f in req["files"]]
     n_params = int(sum(int(p.numel()) for p in params))
     signature = G.parameter_signature(params)
     command = req["command"]
-    filtered = {"latent_transform": (transform or {}).get("kind"), "param_filter": param_filter, "tensors_kept": int(sum(keep)) if keep else len(params),
+    filtered = {"latent_transform": (transform or {}).get("kind"), "param_filter": param_filter, "latent_pool": pool,
+                "noise_draws": draws, "tensors_kept": int(sum(keep)) if keep else len(params),
                 "parameters_kept": int(sum(int(p.numel()) for p, ok in zip(params, keep) if ok)) if keep else n_params}
     if command == "latent_stats":
         return {"transform": _latent_stats(model, torch, files, device, str(req["latent_kind"]),
@@ -246,9 +256,13 @@ def run(req: dict) -> dict:
             raise RuntimeError(f"the index was built on {projection.n_params} adapter parameters; this adapter has {n_params}")
         rows, vectors, raw = [], [], []
         for i, wav in enumerate(files):
-            clip = _clip(model, torch, wav, device, G.pair_noise_seed(noise_seed, wav.name))
-            flat = _gradient(model, torch, params, clip, timesteps, target, wrapped=wrapped, timestep_norm=timestep_norm,
-                             keep=keep, lmap=lmap)
+            # Draw 0 is the index's own noise, so one draw reads exactly as an index built without the option.
+            flats = []
+            for d in range(draws):
+                clip = _clip(model, torch, wav, device, G.pair_noise_seed(noise_seed + d, wav.name))
+                flats.append(_gradient(model, torch, params, clip, timesteps, target, wrapped=wrapped,
+                                       timestep_norm=timestep_norm, keep=keep, lmap=lmap, pool=pool))
+            flat = flats[0] if draws == 1 else np.mean(np.stack(flats), axis=0).astype(np.float32)
             if req.get("keep_flat"):
                 raw.append(flat)
             projected = G.project(flat, projection)

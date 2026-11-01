@@ -140,6 +140,17 @@ def combine_timesteps(flats: Sequence[np.ndarray], *, timestep_norm: bool) -> np
 LATENT_TRANSFORMS = ("whiten", "pca")
 
 
+def research_int(value, name: str) -> int:
+    """A research count (frames pooled, noise draws): 1 when unset, else a whole number of at least 1."""
+    if isinstance(value, bool):
+        raise GradientUnavailable(f"{name} must be a whole number of at least 1, not {value!r}")
+    if value in (None, "", 0, 1):
+        return 1
+    if int(value) != float(value) or int(value) < 1:
+        raise GradientUnavailable(f"{name} must be a whole number of at least 1, not {value!r}")
+    return int(value)
+
+
 def latent_transform_from_moments(kind: str, n: int, total, outer, *, variance: float = 0.9) -> dict:
     """A research latent transform from the training latents' frame count, channel sums and channel outer-product
     sums: ``whiten`` scales each channel by 1/std, ``pca`` keeps the fewest top directions reaching ``variance``."""
@@ -364,6 +375,8 @@ def output_feature(module: Any, meta: dict, files: Sequence[Path | str], *,
         raise GradientUnavailable("a parameter filter is not built on this engine's measure; rebuild the index without it")
     if meta.get("latent_transform"):
         raise GradientUnavailable("a latent transform is not built on this engine's measure; rebuild the index without it")
+    if research_int(meta.get("latent_pool"), "latent_pool") > 1 or research_int(meta.get("noise_draws"), "noise_draws") > 1:
+        raise GradientUnavailable("latent pooling and noise draws are not built on this engine's measure; rebuild the index without them")
     params = list(params) if params is not None else adapter_parameters(module)
     # The features are read as the index was built, normalisation included.
     vecs = [project(pair_gradient(module, load_sample(p), timesteps=timesteps,

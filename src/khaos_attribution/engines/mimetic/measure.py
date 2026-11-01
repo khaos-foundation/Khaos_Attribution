@@ -170,9 +170,12 @@ def parameter_count(handle: Handle) -> tuple:
 
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
-               on_row=None) -> tuple:
+               latent_pool: int | None = None, noise_draws: int | None = None, on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
+    from khaos_attribution import gradient as _G  # noqa: PLC0415
+    if _G.research_int(latent_pool, "latent_pool") > 1 or _G.research_int(noise_draws, "noise_draws") > 1:
+        raise _G.GradientUnavailable("latent pooling and noise draws are not built on the mimetic-a0 worker")
     if latent_transform:
         from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
         raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker")
@@ -224,6 +227,9 @@ def output_feature(handle: Handle, index_meta: dict, files):
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
     if index_meta.get("latent_transform"):
         raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker; rebuild the index without it")
+    from khaos_attribution.gradient import research_int  # noqa: PLC0415
+    if research_int(index_meta.get("latent_pool"), "latent_pool") > 1 or research_int(index_meta.get("noise_draws"), "noise_draws") > 1:
+        raise GradientUnavailable("latent pooling and noise draws are not built on the mimetic-a0 worker; rebuild the index without them")
     why = _index_refusal(index_meta)
     if why:
         raise GradientUnavailable(why)

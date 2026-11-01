@@ -116,7 +116,7 @@ def enable_checkpointing(module: Any) -> int:
 
 def index_rows(handle: Any, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
-               on_row=None) -> tuple:
+               latent_pool: int | None = None, noise_draws: int | None = None, on_row=None) -> tuple:
     """(matrix, rows) of an index: one L2-normalised projected gradient per pair file, in file order, with each
     row's pre-normalisation norm kept so a zero-gradient pair stays visible."""
     import numpy as np  # noqa: PLC0415
@@ -125,6 +125,8 @@ def index_rows(handle: Any, files, *, projection, timesteps, noise_seed: int, ta
         raise G.GradientUnavailable("a parameter filter is not built on ACE-Step's measure")
     if latent_transform:
         raise G.GradientUnavailable("a latent transform is not built on ACE-Step's measure")
+    if G.research_int(latent_pool, "latent_pool") > 1 or G.research_int(noise_draws, "noise_draws") > 1:
+        raise G.GradientUnavailable("latent pooling and noise draws are not built on ACE-Step's measure")
     params = G.adapter_parameters(handle)
     rows, vectors = [], []
     for i, path in enumerate(files):

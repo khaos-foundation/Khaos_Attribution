@@ -208,6 +208,9 @@ def run(req: dict) -> dict:
     for key in ("timestep_norm", "param_filter", "latent_transform"):
         if req.get(key):
             raise RuntimeError(f"{key} is not built on the MLX worker")
+    for key in ("latent_pool", "noise_draws"):
+        if G.research_int(req.get(key), key) > 1:
+            raise RuntimeError(f"{key} is not built on the MLX worker")
     mx, nn = _imports()
     convention = str(req.get("convention") or "mlx")
     if convention not in CONVENTIONS:
