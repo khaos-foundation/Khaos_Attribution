@@ -210,6 +210,8 @@ def run(req: dict) -> dict:
             raise RuntimeError(f"{key} is not built on the MLX worker")
     if req.get("noise_shared") or str(req.get("target") or "vnorm") in ("vmean", "dmean"):
         raise RuntimeError("noise_shared and the signed-mean targets are not built on the MLX worker")
+    if req.get("param_groups") or req.get("groups_out"):
+        raise RuntimeError("block sketches (param_groups) are not built on the MLX worker")
     for key in ("latent_pool", "noise_draws"):
         if G.research_int(req.get(key), key) > 1:
             raise RuntimeError(f"{key} is not built on the MLX worker")

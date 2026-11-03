@@ -117,7 +117,7 @@ def enable_checkpointing(module: Any) -> int:
 def index_rows(handle: Any, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
                latent_pool: int | None = None, noise_draws: int | None = None, noise_shared: bool = False,
-               on_row=None) -> tuple:
+               param_groups: str | None = None, groups_out=None, on_row=None) -> tuple:
     """(matrix, rows) of an index: one L2-normalised projected gradient per pair file, in file order, with each
     row's pre-normalisation norm kept so a zero-gradient pair stays visible."""
     import numpy as np  # noqa: PLC0415
@@ -130,6 +130,8 @@ def index_rows(handle: Any, files, *, projection, timesteps, noise_seed: int, ta
         raise G.GradientUnavailable("latent pooling and noise draws are not built on ACE-Step's measure")
     if noise_shared:
         raise G.GradientUnavailable("shared noise is not built on ACE-Step's measure")
+    if param_groups or groups_out:
+        raise G.GradientUnavailable("block sketches are not built on ACE-Step's measure")
     params = G.adapter_parameters(handle)
     rows, vectors = [], []
     for i, path in enumerate(files):
@@ -147,8 +149,10 @@ def index_rows(handle: Any, files, *, projection, timesteps, noise_seed: int, ta
     return matrix, rows
 
 
-def output_feature(handle: Any, index_meta: dict, files) -> Any:
+def output_feature(handle: Any, index_meta: dict, files, *, groups_out=None) -> Any:
     from khaos_attribution import gradient as G  # noqa: PLC0415
+    if groups_out:
+        raise G.GradientUnavailable("block sketches are not built on ACE-Step's measure")
     return G.output_feature(handle, index_meta, list(files))
 
 

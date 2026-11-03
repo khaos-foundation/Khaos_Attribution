@@ -266,12 +266,17 @@ def run(req: dict) -> dict:
     pool = G.research_int(req.get("latent_pool"), "latent_pool")
     draws = G.research_int(req.get("noise_draws"), "noise_draws")
     noise_shared = bool(req.get("noise_shared", False))
+    groups_pattern = req.get("param_groups") or None
+    groups_out = req.get("groups_out") or None
+    if groups_out and not groups_pattern:
+        raise RuntimeError("groups_out needs param_groups, the pattern that names the blocks")
+    labels = G.param_groups(names, groups_pattern) if groups_pattern else None
     files = [Path(f) for f in req["files"]]
     n_params = int(sum(int(p.numel()) for p in params))
     signature = G.parameter_signature(params)
     command = req["command"]
     filtered = {"latent_transform": (transform or {}).get("kind"), "param_filter": param_filter, "latent_pool": pool,
-                "noise_draws": draws, "noise_shared": noise_shared, "tensors_kept": int(sum(keep)) if keep else len(params),
+                "noise_draws": draws, "noise_shared": noise_shared, "param_groups": groups_pattern, "tensors_kept": int(sum(keep)) if keep else len(params),
                 "parameters_kept": int(sum(int(p.numel()) for p, ok in zip(params, keep) if ok)) if keep else n_params}
     if command == "latent_stats":
         return {"transform": _latent_stats(model, torch, files, device, str(req["latent_kind"]),
@@ -284,6 +289,14 @@ def run(req: dict) -> dict:
                       if command == "index" else G.projection_from_meta(req["index_meta"]))
         if projection.n_params != n_params:
             raise RuntimeError(f"the index was built on {projection.n_params} adapter parameters; this adapter has {n_params}")
+        if command == "index" and labels and not groups_out:
+            raise RuntimeError("an index with param_groups writes its block sketches; name groups_out")
+        sketch = G.group_sketch(projection, [int(p.numel()) for p in params], labels) if labels and groups_out else None
+        # The index's blocks are written row by row, so a long index never holds them all in memory.
+        group_rows = (np.lib.format.open_memmap(str(groups_out), mode="w+", dtype=np.float32,
+                                                shape=(len(files), len(sketch.labels), projection.dim))
+                      if sketch is not None and command == "index" else None)
+        group_feats = []
         rows, vectors, raw = [], [], []
         for i, wav in enumerate(files):
             # Draw 0 is the index's own noise, so one draw reads exactly as an index built without the option.
@@ -299,6 +312,12 @@ def run(req: dict) -> dict:
             residual = float(np.mean(residuals))
             if req.get("keep_flat"):
                 raw.append(flat)
+            if sketch is not None:
+                parts = G.project_groups(flat, sketch)
+                if group_rows is not None:
+                    group_rows[i] = parts
+                else:
+                    group_feats.append(parts)
             projected = G.project(flat, projection)
             if command == "index":
                 norm = float(np.linalg.norm(projected))
@@ -316,6 +335,15 @@ def run(req: dict) -> dict:
         if raw:
             np.save(str(req["keep_flat"]), np.stack(raw).astype(np.float32))
             extra = {"flat": str(req["keep_flat"]), "keys": keys}
+        if group_rows is not None:
+            group_rows.flush()
+            del group_rows
+        if sketch is not None and command == "feature":
+            Path(groups_out).parent.mkdir(parents=True, exist_ok=True)
+            np.save(str(groups_out), np.mean(np.stack(group_feats), axis=0).astype(np.float32))
+        if sketch is not None:
+            extra["group_labels"] = sketch.labels
+            extra["groups"] = str(groups_out)
         if command == "index":
             out = Path(req["out"])
             out.parent.mkdir(parents=True, exist_ok=True)

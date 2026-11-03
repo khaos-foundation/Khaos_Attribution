@@ -158,6 +158,58 @@ def param_filter_mask(names: Sequence[str], pattern: str | None) -> list:
     return kept
 
 
+def param_groups(names: Sequence[str], pattern: str) -> list:
+    """Each adapter tensor's research group: the pattern's captured parts joined by '|', or 'other' where it does
+    not match."""
+    import re  # noqa: PLC0415
+    rx = re.compile(pattern)
+    if rx.groups < 1:
+        raise GradientUnavailable(f"the group pattern {pattern!r} captures nothing to name a group by")
+    labels = []
+    for n in names:
+        m = rx.search(str(n))
+        labels.append("|".join("" if g is None else g for g in m.groups()) if m else "other")
+    if all(label == "other" for label in labels):
+        raise GradientUnavailable(f"the group pattern {pattern!r} matches none of the adapter's {len(names)} tensors")
+    return labels
+
+
+@dataclass
+class GroupSketch:
+    """The sketch cut by parameter group: each group's coordinates with their buckets and signs."""
+    labels: list
+    positions: list
+    buckets: list
+    signs: list
+    dim: int
+
+
+def group_sketch(projection: SketchProjection, sizes: Sequence[int], tensor_labels: Sequence[str]) -> GroupSketch:
+    """Groups in first-seen order over tensors laid end to end as the flat gradient lays them."""
+    sizes = [int(s) for s in sizes]
+    if len(sizes) != len(tensor_labels):
+        raise ValueError(f"{len(sizes)} tensor sizes for {len(tensor_labels)} labels")
+    if sum(sizes) != projection.n_params:
+        raise ValueError(f"the tensors hold {sum(sizes)} parameters; the projection was built for {projection.n_params}")
+    order = list(dict.fromkeys(tensor_labels))
+    starts = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
+    parts: dict = {g: [] for g in order}
+    for start, size, g in zip(starts, sizes, tensor_labels):
+        parts[g].append(np.arange(start, start + size, dtype=np.int64))
+    positions = [np.concatenate(parts[g]) for g in order]
+    return GroupSketch(labels=order, positions=positions, buckets=[projection.buckets[p] for p in positions],
+                       signs=[projection.signs[p] for p in positions], dim=projection.dim)
+
+
+def project_groups(values: Sequence[float] | np.ndarray, sketch: GroupSketch) -> np.ndarray:
+    """(groups, dim): each group's part of the sketch; the parts sum to ``project`` of the same vector."""
+    v = np.asarray(values, dtype=np.float64).reshape(-1)
+    out = np.zeros((len(sketch.labels), sketch.dim), dtype=np.float64)
+    for i, (pos, buckets, signs) in enumerate(zip(sketch.positions, sketch.buckets, sketch.signs)):
+        out[i] = np.bincount(buckets, weights=v[pos] * signs, minlength=sketch.dim)
+    return out.astype(np.float32)
+
+
 def combine_timesteps(flats: Sequence[np.ndarray], *, timestep_norm: bool) -> np.ndarray:
     """One gradient per pair from its timesteps' gradients: their mean, each first scaled to unit length when asked."""
     if not flats:
@@ -410,6 +462,8 @@ def output_feature(module: Any, meta: dict, files: Sequence[Path | str], *,
         raise GradientUnavailable("latent pooling and noise draws are not built on this engine's measure; rebuild the index without them")
     if meta.get("noise_shared"):
         raise GradientUnavailable("shared noise is not built on this engine's measure; rebuild the index without it")
+    if meta.get("param_groups"):
+        raise GradientUnavailable("block sketches are not built on this engine's measure; rebuild the index without them")
     params = list(params) if params is not None else adapter_parameters(module)
     # The features are read as the index was built, normalisation included.
     vecs = [project(pair_gradient(module, load_sample(p), timesteps=timesteps,

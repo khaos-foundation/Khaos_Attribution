@@ -171,10 +171,12 @@ def parameter_count(handle: Handle) -> tuple:
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
                latent_pool: int | None = None, noise_draws: int | None = None, noise_shared: bool = False,
-               on_row=None) -> tuple:
+               param_groups: str | None = None, groups_out=None, on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as _G  # noqa: PLC0415
+    if param_groups or groups_out:
+        raise _G.GradientUnavailable("block sketches are not built on the mimetic-a0 worker")
     if _G.research_int(latent_pool, "latent_pool") > 1 or _G.research_int(noise_draws, "noise_draws") > 1:
         raise _G.GradientUnavailable("latent pooling and noise draws are not built on the mimetic-a0 worker")
     if noise_shared:
@@ -225,9 +227,11 @@ def _index_refusal(index_meta: dict) -> str | None:
     return None
 
 
-def output_feature(handle: Handle, index_meta: dict, files):
+def output_feature(handle: Handle, index_meta: dict, files, *, groups_out=None):
     import numpy as np  # noqa: PLC0415
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    if groups_out or index_meta.get("param_groups"):
+        raise GradientUnavailable("block sketches are not built on the mimetic-a0 worker; rebuild the index without them")
     if index_meta.get("latent_transform"):
         raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker; rebuild the index without it")
     from khaos_attribution.gradient import research_int  # noqa: PLC0415

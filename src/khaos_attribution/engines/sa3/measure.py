@@ -174,6 +174,7 @@ def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:
             "latent_pool": index_meta.get("latent_pool") or None,
             "noise_draws": index_meta.get("noise_draws") or None,
             "noise_shared": bool(index_meta.get("noise_shared", False)),
+            "param_groups": index_meta.get("param_groups") or None,
             "index_meta": {k: index_meta[k] for k in ("projection",) if k in index_meta}}
 
 
@@ -185,9 +186,16 @@ def parameter_count(handle: Handle) -> tuple:
 def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int, target: str = "vnorm",
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
                latent_pool: int | None = None, noise_draws: int | None = None, noise_shared: bool = False,
-               on_row=None) -> tuple:
-    """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
+               param_groups: str | None = None, groups_out=None, on_row=None) -> tuple:
+    """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy; with
+    ``param_groups`` each row's block sketches land at ``groups_out`` and their names beside it."""
+    import json  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    if param_groups and not groups_out:
+        raise GradientUnavailable("an index with block sketches needs groups_out, where they are written")
+    if groups_out and not param_groups:
+        raise GradientUnavailable("groups_out needs param_groups, the pattern that names the blocks")
     out = Path(files[0]).resolve().parent / ".khaos_index_rows.tmp.npy" if files else Path(".khaos_index_rows.tmp.npy")
     seen = set()
 
@@ -199,8 +207,10 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
     r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target,
                                        "timestep_norm": timestep_norm, "param_filter": param_filter,
                                        "latent_transform": latent_transform, "latent_pool": latent_pool,
-                                       "noise_draws": noise_draws, "noise_shared": noise_shared}, files, "index"),
-                      "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
+                                       "noise_draws": noise_draws, "noise_shared": noise_shared,
+                                       "param_groups": param_groups}, files, "index"),
+                      "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out),
+                      "groups_out": str(Path(groups_out).resolve()) if groups_out else None},
              on_progress=progress)
     from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
     if r.get("compute_dtype") and r["compute_dtype"] != dtype_tag(handle.dtype):
@@ -212,6 +222,10 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
     except (OSError, ValueError) as exc:
         raise GradientUnavailable(f"the Stable Audio 3 measure worker left no readable matrix: {exc}") from exc
     Path(r["matrix"]).unlink(missing_ok=True)
+    if param_groups:
+        if not Path(groups_out).is_file() or not r.get("group_labels"):
+            raise GradientUnavailable("the Stable Audio 3 measure worker wrote no block sketches")
+        Path(groups_out).with_suffix(".labels.json").write_text(json.dumps(r["group_labels"]) + "\n", encoding="utf-8")
     if on_row is not None:
         for row in r["rows"]:
             if row["row"] not in seen:
@@ -241,13 +255,21 @@ def _index_refusal(index_meta: dict) -> str | None:
     return None
 
 
-def output_feature(handle: Handle, index_meta: dict, files):
+def output_feature(handle: Handle, index_meta: dict, files, *, groups_out=None):
+    """The output's projected feature; with ``groups_out`` its block sketches are written there too."""
     import numpy as np  # noqa: PLC0415
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
     why = _index_refusal(index_meta)
     if why:
         raise GradientUnavailable(why)
-    r = _ask(handle, _base(handle, index_meta, files, "feature"))
+    if groups_out and not index_meta.get("param_groups"):
+        raise GradientUnavailable("this index was built without block sketches; an output's cannot be read against it")
+    request = _base(handle, index_meta, files, "feature")
+    if groups_out:
+        request["groups_out"] = str(Path(groups_out).resolve())
+    r = _ask(handle, request)
+    if groups_out and not Path(groups_out).is_file():
+        raise GradientUnavailable("the Stable Audio 3 measure worker wrote no block sketches for this output")
     built_on = (index_meta.get("projection") or {}).get("parameter_signature")
     if built_on and r.get("signature") and r["signature"] != built_on:
         raise GradientUnavailable("this adapter's parameters are not laid out as the index's were; rebuild the index")
