@@ -11,7 +11,8 @@ SYSTEM_RESERVE_GB = 6.0
 LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
 
 __all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
-           "index_rows", "latent_stats", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb"]
+           "index_rows", "latent_stats", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb",
+           "tid_factors", "tid_invert", "tid_kernels"]
 
 
 _SCORER = DESCRIPTOR.memory.get("scorer") or {}
@@ -101,7 +102,10 @@ def _env(handle: Handle) -> dict:
 
 
 _REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("rows", "matrix"), "feature": ("feature",),
-               "loss": ("with", "without"), "latent_stats": ("transform",)}
+               "loss": ("with", "without"), "latent_stats": ("transform",),
+               "tid_factors": ("tid_version", "modules", "live_tensors", "dropped_tensors"),
+               "tid_invert": ("tid_version", "inverses", "factors"),
+               "tid_kernels": ("kernels", "draws_done", "grid", "live_tensors", "dropped_tensors", "normaliser_zero", "seconds")}
 
 
 ROW_PREFIX = "khaos-row "
@@ -288,3 +292,55 @@ def paired_loss(handle: Handle, index_meta: dict, files) -> dict:
 
 def output_loss(handle: Handle, index_meta: dict, files) -> float:
     return paired_loss(handle, index_meta, files)["with"]
+
+
+# ── TID, the research reading of khaos_attribution.tid, built on the CUDA worker only ─────────────────────────────
+
+def _tid_request(handle: Handle, command: str, **fields) -> dict:
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    if handle.runtime == "mlx":
+        raise GradientUnavailable("TID is built on the CUDA worker only; this handle runs on MLX")
+    return {"command": command, "model": handle.model, "adapter": str(Path(handle.adapter).resolve()),
+            "runtime": handle.runtime, **fields}
+
+
+def _tid_dtype(handle: Handle, reply: dict) -> dict:
+    from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
+    if reply.get("compute_dtype") and reply["compute_dtype"] != dtype_tag(handle.dtype):
+        raise GradientUnavailable(f"the worker ran at {reply['compute_dtype']}, and this handle records "
+                                  f"{dtype_tag(handle.dtype)}; they must be one precision")
+    return reply
+
+
+def tid_factors(handle: Handle, files, *, grid, noise_seed: int, target: str, out_dir, factor_groups: int = 1,
+                modules: str | None = None, on_row=None) -> dict:
+    """TID's Kronecker factors of the adapter over ``files`` at the aligned draws of ``grid``, written under
+    ``out_dir``; the reply is the factors record, ``factors.json``."""
+    request = _tid_request(handle, "tid_factors", files=[str(Path(f).resolve()) for f in files],
+                           grid=[float(t) for t in grid], noise_seed=int(noise_seed), target=str(target),
+                           out_dir=str(Path(out_dir).resolve()), factor_groups=int(factor_groups), modules=modules)
+    return _tid_dtype(handle, _ask(handle, request, on_progress=on_row))
+
+
+def tid_invert(handle: Handle, factors_dir, *, alpha: float = 0.1) -> dict:
+    """The damped inverse of every live factor under ``factors_dir``; the reply is the spectra summary,
+    ``inverses.json``."""
+    return _ask(handle, _tid_request(handle, "tid_invert", factors_dir=str(Path(factors_dir).resolve()), alpha=float(alpha)))
+
+
+def tid_kernels(handle: Handle, train_files, query_files, query_groups, *, grid, noise_seed: int, target: str,
+                factors_dir, out, train_chunk: int = 1, keep_layer_kernels: bool = False, resume: bool = True,
+                on_row=None) -> dict:
+    """TID's per-draw kernels written to ``out`` (.npy, float32, draws × query files × training files, in grid,
+    query and training order); ``query_groups`` names each query file's output. The reply names what was written."""
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    if len(query_groups) != len(query_files):
+        raise GradientUnavailable(f"{len(query_groups)} query groups for {len(query_files)} query files")
+    if not str(out).endswith(".npy"):
+        raise GradientUnavailable(f"the kernels are written as .npy, not to {out}")
+    request = _tid_request(handle, "tid_kernels", train_files=[str(Path(f).resolve()) for f in train_files],
+                           query_files=[str(Path(f).resolve()) for f in query_files], query_groups=list(query_groups),
+                           grid=[float(t) for t in grid], noise_seed=int(noise_seed), target=str(target),
+                           factors_dir=str(Path(factors_dir).resolve()), out=str(Path(out).resolve()),
+                           train_chunk=int(train_chunk), keep_layer_kernels=bool(keep_layer_kernels), resume=bool(resume))
+    return _tid_dtype(handle, _ask(handle, request, on_progress=on_row))

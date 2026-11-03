@@ -204,6 +204,8 @@ def run(req: dict) -> dict:
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as G  # noqa: PLC0415
     from khaos_attribution.engines.sa3.measure import ROW_PREFIX  # noqa: PLC0415
+    if str(req.get("command") or "").startswith("tid_"):
+        raise RuntimeError(f"{req['command']}: TID is built on the CUDA worker only")
     # The research settings are built on the torch worker; the MLX reading never differs from it silently.
     for key in ("timestep_norm", "param_filter", "latent_transform"):
         if req.get(key):
