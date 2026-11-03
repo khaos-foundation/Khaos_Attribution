@@ -376,3 +376,76 @@ def test_the_factor_pass_can_hold_half_the_transformer_at_a_time():
         W._factor_groups(keys, 3)
     with pytest.raises(RuntimeError, match="name none"):
         W._factor_groups(["model.model.to_cond_embed.0"], 2)
+
+
+@pytest.fixture
+def _restore_determinism(monkeypatch):
+    import os
+    import warnings
+    torch = _torch()
+    monkeypatch.setattr(W, "_DETERMINISM", {})
+    shown, had = warnings.showwarning, os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    yield torch
+    torch.use_deterministic_algorithms(False)
+    warnings.showwarning = shown
+    if had is None:
+        os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    else:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = had
+
+
+def test_flash_attention_runs_its_deterministic_backward_and_is_wrapped_once(_restore_determinism):
+    """The engine's flash attention accumulates its backward in no fixed order unless asked; TID asks, once."""
+    calls = []
+
+    def fake(q, k, v, *, deterministic=False):
+        calls.append(deterministic)
+        return q
+    module = SimpleNamespace(flash_attn_func=fake, flash_attn_kvpacked_func=None, flash_attn_varlen_func=fake)
+    assert W._deterministic_attention(module) == ["flash_attn_func", "flash_attn_varlen_func"]
+    first = module.flash_attn_func
+    assert W._deterministic_attention(module) == ["flash_attn_func", "flash_attn_varlen_func"]
+    assert module.flash_attn_func is first, "a second call must not wrap the wrapper"
+    module.flash_attn_func(1, 2, 3)
+    module.flash_attn_varlen_func(1, 2, 3)
+    assert calls == [True, True]
+    assert W._deterministic_attention(None) == []
+
+
+def test_a_tid_pass_is_deterministic_before_the_model_loads(_restore_determinism, monkeypatch):
+    """cuBLAS reads its workspace setting when CUDA first runs, so TID sets it, and torch's flag, before loading."""
+    import os
+    import warnings
+    torch = _restore_determinism
+    os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    seen = {}
+
+    class Loaded(Exception):
+        pass
+
+    def load(req):
+        seen.update(env=os.environ.get("CUBLAS_WORKSPACE_CONFIG"), flag=torch.are_deterministic_algorithms_enabled())
+        raise Loaded
+    monkeypatch.setattr(W, "_load", load)
+    monkeypatch.setattr(warnings, "showwarning", lambda *a, **k: None)
+    with pytest.raises(Loaded):
+        W._tid_setup({})
+    assert seen == {"env": W.CUBLAS_WORKSPACE, "flag": True}
+    warnings.showwarning("an op does not have a deterministic implementation", UserWarning, "x.py", 1)
+    warnings.showwarning("an unrelated warning", UserWarning, "x.py", 2)
+    assert W._DETERMINISM["warned"] == ["an op does not have a deterministic implementation"]
+
+
+def test_the_d_trak_commands_do_not_take_the_tid_settings(_restore_determinism, monkeypatch):
+    """Only TID's commands change the kernels' determinism; the index, feature and loss commands run as before."""
+    torch = _restore_determinism
+
+    class Loaded(Exception):
+        pass
+
+    def load(req):
+        raise Loaded
+    monkeypatch.setattr(W, "_load", load)
+    with pytest.raises(Loaded):
+        W.run({"command": "index"})
+    assert not torch.are_deterministic_algorithms_enabled() and W._DETERMINISM == {}

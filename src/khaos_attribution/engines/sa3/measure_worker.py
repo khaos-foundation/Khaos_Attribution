@@ -589,9 +589,56 @@ def _tid_settings(req: dict) -> tuple:
     return grid, int(req["noise_seed"]), target
 
 
+FLASH_ATTENTION = ("flash_attn_func", "flash_attn_kvpacked_func", "flash_attn_varlen_func")
+CUBLAS_WORKSPACE = ":4096:8"
+_DETERMINISM: dict = {}
+
+
+def _tid_deterministic() -> dict:
+    """Torch's deterministic kernels and cuBLAS's fixed workspace for a TID pass, set before any CUDA work; an op with
+    no deterministic form is warned about and named in ``warned`` rather than refused."""
+    import os  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", CUBLAS_WORKSPACE)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.benchmark = False
+    warned = _DETERMINISM.setdefault("warned", [])
+    shown = warnings.showwarning
+    if not getattr(shown, "_khaos_collects", False):
+        def collect(message, category, filename, lineno, file=None, line=None):
+            text = str(message)[:300]
+            if "determinis" in text and text not in warned:
+                warned.append(text)
+            shown(message, category, filename, lineno, file, line)
+        collect._khaos_collects = True
+        warnings.showwarning = collect
+    _DETERMINISM.update({"torch": True, "cublas_workspace": os.environ["CUBLAS_WORKSPACE_CONFIG"]})
+    return _DETERMINISM
+
+
+def _deterministic_attention(module) -> list:
+    """Flash attention's deterministic backward in the engine's transformer, whose default accumulates in no fixed
+    order; returns the functions wrapped, once each however often it is called."""
+    import functools  # noqa: PLC0415
+    wrapped = []
+    for name in FLASH_ATTENTION:
+        fn = getattr(module, name, None) if module is not None else None
+        if fn is None:
+            continue
+        if not getattr(fn, "_khaos_deterministic", False):
+            fn = functools.partial(fn, deterministic=True)
+            fn._khaos_deterministic = True
+            setattr(module, name, fn)
+        wrapped.append(name)
+    return wrapped
+
+
 def _tid_setup(req: dict, pattern=None) -> tuple:
     """The model with its adapter, the LoRA layers TID reads, and the guards every TID command needs."""
+    _tid_deterministic()
     wrapped, model, params, torch, _keys, names, decomposed = _load(req)
+    _DETERMINISM["flash_attention"] = _deterministic_attention(sys.modules.get("stable_audio_3.models.transformer"))
     if decomposed:
         raise RuntimeError("a weight-decomposed adapter is refused: TID's factors are derived for plain LoRA")
     entries = _lora_modules(model, names, pattern)
@@ -633,7 +680,8 @@ def _tid_factors(req: dict) -> dict:
               "modules_pattern": req.get("modules") or None, "normalisation": "factor matrices at unit Frobenius norm",
               "modules": modules, "live_tensors": len(live), "live_tensor_names": live, "dropped_tensors": dropped,
               "signature": G.parameter_signature(params), "compute_dtype": _base_dtype(model),
-              "device": str(device).split(":")[0], "seconds": round(time.time() - started, 1)}
+              "device": str(device).split(":")[0], "deterministic": _DETERMINISM,
+              "seconds": round(time.time() - started, 1)}
     _write_json(out_dir / T.FACTORS_RECORD, record)
     return record
 
@@ -763,7 +811,8 @@ def _tid_kernels(req: dict) -> dict:
             "live_tensors": len(live), "live_parameters": n_live, "dropped_tensors": [n for n in names if n not in set(live)],
             "normaliser_zero": sink.zero, "autograd_check": sink.check, "factors_dir": str(factors_dir),
             "train_chunk": train_chunk, "signature": G.parameter_signature(params), "compute_dtype": _base_dtype(model),
-            "device": str(device).split(":")[0], "seconds": round(time.time() - started, 1)}
+            "device": str(device).split(":")[0], "deterministic": _DETERMINISM,
+            "seconds": round(time.time() - started, 1)}
 
 
 def main() -> int:
