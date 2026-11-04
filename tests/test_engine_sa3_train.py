@@ -352,3 +352,32 @@ def test_the_heldout_at_an_epoch_reads_that_epochs_weights_or_is_not_scored(api,
             scored.append((update.epoch, adapter.read_bytes() if adapter else None))
     assert scored == [(1, None), (2, b"converted:step4"), (3, None), (4, b"converted:step8")]
     assert mod.HELDOUT_ON_CHECKPOINTS is True
+
+
+def test_a_small_run_is_repeated_to_the_floor_only_when_asked(api, tmp_path, monkeypatch):
+    """The refusal stands by default; under the opt-in the pairs (clip and caption) are copied round-robin to
+    the floor with names the track parser still reads, and a second call adds nothing."""
+    from khaos_attribution.identifiers import track_of_segment
+    monkeypatch.setattr(T, "TORCH_MIN_PAIRS", 4)
+    monkeypatch.delenv(T.REPEAT_SMALL_RUNS_ENV, raising=False)
+    tensors = tmp_path / "run" / "tensors"
+    _clips(tensors, 1)
+    for wav in T.pair_files(tensors):
+        wav.with_suffix(".txt").write_text("a caption")
+    with pytest.raises(TrainingUnavailable, match="at least 4 pairs"):
+        T.open_session(api, RECIPE, checkpoint_root=tmp_path, tensor_dir=tensors, output_dir=tmp_path / "run",
+                       device="cuda", precision="bf16", seed=1)
+    made = T.repeat_pairs_to(tensors, 4)
+    files = T.pair_files(tensors)
+    assert len(made) == 3 and len(files) == 4
+    assert {track_of_segment(f.stem) for f in files} == {track_of_segment(files[0].stem.split("_rep")[0])}
+    assert all(f.with_suffix(".txt").read_text() == "a caption" for f in files)
+    assert T.repeat_pairs_to(tensors, 4) == [] and len(T.pair_files(tensors)) == 4
+    monkeypatch.setenv(T.REPEAT_SMALL_RUNS_ENV, "1")
+    _clips(tmp_path / "run2" / "tensors", 2)
+    try:
+        T.open_session(api, RECIPE, checkpoint_root=tmp_path, tensor_dir=tmp_path / "run2" / "tensors",
+                       output_dir=tmp_path / "run2", device="cuda", precision="bf16", seed=1)
+    except TrainingUnavailable as exc:
+        assert "at least 4 pairs" not in str(exc)
+    assert len(T.pair_files(tmp_path / "run2" / "tensors")) == 4

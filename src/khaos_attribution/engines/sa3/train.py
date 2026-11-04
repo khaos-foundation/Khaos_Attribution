@@ -39,6 +39,8 @@ TRAIN_DRIVER = Path(__file__).with_name("train_driver.py")
 LOSSES_CSV = "khaos_losses.csv"
 POLL_SECONDS = 2.0
 TORCH_MIN_PAIRS = 4
+# Opt-in for research runs on one short track: the pairs are repeated to the floor instead of refused.
+REPEAT_SMALL_RUNS_ENV = "KHAOS_SA3_REPEAT_SMALL_RUNS"
 # The trainer saves weights only on its checkpoint cadence, so a held-out score exists only there.
 HELDOUT_ON_CHECKPOINTS = True
 
@@ -121,6 +123,26 @@ def trained_mask(run_dir: Path | str) -> str | None:
 
 def pair_files(tensor_dir: Path | str) -> list:
     return sorted(Path(tensor_dir).glob(f"*{PAIR_SUFFIX}"))
+
+
+def repeat_pairs_to(tensor_dir: Path | str, n: int) -> list:
+    """Copy the pairs under ``tensor_dir`` round-robin as ``<name>_rep<i>`` until ``n`` exist; the copies made."""
+    tensor_dir = Path(tensor_dir)
+    originals = [f for f in pair_files(tensor_dir) if "_rep" not in f.stem]
+    if not originals:
+        raise TrainingUnavailable(f"no pairs under {tensor_dir} to repeat")
+    made = []
+    i = 0
+    while len(pair_files(tensor_dir)) < n:
+        src = originals[i % len(originals)]
+        i += 1
+        stem = f"{src.stem}_rep{i}"
+        for sidecar in sorted(tensor_dir.glob(f"{src.stem}.*")):
+            target = tensor_dir / f"{stem}{sidecar.suffix}"
+            shutil.copy2(sidecar, target)
+            if sidecar.suffix == PAIR_SUFFIX:
+                made.append(target)
+    return made
 
 
 def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=None, device: str = "cuda",
@@ -495,8 +517,12 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
     """A session on Stability's trainer; nothing is loaded until train() runs, so on_model_loaded fires at once."""
     # Stability's CUDA trainer pre-fetches a demo batch of four whole pairs before the first step.
     if api.runtime == "torch" and len(pair_files(tensor_dir)) < TORCH_MIN_PAIRS:
-        raise TrainingUnavailable(f"Stable Audio 3's trainer needs at least {TORCH_MIN_PAIRS} pairs; "
-                                  f"{len(pair_files(tensor_dir))} under {tensor_dir}")
+        if os.environ.get(REPEAT_SMALL_RUNS_ENV) != "1":
+            raise TrainingUnavailable(f"Stable Audio 3's trainer needs at least {TORCH_MIN_PAIRS} pairs; "
+                                      f"{len(pair_files(tensor_dir))} under {tensor_dir}")
+        made = repeat_pairs_to(tensor_dir, TORCH_MIN_PAIRS)
+        log.info("%d pair(s) repeated to %d under %s (%s=1)", len(made), TORCH_MIN_PAIRS, tensor_dir,
+                 REPEAT_SMALL_RUNS_ENV)
     if api.runtime == "mlx" and not (Path(checkpoint_root) / BASE_NPZ).is_file():
         raise TrainingUnavailable(f"the MLX trainer needs the base weights as {BASE_NPZ} under {checkpoint_root}; "
                                   "provision the engine first")
