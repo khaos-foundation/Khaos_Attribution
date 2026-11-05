@@ -18,6 +18,7 @@ from pathlib import Path
 
 from khaos_attribution.engines.render import RenderFailed
 from khaos_attribution.engines.sa3 import DESCRIPTOR
+from khaos_attribution.engines.sa3 import train_driver as TD
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, python_for, runtime_for
 from khaos_attribution.engines.worker_process import stop_tree
 from khaos_attribution.engines import process_trainer as PT
@@ -249,11 +250,32 @@ def longest_clip_seconds(clips_dir: Path) -> float:
     return float(math.ceil(longest)) if longest else 30.0
 
 
+def recipe_options(cfg: dict, runtime: str, *, resuming: bool) -> dict:
+    """The recipe's options beyond the adapter's shape and rate; one this runtime cannot honour is refused, never
+    dropped, so a run's record says what it trained under."""
+    schedule = str(cfg.get("lr_schedule") or "constant")
+    if schedule not in TD.SCHEDULES:
+        raise TrainingUnavailable(f"Stable Audio 3 trains at a constant or cosine rate, not {schedule!r}")
+    exclude = cfg.get("adapter_exclude") or []
+    if isinstance(exclude, str):
+        exclude = [x.strip() for x in exclude.split(",") if x.strip()]
+    crn = bool(cfg.get("common_random_numbers"))
+    if runtime != "torch" and (schedule != "constant" or exclude or crn):
+        raise TrainingUnavailable("the cosine rate, adapter_exclude and common random numbers are CUDA options; "
+                                  "the Mac trainer here runs the engine's own recipe")
+    if resuming and schedule != "constant":
+        raise TrainingUnavailable("a cosine run cannot be resumed: its rate would start over")
+    if crn and max(1, int(cfg.get("batch_size") or 1)) != 1:
+        raise TrainingUnavailable("common random numbers key each step to one clip, so they need batch_size 1")
+    return {"lr_schedule": schedule, "adapter_exclude": [str(x) for x in exclude], "common_random_numbers": crn}
+
+
 def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: Path, checkpoint_root: Path,
                     steps: dict, seed: int, window_seconds: float, resume_from: Path | None) -> list:
     """Stability's trainer for this runtime, at the recipe's adapter shape and the planned steps."""
     adapter_type, a = adapter_kwargs(cfg)
     lr = float(cfg.get("learning_rate") or 1e-4)
+    opts = recipe_options(cfg, api.runtime, resuming=bool(resume_from))
     if api.runtime == "torch":
         # Through the driver: Stability's script logs no loss and its demo callback renders at step 1 regardless.
         return [str(api.python), str(TRAIN_DRIVER),
@@ -263,7 +285,10 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
                 "--checkpoint_every", str(steps["checkpoint_every"]), "--duration", str(window_seconds),
                 "--seed", str(int(seed)), "--logger", "csv", "--name", "khaos", "--save_dir", str(save_dir),
                 "--batch_size", str(max(1, int(cfg.get("batch_size") or 1))),
-                "--demo_every", str(10 ** 9), "--num_workers", "0" if WINDOWS else "4",
+                "--demo_every", str(10 ** 9), "--num_workers", "0" if WINDOWS or opts["common_random_numbers"] else "4",
+                *(["--exclude", *opts["adapter_exclude"]] if opts["adapter_exclude"] else []),
+                *([TD.SCHEDULE_FLAG, opts["lr_schedule"]] if opts["lr_schedule"] != "constant" else []),
+                *([TD.CRN_FLAG] if opts["common_random_numbers"] else []),
                 *(["--lora_checkpoint", str(resume_from)] if resume_from else [])]
     mlx = api.root / MLX_SUBDIR
     crop = max(2, int(round(window_seconds * DESCRIPTOR.sample_rate / 4096)))

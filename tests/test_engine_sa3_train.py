@@ -381,3 +381,64 @@ def test_a_small_run_is_repeated_to_the_floor_only_when_asked(api, tmp_path, mon
     except TrainingUnavailable as exc:
         assert "at least 4 pairs" not in str(exc)
     assert len(T.pair_files(tmp_path / "run2" / "tensors")) == 4
+
+
+def _command(api, tmp_path, **recipe):
+    return T.trainer_command(api, {**RECIPE, **recipe}, tensor_dir=tmp_path, save_dir=tmp_path / "s",
+                             checkpoint_root=tmp_path, steps={"total": 40, "checkpoint_every": 20}, seed=42,
+                             window_seconds=25.0, resume_from=None)
+
+
+def test_the_default_recipe_passes_no_new_option_and_each_option_reaches_the_driver(api, tmp_path):
+    """Unset options leave the command as it was; a cosine rate, an exclude list and common random numbers each
+    arrive as their flag, and common random numbers load in-process."""
+    plain = _command(api, tmp_path)
+    assert not any(a.startswith("--khaos_") for a in plain) and "--exclude" not in plain
+    assert plain[plain.index("--num_workers") + 1] in ("0", "4")
+    opt = _command(api, tmp_path, lr_schedule="cosine", adapter_exclude="to_global_embed, seconds_total",
+                   common_random_numbers=True)
+    assert opt[opt.index("--khaos_lr_schedule") + 1] == "cosine" and "--khaos_common_random_numbers" in opt
+    i = opt.index("--exclude")
+    assert opt[i + 1:i + 3] == ["to_global_embed", "seconds_total"]
+    assert opt[opt.index("--num_workers") + 1] == "0"
+
+
+def test_options_a_run_cannot_honour_are_refused(api, tmp_path):
+    """The Mac trainer, a cosine resume, common random numbers at a batch over one and an unknown schedule refuse."""
+    mlx = T.TrainingApi(root=api.root, runtime="mlx", python=sys.executable)
+    with pytest.raises(TrainingUnavailable, match="CUDA options"):
+        T.recipe_options({"lr_schedule": "cosine"}, mlx.runtime, resuming=False)
+    with pytest.raises(TrainingUnavailable, match="cannot be resumed"):
+        T.recipe_options({"lr_schedule": "cosine"}, "torch", resuming=True)
+    with pytest.raises(TrainingUnavailable, match="batch_size 1"):
+        T.recipe_options({"common_random_numbers": True, "batch_size": 4}, "torch", resuming=False)
+    with pytest.raises(TrainingUnavailable, match="constant or cosine"):
+        T.recipe_options({"lr_schedule": "step"}, "torch", resuming=False)
+    assert T.recipe_options({}, "mlx", resuming=True)["lr_schedule"] == "constant"
+
+
+def test_the_driver_takes_its_own_flags_out_and_schedules_a_warm_up_then_cosine():
+    from khaos_attribution.engines.sa3 import train_driver as TD
+    rest, opts = TD.split_khaos_flags(["--lr", "1e-4", "--khaos_lr_schedule", "cosine", "--khaos_common_random_numbers",
+                                       "--seed", "42"])
+    assert rest == ["--lr", "1e-4", "--seed", "42"]
+    assert opts == {"lr_schedule": "cosine", "common_random_numbers": True}
+    with pytest.raises(SystemExit):
+        TD.split_khaos_flags(["--khaos_lr_schedule", "linear"])
+    m = [TD.warmup_cosine(s, 100) for s in range(100)]
+    assert m[0] < 0.25 and m[4] == pytest.approx(1.0) and m[-1] < 0.01
+    assert all(a >= b for a, b in zip(m[4:], m[5:]))
+
+
+def test_common_random_numbers_keep_shared_clips_in_the_same_order_and_draws():
+    """A run on a subset of the clips sees the shared ones in the full run's order, under the same per-clip seeds."""
+    from khaos_attribution.engines.sa3 import train_driver as TD
+    full = [f"trk{t}_seg_{i:03d}.wav" for t in range(4) for i in range(5)]
+    subset = [k for k in full if not k.startswith("trk2")]
+    for epoch in (1, 2):
+        full_order = [full[i] for i in TD.crn_order(full, 42, epoch)]
+        sub_order = [subset[i] for i in TD.crn_order(subset, 42, epoch)]
+        assert sub_order == [k for k in full_order if not k.startswith("trk2")]
+    assert TD.crn_order(full, 42, 1) != TD.crn_order(full, 42, 2) != TD.crn_order(full, 43, 2)
+    assert TD.crn_seed(42, 1, "a.wav", "step") == TD.crn_seed(42, 1, "a.wav", "step")
+    assert len({TD.crn_seed(42, 1, "a.wav", p) for p in ("step", "load", "order")}) == 3
