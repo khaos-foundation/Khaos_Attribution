@@ -31,9 +31,21 @@ def test_pooling_averages_blocks_of_valid_frames_before_the_square():
     assert float(W._squared(torch, diff, short, None, 8)) == pytest.approx(1.0)
 
 
+def test_a_latent_map_of_the_wrong_width_is_refused_by_the_square_and_the_signed_mean():
+    W = _worker()
+    diff = torch.ones(1, 2, 4)
+    where = torch.ones(1, 1, 4, dtype=torch.bool)
+    lmap = torch.ones(1, 3)
+    for fn in (W._squared, W._signed_mean):
+        with pytest.raises(RuntimeError, match="measured on 3 channels; this latent has 2"):
+            fn(torch, diff, where, lmap)
+    assert float(W._signed_mean(torch, diff, where, torch.ones(1, 2))) == pytest.approx(2.0)
+
+
 def test_research_counts_are_whole_numbers_of_at_least_one():
     assert G.research_int(None, "x") == 1 and G.research_int(1, "x") == 1 and G.research_int(4, "x") == 4
-    for bad in (-2, 2.5, True):
+    assert G.research_int("", "x") == 1 and G.research_int("3", "x") == 3
+    for bad in (-2, 2.5, True, 0, "0", "abc", [2]):
         with pytest.raises(G.GradientUnavailable, match="whole number"):
             G.research_int(bad, "x")
 

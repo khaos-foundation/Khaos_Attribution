@@ -9,6 +9,7 @@ import csv
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -127,10 +128,12 @@ def trained_values(run_dir: Path | str) -> dict:
     outranks a training_config.yaml that names a schedule the trainer never received; empty with no record."""
     path = Path(run_dir) / TRAINER_DIRNAME / "train_command.json"
     try:
-        command = [str(x) for x in json.loads(path.read_text(encoding="utf-8")).get("command") or []]
+        command = json.loads(path.read_text(encoding="utf-8")).get("command")
+        if not isinstance(command, list) or not all(isinstance(x, str) for x in command):
+            return {}
+        return TD.split_khaos_flags(command)[1] if command else {}
     except (OSError, ValueError, AttributeError):
         return {}
-    return TD.split_khaos_flags(command)[1] if command else {}
 
 
 def pair_files(tensor_dir: Path | str) -> list:
@@ -140,7 +143,7 @@ def pair_files(tensor_dir: Path | str) -> list:
 def repeat_pairs_to(tensor_dir: Path | str, n: int) -> list:
     """Copy the pairs under ``tensor_dir`` round-robin as ``<name>_rep<i>`` until ``n`` exist; the copies made."""
     tensor_dir = Path(tensor_dir)
-    originals = [f for f in pair_files(tensor_dir) if "_rep" not in f.stem]
+    originals = [f for f in pair_files(tensor_dir) if not re.search(r"_rep\d+$", f.stem)]
     if not originals:
         raise TrainingUnavailable(f"no pairs under {tensor_dir} to repeat")
     made = []
@@ -267,18 +270,23 @@ def recipe_options(cfg: dict, runtime: str, *, resuming: bool) -> dict:
     schedule = str(cfg.get("lr_schedule") or "constant")
     if schedule not in TD.SCHEDULES:
         raise TrainingUnavailable(f"Stable Audio 3 trains at a constant or cosine rate, not {schedule!r}")
-    exclude = cfg.get("adapter_exclude") or []
-    if isinstance(exclude, str):
-        exclude = [x.strip() for x in exclude.split(",") if x.strip()]
+    given = cfg.get("adapter_exclude") or []
+    # Stability matches a pattern by substring, so a blank one would take the adapter off every layer.
+    exclude = [str(x).strip() for x in (given.split(",") if isinstance(given, str) else given) if str(x).strip()]
+    if given and not exclude:
+        raise TrainingUnavailable(f"adapter_exclude names no module pattern: {given!r}")
     crn = bool(cfg.get("common_random_numbers"))
     if runtime != "torch" and (schedule != "constant" or exclude or crn):
         raise TrainingUnavailable("the cosine rate, adapter_exclude and common random numbers are CUDA options; "
                                   "the Mac trainer here runs the engine's own recipe")
     if resuming and schedule != "constant":
         raise TrainingUnavailable("a cosine run cannot be resumed: its rate would start over")
+    if resuming and crn:
+        raise TrainingUnavailable("a common random numbers run cannot be resumed: the new process counts its epochs "
+                                  "from one again, so the continuation would repeat epoch 1's order, crops and noise")
     if crn and max(1, int(cfg.get("batch_size") or 1)) != 1:
         raise TrainingUnavailable("common random numbers key each step to one clip, so they need batch_size 1")
-    return {"lr_schedule": schedule, "adapter_exclude": [str(x) for x in exclude], "common_random_numbers": crn}
+    return {"lr_schedule": schedule, "adapter_exclude": exclude, "common_random_numbers": crn}
 
 
 def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: Path, checkpoint_root: Path,
@@ -452,6 +460,8 @@ class Session:
     def train(self):
         """The trainer's run as Khaos's updates: info at start, an epoch each time the step count crosses one
         (its loss the mean of the epoch's steps), a checkpoint each time one lands, complete or fail at the end."""
+        from khaos_attribution.engines import contract_guard  # noqa: PLC0415
+        contract_guard.require(self.api.python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=TrainingUnavailable)
         self.save_dir.mkdir(parents=True, exist_ok=True)
         if self.resume_from is not None:
             self._set_aside_earlier_run()

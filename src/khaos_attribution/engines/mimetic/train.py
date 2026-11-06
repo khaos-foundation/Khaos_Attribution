@@ -243,6 +243,8 @@ class Session:
     def train(self):
         """The trainer's run as Khaos's updates: info at start, an epoch each time the step count crosses one, a
         checkpoint each time one lands, complete or fail at the end."""
+        from khaos_attribution.engines import contract_guard  # noqa: PLC0415
+        contract_guard.require(self.api.python, engine=DESCRIPTOR.name, engine_id=DESCRIPTOR.id, error=TrainingUnavailable)
         if self.save_dir.exists():
             aside = self.output_dir / f"{TRAINER_DIRNAME}_before_{time.strftime('%Y%m%d_%H%M%S')}"
             self.save_dir.replace(aside)

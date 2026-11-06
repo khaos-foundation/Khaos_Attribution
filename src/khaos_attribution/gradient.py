@@ -225,12 +225,13 @@ LATENT_TRANSFORMS = ("whiten", "pca")
 
 def research_int(value, name: str) -> int:
     """A research count (frames pooled, noise draws): 1 when unset, else a whole number of at least 1."""
-    if isinstance(value, bool):
-        raise GradientUnavailable(f"{name} must be a whole number of at least 1, not {value!r}")
-    if value in (None, "", 0, 1):
+    if value is None or value == "":
         return 1
-    if int(value) != float(value) or int(value) < 1:
-        raise GradientUnavailable(f"{name} must be a whole number of at least 1, not {value!r}")
+    try:
+        if isinstance(value, bool) or int(value) != float(value) or int(value) < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise GradientUnavailable(f"{name} must be a whole number of at least 1, not {value!r}") from None
     return int(value)
 
 

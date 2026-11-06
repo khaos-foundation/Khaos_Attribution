@@ -1,4 +1,4 @@
-"""The fallback __version__ matches pyproject, and every module with
+"""__version__ is the literal in the package and matches pyproject, and every module with
 `X | None` annotations defers them so requires-python >= 3.9 holds."""
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ def _pyproject_version() -> str:
     return re.search(r'^version = "([^"]+)"', text, re.M).group(1)
 
 
-def test_the_fallback_version_is_the_pyproject_version():
-    """The fallback is what a checkout reports."""
+def test_the_version_is_the_literal_and_the_literal_is_pyprojects():
+    """The code's own literal is the version a room reads, never an editable install's metadata, which goes
+    stale on a fast-forward and would fail every fingerprint comparison on identical code."""
     source = (PACKAGE / "__init__.py").read_text(encoding="utf-8")
-    fallback = re.search(r'__version__ = "([^"]+)"', source).group(1)
-    assert fallback == _pyproject_version()
-    # The installed metadata may be a stale editable install, so the runtime
-    # value is only required to be a version string.
-    assert re.fullmatch(r"\d+\.\d+\.\d+", khaos_attribution.__version__)
+    literal = re.search(r'^__version__ = "([^"]+)"', source, re.M).group(1)
+    assert literal == _pyproject_version()
+    assert khaos_attribution.__version__ == literal
+    assert "importlib.metadata" not in source
 
 
 def _uses_pep604_union(tree: ast.AST) -> bool:

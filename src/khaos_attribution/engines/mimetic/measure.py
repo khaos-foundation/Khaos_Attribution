@@ -104,7 +104,9 @@ def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
     """The worker's reply; its ``khaos-row`` lines reach ``on_progress`` as they come, so a long index shows its
     progress while the worker runs."""
     import tempfile  # noqa: PLC0415
+    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    contract_guard.require(handle.python, engine=DESCRIPTOR.name, engine_id=DESCRIPTOR.id, error=GradientUnavailable)
     worker = MEASURE_WORKER
     lines = []
     # stderr to a file, never a pipe: a worker that writes much to it would block while stdout is being read.

@@ -125,13 +125,19 @@ def _forward(model, torch, latents, cond, mask, noise, t: float, *, checkpointin
 TARGETS = ("vnorm", "loss", "vdelta", "vmean", "dmean")
 
 
+def _mapped(torch, diff, lmap):
+    """``diff`` through the latent map over channels, or as it is without one."""
+    if lmap is None:
+        return diff
+    if lmap.shape[1] != diff.shape[1]:
+        raise RuntimeError(f"the latent transform was measured on {lmap.shape[1]} channels; this latent has {diff.shape[1]}")
+    return torch.einsum("kc,bct->bkt", lmap, diff)
+
+
 def _squared(torch, diff, where, lmap=None, pool: int = 1):
     """Mean square of ``diff`` over the valid frames, after the latent map over channels and the mean over blocks
     of ``pool`` frames when either is given."""
-    if lmap is not None:
-        if lmap.shape[1] != diff.shape[1]:
-            raise RuntimeError(f"the latent transform was measured on {lmap.shape[1]} channels; this latent has {diff.shape[1]}")
-        diff = torch.einsum("kc,bct->bkt", lmap, diff)
+    diff = _mapped(torch, diff, lmap)
     if pool > 1:
         # The valid frames are a prefix; a tail shorter than one block is dropped unless it is all there is.
         valid = int(where[0, 0].sum())
@@ -143,8 +149,7 @@ def _squared(torch, diff, where, lmap=None, pool: int = 1):
 
 def _signed_mean(torch, diff, where, lmap=None, pool: int = 1):
     """Mean of ``diff`` over the valid frames, after the same latent map and pooling as the square."""
-    if lmap is not None:
-        diff = torch.einsum("kc,bct->bkt", lmap, diff)
+    diff = _mapped(torch, diff, lmap)
     if pool > 1:
         valid = int(where[0, 0].sum())
         blocks = max(1, valid // pool)

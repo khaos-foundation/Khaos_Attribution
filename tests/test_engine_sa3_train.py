@@ -383,6 +383,19 @@ def test_a_small_run_is_repeated_to_the_floor_only_when_asked(api, tmp_path, mon
     assert len(T.pair_files(tmp_path / "run2" / "tensors")) == 4
 
 
+def test_a_track_whose_name_contains_rep_is_an_original_not_a_copy(tmp_path):
+    """Only the ``_rep<i>`` suffix marks a copy: "the_reprise" is repeated like any other pair."""
+    tensors = tmp_path / "tensors"
+    tensors.mkdir()
+    (tensors / "the_reprise_seg_000.wav").write_bytes(b"wav")
+    (tensors / "the_reprise_seg_000.txt").write_text("a caption")
+    made = T.repeat_pairs_to(tensors, 3)
+    assert [f.stem for f in made] == ["the_reprise_seg_000_rep1", "the_reprise_seg_000_rep2"]
+    assert T.repeat_pairs_to(tensors, 3) == [], "the copies are not copied again"
+    assert [f.stem for f in T.pair_files(tensors)] == ["the_reprise_seg_000", "the_reprise_seg_000_rep1",
+                                                       "the_reprise_seg_000_rep2"]
+
+
 def _command(api, tmp_path, **recipe):
     return T.trainer_command(api, {**RECIPE, **recipe}, tensor_dir=tmp_path, save_dir=tmp_path / "s",
                              checkpoint_root=tmp_path, steps={"total": 40, "checkpoint_every": 20}, seed=42,
@@ -410,11 +423,27 @@ def test_options_a_run_cannot_honour_are_refused(api, tmp_path):
         T.recipe_options({"lr_schedule": "cosine"}, mlx.runtime, resuming=False)
     with pytest.raises(TrainingUnavailable, match="cannot be resumed"):
         T.recipe_options({"lr_schedule": "cosine"}, "torch", resuming=True)
+    with pytest.raises(TrainingUnavailable, match="common random numbers run cannot be resumed: .*epoch 1"):
+        T.recipe_options({"common_random_numbers": True, "batch_size": 1}, "torch", resuming=True)
+    assert T.recipe_options({"common_random_numbers": True, "batch_size": 1}, "torch", resuming=False)["common_random_numbers"]
     with pytest.raises(TrainingUnavailable, match="batch_size 1"):
         T.recipe_options({"common_random_numbers": True, "batch_size": 4}, "torch", resuming=False)
     with pytest.raises(TrainingUnavailable, match="constant or cosine"):
         T.recipe_options({"lr_schedule": "step"}, "torch", resuming=False)
     assert T.recipe_options({}, "mlx", resuming=True)["lr_schedule"] == "constant"
+
+
+def test_an_exclude_list_is_cleaned_as_the_comma_form_is_and_an_empty_pattern_is_refused():
+    """Stability's --exclude matches by substring, so "" would strip every layer: both forms drop blanks and
+    surrounding spaces, and a recipe left with no pattern at all under the key is refused."""
+    assert T.recipe_options({"adapter_exclude": [" seconds_total", "", "to_global_embed "]}, "torch",
+                            resuming=False)["adapter_exclude"] == ["seconds_total", "to_global_embed"]
+    assert T.recipe_options({"adapter_exclude": " seconds_total, ,to_global_embed "}, "torch",
+                            resuming=False)["adapter_exclude"] == ["seconds_total", "to_global_embed"]
+    for empty in ([""], [" "], ",", " , "):
+        with pytest.raises(TrainingUnavailable, match="adapter_exclude names no module pattern"):
+            T.recipe_options({"adapter_exclude": empty}, "torch", resuming=False)
+    assert T.recipe_options({"adapter_exclude": []}, "torch", resuming=False)["adapter_exclude"] == []
 
 
 def test_the_driver_takes_its_own_flags_out_and_schedules_a_warm_up_then_cosine():
@@ -423,7 +452,7 @@ def test_the_driver_takes_its_own_flags_out_and_schedules_a_warm_up_then_cosine(
                                        "--seed", "42"])
     assert rest == ["--lr", "1e-4", "--seed", "42"]
     assert opts == {"lr_schedule": "cosine", "common_random_numbers": True}
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         TD.split_khaos_flags(["--khaos_lr_schedule", "linear"])
     m = [TD.warmup_cosine(s, 100) for s in range(100)]
     assert m[0] < 0.25 and m[4] == pytest.approx(1.0) and m[-1] < 0.01
@@ -457,3 +486,29 @@ def test_a_runs_schedule_is_what_its_trainer_was_given_not_what_its_yaml_names(t
     assert T.trained_values(run) == {"lr_schedule": "cosine", "common_random_numbers": True}
     record.write_text("not json")
     assert T.trained_values(run) == {}
+
+
+def test_a_damaged_trainer_record_claims_nothing(tmp_path):
+    """A command that is not a list of strings, or whose flags do not parse, reads as no record: never a
+    constant-rate claim, never a crash in the room."""
+    run = tmp_path / "run"
+    (run / T.TRAINER_DIRNAME).mkdir(parents=True)
+    record = run / T.TRAINER_DIRNAME / "train_command.json"
+    record.write_text(json.dumps({"command": "python driver.py --khaos_lr_schedule cosine"}))
+    assert T.trained_values(run) == {}, "a string command is not the trainer's argument list"
+    record.write_text(json.dumps({"command": ["python", "driver.py", 3]}))
+    assert T.trained_values(run) == {}
+    record.write_text(json.dumps({"command": ["python", "driver.py", "--khaos_lr_schedule"]}))
+    assert T.trained_values(run) == {}, "a flag without its value parses as nothing, not as an exit"
+    record.write_text(json.dumps({"command": ["python", "driver.py", "--khaos_lr_schedule", "linear"]}))
+    assert T.trained_values(run) == {}
+
+
+def test_a_malformed_khaos_flag_is_a_value_error_and_main_exits_with_its_sentence(monkeypatch):
+    """The parser raises what a caller can catch; only the driver's own entry point turns it into an exit."""
+    from khaos_attribution.engines.sa3 import train_driver as TD
+    with pytest.raises(ValueError, match="takes one of constant, cosine"):
+        TD.split_khaos_flags(["--khaos_lr_schedule"])
+    monkeypatch.setattr(sys, "argv", ["driver.py", "--khaos_lr_schedule", "linear"])
+    with pytest.raises(SystemExit, match="takes one of constant, cosine"):
+        TD.main()

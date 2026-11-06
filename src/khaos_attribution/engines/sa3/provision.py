@@ -297,7 +297,11 @@ def contract_fingerprint(python: Path | None = None) -> str | None:
 
 def contract_mismatch(python: Path) -> str:
     """Why the engine's environment does not hold this contract, in words."""
-    theirs, ours = contract_fingerprint(python), contract_fingerprint()
+    return mismatch_words(contract_fingerprint(python), contract_fingerprint())
+
+
+def mismatch_words(theirs: str | None, ours: str) -> str:
+    """Why the fingerprint ``theirs`` is not this room's ``ours``, in words."""
     if not theirs:
         return "holds no contract, or one older than 0.41.1"
     if theirs.split()[0] == ours.split()[0]:

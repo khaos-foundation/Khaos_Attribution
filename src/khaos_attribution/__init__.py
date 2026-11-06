@@ -32,9 +32,5 @@ __all__ = [
     "validate_track_rights",
 ]
 
-try:
-    from importlib.metadata import version as _dist_version
-
-    __version__ = _dist_version("khaos_attribution")
-except Exception:  # pragma: no cover - package not installed (e.g. run from a checkout)
-    __version__ = "0.46.7"  # tests/test_version.py pins this to pyproject.toml
+# The code's own number, never the installed metadata: an editable install's metadata goes stale on a fast-forward.
+__version__ = "0.46.8"  # tests/test_version.py pins this to pyproject.toml

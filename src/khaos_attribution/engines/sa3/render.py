@@ -152,7 +152,9 @@ class Renderer:
 
 def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, timeout: float | None = None) -> dict:
     """One worker process through the contract's shared loop; a stop request kills it and nothing is kept."""
+    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
     python = python_for(root, runtime)
+    contract_guard.require(python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=RenderFailed)
     env = {**os.environ, "PYTHONPATH": str(root), "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
            "WANDB_MODE": "disabled"}
     try:

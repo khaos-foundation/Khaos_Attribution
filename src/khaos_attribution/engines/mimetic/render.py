@@ -132,8 +132,11 @@ class Renderer:
 
 
 def run_worker(root: Path, request: dict, *, should_stop=None, timeout: float | None = None) -> dict:
+    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
+    python = python_for(root)
+    contract_guard.require(python, engine=DESCRIPTOR.name, engine_id=DESCRIPTOR.id, error=RenderFailed)
     try:
-        return W.run(python_for(root), WORKER, request, cwd=root, env=worker_env(root), label=LABEL,
+        return W.run(python, WORKER, request, cwd=root, env=worker_env(root), label=LABEL,
                      should_stop=should_stop, timeout=timeout, required="seed")
     except W.WorkerCancelled as exc:
         raise RenderCancelled() from exc

@@ -26,7 +26,7 @@ def split_khaos_flags(args: list) -> tuple[list, dict]:
     while i < len(args):
         if args[i] == SCHEDULE_FLAG:
             if i + 1 >= len(args) or args[i + 1] not in SCHEDULES:
-                raise SystemExit(f"{SCHEDULE_FLAG} takes one of {', '.join(SCHEDULES)}")
+                raise ValueError(f"{SCHEDULE_FLAG} takes one of {', '.join(SCHEDULES)}")
             opts["lr_schedule"] = args[i + 1]
             i += 2
         elif args[i] == CRN_FLAG:
@@ -73,6 +73,10 @@ def _seed_everything(value: int) -> None:
 
 
 def main() -> int:
+    try:
+        args, opts = split_khaos_flags(sys.argv[1:])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     import pytorch_lightning as pl  # noqa: PLC0415
     import torch  # noqa: PLC0415
 
@@ -81,7 +85,6 @@ def main() -> int:
     sys.path.insert(0, str(root / "scripts"))
     import train_lora  # noqa: PLC0415  — Stability's scripts/train_lora.py, found through the checkout on the path
 
-    args, opts = split_khaos_flags(sys.argv[1:])
     sys.argv = [sys.argv[0], *args]
     save_dir = Path(args[args.index("--save_dir") + 1]) if "--save_dir" in args else Path("./lora_checkpoints")
     save_dir.mkdir(parents=True, exist_ok=True)
