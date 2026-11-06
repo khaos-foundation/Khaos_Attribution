@@ -17,7 +17,7 @@ import numpy as np
 req = json.loads(sys.stdin.read())
 c = req["command"]
 if req["adapter"].endswith("bad.safetensors"):
-    sys.stdout.write(json.dumps({"error": "a weight-decomposed adapter cannot be switched off for a measurement"}) + "\\n"); sys.exit(1)
+    sys.stdout.write(json.dumps({"error": "at strength 0, 3 of 229 adapted weights differ from the base model, so the adapter cannot be switched off for a measurement"}) + "\\n"); sys.exit(1)
 if c == "parameters":
     out = {"n_params": 12, "n_tensors": 3, "signature": "abc", "device": "cuda", "compute_dtype": "fp32"}
 elif c == "index":

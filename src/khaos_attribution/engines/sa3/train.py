@@ -122,6 +122,17 @@ def trained_mask(run_dir: Path | str) -> str | None:
     return record.get("mlx_inpaint_mask") or "ones"
 
 
+def trained_values(run_dir: Path | str) -> dict:
+    """The rate schedule and common random numbers a run's trainer was given, read from its command record, which
+    outranks a training_config.yaml that names a schedule the trainer never received; empty with no record."""
+    path = Path(run_dir) / TRAINER_DIRNAME / "train_command.json"
+    try:
+        command = [str(x) for x in json.loads(path.read_text(encoding="utf-8")).get("command") or []]
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return TD.split_khaos_flags(command)[1] if command else {}
+
+
 def pair_files(tensor_dir: Path | str) -> list:
     return sorted(Path(tensor_dir).glob(f"*{PAIR_SUFFIX}"))
 

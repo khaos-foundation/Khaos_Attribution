@@ -442,3 +442,18 @@ def test_common_random_numbers_keep_shared_clips_in_the_same_order_and_draws():
     assert TD.crn_order(full, 42, 1) != TD.crn_order(full, 42, 2) != TD.crn_order(full, 43, 2)
     assert TD.crn_seed(42, 1, "a.wav", "step") == TD.crn_seed(42, 1, "a.wav", "step")
     assert len({TD.crn_seed(42, 1, "a.wav", p) for p in ("step", "load", "order")}) == 3
+
+
+def test_a_runs_schedule_is_what_its_trainer_was_given_not_what_its_yaml_names(tmp_path):
+    """A run from before the schedule flag existed trained at a constant rate whatever its yaml says; no record, no claim."""
+    run = tmp_path / "run"
+    (run / T.TRAINER_DIRNAME).mkdir(parents=True)
+    assert T.trained_values(run) == {}
+    record = run / T.TRAINER_DIRNAME / "train_command.json"
+    record.write_text(json.dumps({"command": ["python", "driver.py", "--lr", "1e-4", "--dropout", "0.1"]}))
+    assert T.trained_values(run) == {"lr_schedule": "constant", "common_random_numbers": False}
+    record.write_text(json.dumps({"command": ["python", "driver.py", "--khaos_lr_schedule", "cosine",
+                                              "--khaos_common_random_numbers"]}))
+    assert T.trained_values(run) == {"lr_schedule": "cosine", "common_random_numbers": True}
+    record.write_text("not json")
+    assert T.trained_values(run) == {}

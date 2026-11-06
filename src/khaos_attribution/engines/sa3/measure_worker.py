@@ -40,9 +40,23 @@ def _load(req: dict):
     for p in params:
         p.requires_grad_(True)
     names = [named[i][0] for i in order]
-    # Any magnitude tensor means weight decomposition: at strength 0 such an adapter is still not the base model.
     decomposed = any(str(k).endswith(".magnitude") for k in state)
     return wrapped, model, params, torch, sorted(state), names, decomposed
+
+
+def _require_switch_off(wrapped, model, torch, what: str) -> None:
+    """Refuses a reading that switches the adapter off unless, at strength 0, every adapted weight equals its base."""
+    layers = [(mod, plist) for mod in model.modules()
+              if (plist := getattr(getattr(mod, "parametrizations", None), "weight", None)) is not None]
+    wrapped.set_lora_strength(0.0)
+    try:
+        with torch.no_grad():
+            differ = sum(1 for mod, plist in layers if not torch.equal(mod.weight, plist.original))
+    finally:
+        wrapped.set_lora_strength(1.0)
+    if not layers or differ:
+        raise RuntimeError(f"at strength 0, {differ} of {len(layers)} adapted weights differ from the base model, so "
+                           f"the adapter cannot be switched off for {what}")
 
 
 def _encode(model, torch, wav: Path, device):
@@ -838,13 +852,13 @@ def run(req: dict) -> dict:
     # tid_invert loads no model, so the TID commands are routed before the adapter is.
     if req.get("command") in TID_COMMANDS:
         return TID_COMMANDS[req["command"]](req)
-    wrapped, model, params, torch, keys, names, decomposed = _load(req)
+    wrapped, model, params, torch, keys, names, _decomposed = _load(req)
     device = wrapped.device
     timesteps = [float(t) for t in req["timesteps"]]
     noise_seed = int(req["noise_seed"])
     target = str(req.get("target") or "vnorm")
-    if target == "vdelta" and decomposed:
-        raise RuntimeError("a weight-decomposed adapter cannot be switched off for the adapter-delta target")
+    if target in ("vdelta", "dmean"):
+        _require_switch_off(wrapped, model, torch, f"the {target} target")
     timestep_norm = bool(req.get("timestep_norm", False))
     param_filter = req.get("param_filter") or None
     keep = G.param_filter_mask(names, param_filter) if param_filter else None
@@ -940,9 +954,7 @@ def run(req: dict) -> dict:
         return {**extra, **filtered, "feature": np.mean(np.stack(vectors), axis=0).astype(float).tolist(), "n": len(vectors),
                 "signature": signature}
     if command == "loss":
-        # A weight-decomposed adapter at strength 0 is still not the base model: the reading is refused, never faked.
-        if decomposed:
-            raise RuntimeError("a weight-decomposed adapter cannot be switched off for a measurement")
+        _require_switch_off(wrapped, model, torch, "a measurement")
         clips = [_clip(model, torch, wav, device, G.pair_noise_seed(noise_seed, wav.name)) for wav in files]
         wrapped.set_lora_strength(1.0)
         with_adapter = float(np.mean([_loss(model, torch, c, timesteps) for c in clips]))
