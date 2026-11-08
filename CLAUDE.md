@@ -23,6 +23,10 @@ A whole-codebase pass on 2026-09-14 removed about 20,000 lines of such commentar
 
 Sweeps search with `rg` or `git ls-files`, never a bare `find`; any `find` prunes `data/`.
 
+## Releases (house rule)
+
+`main` takes a commit only through a pull request whose `pytest` check passed; the branch protection holds everyone to it, admins included. A release is the annotated tag `v<version>` on its pull request's merge commit: the `release` skill's first half opens the `release/<version>` pull request, and its second half tags the merge.
+
 ## Licence (house rule)
 
 Khaos is free to use and is NOT open source. Never describe any Khaos repository, package, app or document as open source, open-sourced or MIT-licensed; say "free to use" (and, for the public contract, "source available"). Every repository's `LICENSE` is the Khaos Free Use Licence. Third-party components and the base model keep their own licences and are described as theirs.
