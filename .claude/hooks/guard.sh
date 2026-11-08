@@ -14,8 +14,8 @@ call = json.load(sys.stdin)
 tool, args = call.get("tool_name", ""), call.get("tool_input") or {}
 if tool == "Bash":
     cmd = args.get("command", "")
-    # Deliberately crude: any rm-like word together with any data/ path.
-    if re.search(r"(?<![A-Za-z0-9_])rm", cmd) and "data/" in cmd:
+    # Deliberately crude: an rm-like word together with any path segment named data/.
+    if re.search(r"(?<![A-Za-z0-9_])rm", cmd) and re.search(r"(?<![A-Za-z0-9_])data/", cmd):
         deny("the command names rm and a data/ path; artist data is never removed from a session")
     sys.exit(0)
 path = args.get("file_path") or args.get("notebook_path") or ""
