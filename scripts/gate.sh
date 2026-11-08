@@ -83,7 +83,9 @@ run_gates() {
     with_timeout "$left" bash -c "$cmd" > "$log" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ]; then
-      echo "PASS $g ($(( $(date +%s) - start ))s)"
+      summary=$(grep -E '([0-9]+ passed|^Results:)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
+      echo "PASS $g ($(( $(date +%s) - start ))s)${summary:+: $summary}"
+      grep -E '^[[:space:]]*SKIP:' "$log" | head -8 | sed -E 's/^[[:space:]]*SKIP: */  skipped inside: /'
     else
       echo "FAIL $g ($(( $(date +%s) - start ))s, exit $rc)"
       tail -60 "$log"
