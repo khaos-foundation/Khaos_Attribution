@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash scripts/gate.sh)",
+      "Bash(bash scripts/gate.sh *)",
+      "Bash(.venv/bin/python -m pytest)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(uv pip list)",
+      "Bash(uv pip list *)",
+      "Bash(uv pip show *)"
+    ],
+    "deny": [
+      "Bash(uv sync)",
+      "Bash(uv sync *)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/gate.sh\" --hook", "timeout": 600}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Edit|Write|NotebookEdit|Bash",
+       "hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.sh\"", "timeout": 10}]}
+    ]
+  }
+}
