@@ -21,6 +21,8 @@ A whole-codebase pass on 2026-09-14 removed about 20,000 lines of such commentar
 
 `bash scripts/gate.sh pytest` runs the suite (`.venv/bin/python -m pytest -q`); `--changed` runs what a change touches, and the Stop hook in `.claude/settings.json` calls it. The `release` skill makes a version.
 
+Sweeps search with `rg` or `git ls-files`, never a bare `find`; any `find` prunes `data/`.
+
 ## Licence (house rule)
 
 Khaos is free to use and is NOT open source. Never describe any Khaos repository, package, app or document as open source, open-sourced or MIT-licensed; say "free to use" (and, for the public contract, "source available"). Every repository's `LICENSE` is the Khaos Free Use Licence. Third-party components and the base model keep their own licences and are described as theirs.
