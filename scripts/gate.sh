@@ -164,7 +164,11 @@ case "$MODE" in
     exit "$rc" ;;
   names)
     [ ${#NAMES[@]} -eq 0 ] && { usage; exit 2; }
-    [ "${NAMES[0]}" = all ] && read -r -a NAMES <<< "$ALL_GATES"
+    expanded=()
+    for g in "${NAMES[@]}"; do
+      if [ "$g" = all ]; then read -r -a every <<< "$ALL_GATES"; expanded+=("${every[@]}"); else expanded+=("$g"); fi
+    done
+    NAMES=("${expanded[@]}")
     for g in "${NAMES[@]}"; do gate_cmd "$g" > /dev/null || { echo "no gate named $g"; usage; exit 2; }; done
     take_lock || { echo "another gate run holds this repository's lock"; exit 3; }
     run_gates "${NAMES[@]}"
