@@ -410,6 +410,24 @@
       },
       "description": "The engine's own training defaults, applied over a Khaos recipe when a run names this engine: learning_rate, adapter_rank, adapter_alpha, adapter_type and any other value its trainer takes."
     },
+    "recipes": {
+      "type": "object",
+      "description": "Named training recipes beside the engine's own defaults, offered by name when a run starts: each recipe's values are set over the defaults as typed values are, and the run records the recipe's name.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["label", "values"],
+        "additionalProperties": false,
+        "properties": {
+          "label": {"type": "string", "minLength": 1},
+          "note": {"type": "string"},
+          "values": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"anyOf": [{"type": ["number", "string"]}, {"type": "array", "items": {"type": "string"}}]}
+          }
+        }
+      }
+    },
     "status": {
       "type": "string",
       "enum": [

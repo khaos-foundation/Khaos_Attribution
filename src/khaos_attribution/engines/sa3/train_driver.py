@@ -2,7 +2,8 @@
 every step's loss written to khaos_losses.csv beside the checkpoints (the script logs no loss), the demo callback kept
 quiet (it renders unmarked audio at step 1 whatever --demo_every says), and two opt-in recipe options its command line
 lacks: a warm-up then cosine learning rate, and common random numbers across runs. Stability's code is not changed;
-its train_lora.py is imported and its main() run with the arguments that remain once Khaos's own are taken out."""
+its train_lora.py is imported and its main() run with the arguments that remain once Khaos's own are taken out.
+The schedule's flags are shared with the MLX driver (train_driver_mlx.py)."""
 
 from __future__ import annotations
 
@@ -15,6 +16,9 @@ from pathlib import Path
 
 LOSSES = "khaos_losses.csv"
 SCHEDULE_FLAG = "--khaos_lr_schedule"
+# A resumed cosine run continues the whole run's curve: its length, and the steps already taken before this process.
+SCHEDULE_TOTAL_FLAG = "--khaos_schedule_total"
+SCHEDULE_OFFSET_FLAG = "--khaos_schedule_offset"
 CRN_FLAG = "--khaos_common_random_numbers"
 SCHEDULES = ("constant", "cosine")
 WARMUP_FRACTION = 0.05
@@ -22,12 +26,22 @@ WARMUP_FRACTION = 0.05
 
 def split_khaos_flags(args: list) -> tuple[list, dict]:
     """(the arguments Stability's script takes, Khaos's options) from one command line."""
-    rest, opts, i = [], {"lr_schedule": "constant", "common_random_numbers": False}, 0
+    rest, i = [], 0
+    opts = {"lr_schedule": "constant", "common_random_numbers": False, "schedule_total": 0, "schedule_offset": 0}
     while i < len(args):
         if args[i] == SCHEDULE_FLAG:
             if i + 1 >= len(args) or args[i + 1] not in SCHEDULES:
                 raise ValueError(f"{SCHEDULE_FLAG} takes one of {', '.join(SCHEDULES)}")
             opts["lr_schedule"] = args[i + 1]
+            i += 2
+        elif args[i] in (SCHEDULE_TOTAL_FLAG, SCHEDULE_OFFSET_FLAG):
+            key = "schedule_total" if args[i] == SCHEDULE_TOTAL_FLAG else "schedule_offset"
+            try:
+                opts[key] = int(args[i + 1])
+            except (IndexError, ValueError):
+                raise ValueError(f"{args[i]} takes a whole number of steps") from None
+            if opts[key] < 0:
+                raise ValueError(f"{args[i]} takes a whole number of steps")
             i += 2
         elif args[i] == CRN_FLAG:
             opts["common_random_numbers"] = True
@@ -157,7 +171,8 @@ def main() -> int:
             if opts["lr_schedule"] == "constant":
                 return out
             opt = out[0][0] if isinstance(out, tuple) or (isinstance(out, list) and isinstance(out[0], list)) else out[0]
-            sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: warmup_cosine(step, total))
+            span, offset = opts["schedule_total"] or total, opts["schedule_offset"]
+            sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: warmup_cosine(step + offset, span))
             return [opt], [{"scheduler": sched, "interval": "step"}]
 
     if crn:

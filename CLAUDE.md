@@ -23,6 +23,10 @@ A whole-codebase pass on 2026-09-14 removed about 20,000 lines of such commentar
 
 Sweeps search with `rg` or `git ls-files`, never a bare `find`; any `find` prunes `data/`.
 
+## Engine descriptors (house rule)
+
+A key added to an engine's `train` defaults replaces that setting on every run and plan that pinned it without naming it in `engine_train_override`, and the name list is part of a plan's hash; a recipe's extra settings go in its `recipes` entry instead, and a resume carries them from the run's record.
+
 ## Releases (house rule)
 
 `main` takes a commit only through a pull request whose `pytest` check passed; the branch protection holds everyone to it, admins included. A release is the annotated tag `v<version>` on its pull request's merge commit: the `release` skill's first half opens the `release/<version>` pull request, and its second half tags the merge.

@@ -131,6 +131,31 @@
     "adapter_type": "lora",
     "lr_schedule": "constant"
   },
+  "recipes": {
+    "P5": {
+      "label": "P5",
+      "note": "A stronger adapter: rank 32 at 4e-4 with a warm-up then cosine rate, four clips a step, on the music layers only (the conditioning layers and the seconds conditioner left as the base has them).",
+      "values": {
+        "learning_rate": 0.0004,
+        "adapter_rank": 32,
+        "adapter_alpha": 32,
+        "lr_schedule": "cosine",
+        "batch_size": 4,
+        "adapter_exclude": [
+          "to_timestep_embed",
+          "to_cond_embed",
+          "to_global_embed",
+          "to_local_embed",
+          "global_cond_embedder",
+          "project_in",
+          "project_out",
+          "preprocess_conv",
+          "postprocess_conv",
+          "seconds_total"
+        ]
+      }
+    }
+  },
   "memory": {
     "resident_gb": 0.0,
     "yielded_gb": 0.0,

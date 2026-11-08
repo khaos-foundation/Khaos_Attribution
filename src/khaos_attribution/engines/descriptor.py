@@ -3,6 +3,7 @@ schema. Both rooms read the same file; the Engine Room pins their copies equal."
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -173,6 +174,11 @@ class Descriptor:
         return dict(self.doc.get("train") or {})
 
     @property
+    def recipes(self) -> dict:
+        """Named training recipes beside the defaults, ``{name: {label, note, values}}``; empty when there are none."""
+        return copy.deepcopy(dict(self.doc.get("recipes") or {}))
+
+    @property
     def memory(self) -> dict:
         """The engine's footprint and its scorer's peak, in GB, as measured on it; empty when never measured."""
         return dict(self.doc.get("memory") or {})
@@ -194,6 +200,10 @@ def validate_descriptor(doc: dict) -> dict:
         raise DescriptorError(f"engine descriptor: {exc.message} (at {'/'.join(str(p) for p in exc.absolute_path) or 'top level'})") from None
     if doc["default_variant"] not in doc["variants"]:
         raise DescriptorError(f"engine descriptor: default_variant {doc['default_variant']!r} is not a variant")
+    for name in doc.get("recipes") or {}:
+        # A recipe's name travels on a command line and into a run's record.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", name):
+            raise DescriptorError(f"engine descriptor: recipe name {name!r} is not a plain token")
     keys = doc.get("render_setting_keys") or []
     for name, v in doc["variants"].items():
         missing = [k for k in keys if k not in v["render"]]

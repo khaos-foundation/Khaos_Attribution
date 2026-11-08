@@ -417,12 +417,15 @@ def test_the_default_recipe_passes_no_new_option_and_each_option_reaches_the_dri
 
 
 def test_options_a_run_cannot_honour_are_refused(api, tmp_path):
-    """The Mac trainer, a cosine resume, common random numbers at a batch over one and an unknown schedule refuse."""
+    """Common random numbers on the Mac, or resumed, or at a batch over one, and an unknown schedule refuse; a cosine
+    rate and an exclude list run on either trainer, resumed or not."""
     mlx = T.TrainingApi(root=api.root, runtime="mlx", python=sys.executable)
-    with pytest.raises(TrainingUnavailable, match="CUDA options"):
-        T.recipe_options({"lr_schedule": "cosine"}, mlx.runtime, resuming=False)
-    with pytest.raises(TrainingUnavailable, match="cannot be resumed"):
-        T.recipe_options({"lr_schedule": "cosine"}, "torch", resuming=True)
+    with pytest.raises(TrainingUnavailable, match="common random numbers are a CUDA option"):
+        T.recipe_options({"common_random_numbers": True, "batch_size": 1}, mlx.runtime, resuming=False)
+    for runtime in ("mlx", "torch"):
+        for resuming in (False, True):
+            got = T.recipe_options({"lr_schedule": "cosine", "adapter_exclude": ["project_in"]}, runtime, resuming=resuming)
+            assert got["lr_schedule"] == "cosine" and got["adapter_exclude"] == ["project_in"]
     with pytest.raises(TrainingUnavailable, match="common random numbers run cannot be resumed: .*epoch 1"):
         T.recipe_options({"common_random_numbers": True, "batch_size": 1}, "torch", resuming=True)
     assert T.recipe_options({"common_random_numbers": True, "batch_size": 1}, "torch", resuming=False)["common_random_numbers"]
@@ -451,9 +454,13 @@ def test_the_driver_takes_its_own_flags_out_and_schedules_a_warm_up_then_cosine(
     rest, opts = TD.split_khaos_flags(["--lr", "1e-4", "--khaos_lr_schedule", "cosine", "--khaos_common_random_numbers",
                                        "--seed", "42"])
     assert rest == ["--lr", "1e-4", "--seed", "42"]
-    assert opts == {"lr_schedule": "cosine", "common_random_numbers": True}
-    with pytest.raises(ValueError):
-        TD.split_khaos_flags(["--khaos_lr_schedule", "linear"])
+    assert opts == {"lr_schedule": "cosine", "common_random_numbers": True, "schedule_total": 0, "schedule_offset": 0}
+    _rest, opts = TD.split_khaos_flags(["--khaos_schedule_total", "400", "--khaos_schedule_offset", "120"])
+    assert (opts["schedule_total"], opts["schedule_offset"]) == (400, 120)
+    for bad in (["--khaos_lr_schedule", "linear"], ["--khaos_schedule_total"], ["--khaos_schedule_offset", "-3"],
+                ["--khaos_schedule_total", "many"]):
+        with pytest.raises(ValueError):
+            TD.split_khaos_flags(bad)
     m = [TD.warmup_cosine(s, 100) for s in range(100)]
     assert m[0] < 0.25 and m[4] == pytest.approx(1.0) and m[-1] < 0.01
     assert all(a >= b for a, b in zip(m[4:], m[5:]))
@@ -512,3 +519,109 @@ def test_a_malformed_khaos_flag_is_a_value_error_and_main_exits_with_its_sentenc
     monkeypatch.setattr(sys, "argv", ["driver.py", "--khaos_lr_schedule", "linear"])
     with pytest.raises(SystemExit, match="takes one of constant, cosine"):
         TD.main()
+
+
+P5 = {**RECIPE, "adapter_type": "lora", "learning_rate": 4e-4, "adapter_rank": 32, "adapter_alpha": 32,
+      "lr_schedule": "cosine", "batch_size": 4,
+      "adapter_exclude": ["to_timestep_embed", "to_cond_embed", "to_global_embed", "to_local_embed", "global_cond_embedder",
+                          "project_in", "project_out", "preprocess_conv", "postprocess_conv", "seconds_total"]}
+
+
+def _mlx_command(api, tmp_path, recipe, schedule=None, resume_from=None):
+    mlx = T.TrainingApi(root=api.root, runtime="mlx", python=sys.executable)
+    return T.trainer_command(mlx, recipe, tensor_dir=tmp_path, save_dir=tmp_path / "s", checkpoint_root=tmp_path,
+                             steps={"total": 40, "checkpoint_every": 20}, seed=42, window_seconds=25.0,
+                             resume_from=resume_from, schedule=schedule)
+
+
+def test_a_mac_run_takes_the_recipe_through_its_driver(api, tmp_path):
+    """On the Mac the driver runs Stability's script with the recipe's batch, its exclude list (the seconds
+    conditioner by its own switch) and the cosine flags; with no list the trainer keeps its own."""
+    cmd = _mlx_command(api, tmp_path, P5, schedule={"total": 5005, "offset": 0})
+    assert cmd[1] == str(T.TRAIN_DRIVER_MLX)
+    assert cmd[cmd.index("--batch-size") + 1] == "4" and cmd[cmd.index("--rank") + 1] == "32"
+    assert cmd[cmd.index("--exclude") + 1].split(",") == P5["adapter_exclude"][:-1] and "--no-conditioner-lora" in cmd
+    assert cmd[cmd.index("--khaos_lr_schedule") + 1] == "cosine"
+    assert (cmd[cmd.index("--khaos_schedule_total") + 1], cmd[cmd.index("--khaos_schedule_offset") + 1]) == ("5005", "0")
+    plain = _mlx_command(api, tmp_path, {**RECIPE, "adapter_type": "lora"})
+    assert "--exclude" not in plain and "--no-conditioner-lora" not in plain and plain[plain.index("--batch-size") + 1] == "1"
+    assert not any(a.startswith("--khaos_") for a in plain)
+    only_seconds = _mlx_command(api, tmp_path, {**RECIPE, "adapter_exclude": ["seconds_total"]})
+    assert only_seconds[only_seconds.index("--exclude") + 1] == "" and "--no-conditioner-lora" in only_seconds, \
+        "a list naming only the seconds conditioner adapts every DiT layer, as it would on CUDA"
+
+
+def test_a_resumed_cosine_run_continues_the_whole_runs_curve(api, tmp_path):
+    """The session gives either trainer the whole run's length and the steps already taken, so the rate goes on."""
+    tensors = tmp_path / "run" / "tensors"
+    _clips(tensors, 8)
+    recipe = {**P5, "max_epochs": 10, "checkpoint_every_n_epochs": 5}
+    session = T.Session(api, recipe, checkpoint_root=tmp_path, tensor_dir=tensors, output_dir=tmp_path / "run", seed=1,
+                        resume_from=tmp_path / "ck.safetensors")
+    session.install_hooks(start_epoch=4)
+    cmd = session.command()
+    per_epoch = session.steps["per_epoch"]
+    assert per_epoch == 2 and session.run_steps()["total"] == 12
+    assert cmd[cmd.index("--khaos_schedule_total") + 1] == "20" and cmd[cmd.index("--khaos_schedule_offset") + 1] == "8"
+
+
+def test_the_mac_driver_schedules_the_cuda_curve():
+    """The MLX driver's table is the CUDA driver's warm-up then cosine, step for step, and it reads its flags."""
+    from khaos_attribution.engines.sa3 import train_driver as TD
+    from khaos_attribution.engines.sa3 import train_driver_mlx as TM
+    assert TM.schedule_table(100, TM.cuda_driver().warmup_cosine) == [TD.warmup_cosine(s, 100) for s in range(100)]
+    assert TM.flag_value(["--lr", "4e-4", "--max-steps", "40"], "--max-steps", int, 0) == 40
+    assert TM.flag_value([], "--lr", float, 0.0) == 0.0
+
+
+def test_a_run_through_the_mac_driver_is_still_a_mac_run(tmp_path):
+    """The mask reader knows a Mac run by the driver's name as by Stability's script."""
+    rec = tmp_path / T.TRAINER_DIRNAME / "train_command.json"
+    rec.parent.mkdir(parents=True)
+    rec.write_text(json.dumps({"command": ["py", "/x/sa3/train_driver_mlx.py"], "mlx_inpaint_mask": "zeros"}))
+    assert T.trained_mask(tmp_path) == "zeros"
+    rec.write_text(json.dumps({"command": ["py", "/x/sa3/train_driver_mlx.py", "--khaos_lr_schedule", "cosine",
+                                           "--khaos_schedule_total", "40"]}))
+    assert T.trained_values(tmp_path) == {"lr_schedule": "cosine", "common_random_numbers": False}
+
+
+def test_p5_is_a_named_recipe_of_the_engine_and_a_recipe_name_is_a_plain_token():
+    """Stable Audio 3 names P5 beside its defaults; a recipe name that could not travel on a command line refuses."""
+    from khaos_attribution.engines.descriptor import DescriptorError, validate_descriptor
+    from khaos_attribution.engines.sa3 import DESCRIPTOR
+    values = DESCRIPTOR.recipes["P5"]["values"]
+    assert {k: values[k] for k in P5 if k in values} == {k: P5[k] for k in values}
+    values["adapter_exclude"].append("ff")
+    assert "ff" not in DESCRIPTOR.recipes["P5"]["values"]["adapter_exclude"], "a caller's copy, never the engine's own"
+    doc = json.loads(json.dumps(DESCRIPTOR.doc))
+    doc["recipes"] = {"P5 strong": doc["recipes"]["P5"]}
+    with pytest.raises(DescriptorError, match="plain token"):
+        validate_descriptor(doc)
+
+
+def test_the_mac_driver_widens_one_clips_conditioning_to_the_batch():
+    """Stability's MLX trainer builds its local conditioning for one clip; the driver's DiT call widens it to the
+    batch, and leaves a batch of one and an unconditioned call as they were."""
+    from khaos_attribution.engines.sa3 import train_driver_mlx as TM
+
+    class Arr:
+        def __init__(self, shape):
+            self.shape = shape
+
+    class FakeMx:
+        @staticmethod
+        def broadcast_to(a, shape):
+            return Arr(shape)
+
+    seen = []
+
+    class DiT:
+        def __call__(self, x, t, cross, glob, local_add_cond=None):
+            seen.append(None if local_add_cond is None else local_add_cond.shape)
+
+    DiT.__call__ = TM.batch_wide_conditioning(DiT, FakeMx)
+    dit = DiT()
+    dit(Arr((4, 256, 10)), None, None, None, local_add_cond=Arr((1, 10, 257)))
+    dit(Arr((1, 256, 10)), None, None, None, local_add_cond=Arr((1, 10, 257)))
+    dit(Arr((4, 256, 10)), None, None, None)
+    assert seen == [(4, 10, 257), (1, 10, 257), None]
