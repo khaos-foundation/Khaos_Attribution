@@ -38,6 +38,11 @@ DEFAULT_BUCKETS = 10
 HELDOUT_WORKER = Path(__file__).with_name("heldout_worker.py")
 CONVERT_WORKER = Path(__file__).with_name("convert_worker.py")
 TRAIN_DRIVER = Path(__file__).with_name("train_driver.py")
+TRAIN_DRIVER_MLX = Path(__file__).with_name("train_driver_mlx.py")
+# The MLX trainer adapts the seconds conditioner apart from the DiT; a recipe excludes it under this pattern.
+SECONDS_PATTERN = "seconds_total"
+# A Mac run's command names Stability's script, or the driver that runs it.
+MLX_TRAINER_SCRIPTS = ("lora_train_mlx.py", "train_driver_mlx.py")
 LOSSES_CSV = "khaos_losses.csv"
 POLL_SECONDS = 2.0
 TORCH_MIN_PAIRS = 4
@@ -118,7 +123,7 @@ def trained_mask(run_dir: Path | str) -> str | None:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not any("lora_train_mlx.py" in str(part) for part in record.get("command") or []):
+    if not any(Path(str(part)).name in MLX_TRAINER_SCRIPTS for part in record.get("command") or []):
         return None
     return record.get("mlx_inpaint_mask") or "ones"
 
@@ -131,7 +136,8 @@ def trained_values(run_dir: Path | str) -> dict:
         command = json.loads(path.read_text(encoding="utf-8")).get("command")
         if not isinstance(command, list) or not all(isinstance(x, str) for x in command):
             return {}
-        return TD.split_khaos_flags(command)[1] if command else {}
+        opts = TD.split_khaos_flags(command)[1] if command else {}
+        return {k: opts[k] for k in ("lr_schedule", "common_random_numbers") if k in opts}
     except (OSError, ValueError, AttributeError):
         return {}
 
@@ -276,11 +282,8 @@ def recipe_options(cfg: dict, runtime: str, *, resuming: bool) -> dict:
     if given and not exclude:
         raise TrainingUnavailable(f"adapter_exclude names no module pattern: {given!r}")
     crn = bool(cfg.get("common_random_numbers"))
-    if runtime != "torch" and (schedule != "constant" or exclude or crn):
-        raise TrainingUnavailable("the cosine rate, adapter_exclude and common random numbers are CUDA options; "
-                                  "the Mac trainer here runs the engine's own recipe")
-    if resuming and schedule != "constant":
-        raise TrainingUnavailable("a cosine run cannot be resumed: its rate would start over")
+    if runtime != "torch" and crn:
+        raise TrainingUnavailable("common random numbers are a CUDA option; the Mac trainer draws its own")
     if resuming and crn:
         raise TrainingUnavailable("a common random numbers run cannot be resumed: the new process counts its epochs "
                                   "from one again, so the continuation would repeat epoch 1's order, crops and noise")
@@ -289,12 +292,25 @@ def recipe_options(cfg: dict, runtime: str, *, resuming: bool) -> dict:
     return {"lr_schedule": schedule, "adapter_exclude": exclude, "common_random_numbers": crn}
 
 
+def schedule_flags(opts: dict, schedule: dict | None) -> list:
+    """A cosine rate's flags for either driver: the whole run's length and the steps taken before this process."""
+    if opts["lr_schedule"] == "constant":
+        return []
+    out = [TD.SCHEDULE_FLAG, opts["lr_schedule"]]
+    if schedule:
+        out += [TD.SCHEDULE_TOTAL_FLAG, str(int(schedule["total"])), TD.SCHEDULE_OFFSET_FLAG, str(int(schedule["offset"]))]
+    return out
+
+
 def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: Path, checkpoint_root: Path,
-                    steps: dict, seed: int, window_seconds: float, resume_from: Path | None) -> list:
-    """Stability's trainer for this runtime, at the recipe's adapter shape and the planned steps."""
+                    steps: dict, seed: int, window_seconds: float, resume_from: Path | None,
+                    schedule: dict | None = None) -> list:
+    """Stability's trainer for this runtime, at the recipe's adapter shape and the planned steps; ``schedule`` is
+    the whole run's {total, offset} in steps, so a resumed cosine run continues its curve."""
     adapter_type, a = adapter_kwargs(cfg)
     lr = float(cfg.get("learning_rate") or 1e-4)
     opts = recipe_options(cfg, api.runtime, resuming=bool(resume_from))
+    batch = max(1, int(cfg.get("batch_size") or 1))
     if api.runtime == "torch":
         # Through the driver: Stability's script logs no loss and its demo callback renders at step 1 regardless.
         return [str(api.python), str(TRAIN_DRIVER),
@@ -303,10 +319,10 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
                 "--dropout", str(a["dropout"]), "--lr", str(lr), "--steps", str(steps["total"]),
                 "--checkpoint_every", str(steps["checkpoint_every"]), "--duration", str(window_seconds),
                 "--seed", str(int(seed)), "--logger", "csv", "--name", "khaos", "--save_dir", str(save_dir),
-                "--batch_size", str(max(1, int(cfg.get("batch_size") or 1))),
+                "--batch_size", str(batch),
                 "--demo_every", str(10 ** 9), "--num_workers", "0" if WINDOWS or opts["common_random_numbers"] else "4",
                 *(["--exclude", *opts["adapter_exclude"]] if opts["adapter_exclude"] else []),
-                *([TD.SCHEDULE_FLAG, opts["lr_schedule"]] if opts["lr_schedule"] != "constant" else []),
+                *schedule_flags(opts, schedule),
                 *([TD.CRN_FLAG] if opts["common_random_numbers"] else []),
                 *(["--lora_checkpoint", str(resume_from)] if resume_from else [])]
     mlx = api.root / MLX_SUBDIR
@@ -318,13 +334,19 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
     prompt_config = save_dir / "prompt_config.json"
     prompt_config.write_text(json.dumps({"use_tags": True, "tag_keys": ["prompt"], "hide_tag_names": True,
                                          "shuffle": False, "balance": {"tags": 100}}, indent=1) + "\n")
-    return [str(api.python), str(mlx / "scripts" / "lora_train_mlx.py"), "--dit", "medium",
+    # A recipe's list replaces the MLX trainer's own default, as Stability's --exclude does on CUDA.
+    exclude = opts["adapter_exclude"]
+    dit_exclude = [p for p in exclude if p != SECONDS_PATTERN]
+    return [str(api.python), str(TRAIN_DRIVER_MLX), "--dit", "medium",
             "--prompt-config", str(prompt_config),
             "--dit-weights", str(checkpoint_root / BASE_NPZ), "--latents-dir", str(tensor_dir / LATENTS_DIRNAME),
             "--lr", str(lr), "--max-steps", str(steps["total"]), "--rank", str(a["rank"]), "--alpha", str(a["alpha"]),
             "--adapter-type", adapter_type, "--latent-crop-length", str(crop), "--grad-checkpoint",
             "--save-dir", str(save_dir), "--name", "khaos", "--checkpoint-every", str(steps["checkpoint_every"]),
-            "--seed", str(int(seed)), "--demo-every", "0",
+            "--seed", str(int(seed)), "--demo-every", "0", "--batch-size", str(batch),
+            *(["--exclude", ",".join(dit_exclude)] if exclude else []),
+            *(["--no-conditioner-lora"] if SECONDS_PATTERN in exclude else []),
+            *schedule_flags(opts, schedule),
             # Explicit zero offsets: the trainer then counts this run's steps from zero, as the torch one does.
             *(["--lora-ckpt-path", str(resume_from), "--step-offset", "0", "--epoch-offset", "0"] if resume_from else [])]
 
@@ -404,7 +426,9 @@ class Session:
     def command(self) -> list:
         return trainer_command(self.api, self.cfg, tensor_dir=self.tensor_dir, save_dir=self.save_dir,
                                checkpoint_root=self.checkpoint_root, steps=self.run_steps(), seed=self.seed,
-                               window_seconds=self.window_seconds, resume_from=self.resume_from)
+                               window_seconds=self.window_seconds, resume_from=self.resume_from,
+                               schedule={"total": self.steps["total"],
+                                         "offset": self.steps["per_epoch"] * self.start_epoch})
 
     def _losses(self) -> list:
         if self.api.runtime == "mlx":
