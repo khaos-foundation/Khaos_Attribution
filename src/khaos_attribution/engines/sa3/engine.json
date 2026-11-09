@@ -112,8 +112,24 @@
   "rework_modes": [
     "retake",
     "repaint",
+    "extend",
     "audio2audio"
   ],
+  "rework": {
+    "note": "Noise is where sampling starts between the source (0) and pure noise (1); below 1 it also starts the schedule there, so fewer of the steps run. Touch up, Rework and Rewrite are the rooms' conservative, balanced and aggressive. An extend's context is the end of what is there; a chunk of null fills the rest of the window.",
+    "frame_samples": 4096,
+    "repaint_noise": {
+      "conservative": 0.3,
+      "balanced": 0.6,
+      "aggressive": 1.0
+    },
+    "retake_noise": 0.5,
+    "audio2audio_noise": 0.75,
+    "noise_floor": 0.01,
+    "crossfade_seconds": 0.05,
+    "extend_context_seconds": 30,
+    "extend_chunk_seconds": null
+  },
   "adapter": {
     "type": "lora",
     "filenames": [

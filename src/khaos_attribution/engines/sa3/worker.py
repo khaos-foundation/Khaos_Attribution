@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 
 
+REWORKS = ("retake", "audio2audio", "repaint", "extend")
+
+
 def render_torch(req: dict) -> dict:
     import soundfile as sf  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -25,52 +28,50 @@ def render_torch(req: dict) -> dict:
               "cfg_scale": float(req["cfg_scale"]), "apg_scale": float(req.get("apg_scale") or 1.0), "seed": seed}
     if req.get("negative_prompt"):
         kwargs["negative_prompt"] = req["negative_prompt"]
-    dropped = []
-    source = req.get("source_audio")
-    if source and req.get("mode") in ("audio2audio", "repaint"):
-        audio, sr = sf.read(str(source), dtype="float32", always_2d=True)
+    if req.get("mode") in REWORKS:
+        audio, sr = sf.read(str(req["source_audio"]), dtype="float32", always_2d=True)
         tensor = torch.from_numpy(audio.T)
-        if req["mode"] == "audio2audio":
+        level = float(req.get("noise_level") or 1.0)
+        if level < 1.0:
             kwargs["init_audio"] = (sr, tensor)
-            kwargs["init_noise_level"] = float(req.get("cover_strength") or 0.5)
-        else:
+            kwargs["init_noise_level"] = level
+        if req.get("regions"):
             kwargs["inpaint_audio"] = (sr, tensor)
-            kwargs["inpaint_mask_start_seconds"] = float(req.get("repaint_start") or 0.0)
-            end = req.get("repaint_end")
-            kwargs["inpaint_mask_end_seconds"] = float(end) if end is not None and float(end) >= 0 else float(req["seconds"])
-    elif req.get("mode") not in (None, "text2music", "retake"):
-        dropped.append(f"mode {req['mode']} without source audio")
+            kwargs["inpaint_mask_start_seconds"] = [float(s) for s, _ in req["regions"]]
+            kwargs["inpaint_mask_end_seconds"] = [float(e) for _, e in req["regions"]]
     audio = model.generate(**kwargs)
     rate = int(model.model.sample_rate)
     out = Path(req["out"])
     tmp = out.with_name(out.name + ".tmp.wav")
     sf.write(str(tmp), audio[0].T.float().cpu().numpy(), rate, subtype="PCM_16")
     tmp.replace(out)
-    return {"seed": seed, "sample_rate": rate, "dropped": dropped, "runtime": "torch"}
+    return {"seed": seed, "sample_rate": rate, "dropped": [], "runtime": "torch"}
 
 
 def render_mlx(req: dict) -> dict:
-    """Stability's MLX script, as the trial drove it; the DiT is the one the variant names."""
+    """Stability's MLX script, as the trial drove it; a rework with parts runs it under the contract's driver."""
     here = Path.cwd() / "optimized" / "mlx"
+    script = here / "scripts" / "sa3_mlx.py"
     seed = int(req["seed"]) if req.get("seed") is not None else int.from_bytes(os.urandom(4), "big") % (2 ** 31 - 1)
     dit = "medium"
-    cmd = [sys.executable, str(here / "scripts" / "sa3_mlx.py"), "--prompt", req["prompt"], "--dit", dit,
-           "--decoder", "same-l", "--seconds", str(float(req["seconds"])), "--seed", str(seed),
-           "--steps", str(int(req["steps"])), "--cfg", str(float(req["cfg_scale"])),
-           "--apg", str(float(req.get("apg_scale") or 1.0)), "--out", req["out"]]
+    args = ["--prompt", req["prompt"], "--dit", dit,
+            "--decoder", "same-l", "--seconds", str(float(req["seconds"])), "--seed", str(seed),
+            "--steps", str(int(req["steps"])), "--cfg", str(float(req["cfg_scale"])),
+            "--apg", str(float(req.get("apg_scale") or 1.0)), "--out", req["out"]]
     if req.get("negative_prompt"):
-        cmd += ["--negative-prompt", req["negative_prompt"]]
+        args += ["--negative-prompt", req["negative_prompt"]]
     if req.get("adapter"):
-        cmd += ["--lora", str(req["adapter"]), "--lora-strength", str(float(req["adapter_scale"]))]
-    dropped = []
-    if req.get("source_audio") and req.get("mode") == "audio2audio":
-        cmd += ["--init-audio", str(req["source_audio"]), "--init-noise-level", str(float(req.get("cover_strength") or 0.5))]
-    elif req.get("source_audio") and req.get("mode") == "repaint":
-        end = req.get("repaint_end")
-        cmd += ["--init-audio", str(req["source_audio"]), "--inpaint-range",
-                f"{float(req.get('repaint_start') or 0.0)}:{float(end) if end is not None and float(end) >= 0 else float(req['seconds'])}"]
-    elif req.get("mode") not in (None, "text2music", "retake"):
-        dropped.append(f"mode {req['mode']} without source audio")
+        args += ["--lora", str(req["adapter"]), "--lora-strength", str(float(req["adapter_scale"]))]
+    regions = req.get("regions") or [] if req.get("mode") in REWORKS else []
+    if req.get("mode") in REWORKS:
+        args += ["--init-audio", str(req["source_audio"]), "--init-noise-level", str(float(req.get("noise_level") or 1.0))]
+    if regions:
+        args += ["--inpaint-range", f"{min(s for s, _ in regions)},{max(e for _, e in regions)}"]
+    cmd = [sys.executable, str(script), *args]
+    if regions:
+        # The script masks one range: the driver masks every part, and the script is given their span.
+        cmd = [sys.executable, str(Path(__file__).with_name("render_driver_mlx.py")), str(script),
+               "--khaos-regions", ";".join(f"{s},{e}" for s, e in regions), *args]
     done = _run_forwarding_stop(cmd, cwd=str(here))
     if done.returncode != 0:
         tail = "\n".join(done.stderr.strip().splitlines()[-8:])
@@ -82,7 +83,7 @@ def render_mlx(req: dict) -> dict:
             rate = fh.getframerate()
     except Exception:  # noqa: BLE001
         pass
-    return {"seed": seed, "sample_rate": rate, "dropped": dropped, "runtime": "mlx"}
+    return {"seed": seed, "sample_rate": rate, "dropped": [], "runtime": "mlx"}
 
 
 def _run_forwarding_stop(cmd: list, *, cwd: str):

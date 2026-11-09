@@ -43,11 +43,12 @@ class RenderRequest:
     source_audio: Path | None = None
     repaint_start: float | None = None
     repaint_end: float | None = None
+    repaint_regions: list | None = None   # several [start, end] parts fixed in one pass, where the engine can
     repaint_mode: str | None = None
     extend_head: float | None = None
     retake_variance: float | None = None
     retake_seed: int | None = None
-    cover_strength: float | None = None
+    cover_strength: float | None = None   # how closely audio2audio follows the source: higher follows more
     adapter_scale: float | None = None
     audio_format: str | None = None   # the engine's own default (its highest fidelity) unless a caller names one
     extra: dict = field(default_factory=dict)   # engine-dialect keys a caller already resolved

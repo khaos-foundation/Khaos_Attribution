@@ -285,6 +285,33 @@
         "type": "string"
       }
     },
+    "rework": {
+      "type": "object",
+      "description": "How an engine that reworks around its own worker does it: the noise each strength starts from, the seam crossfade, and an extend's context and chunk; both rooms read it through the contract.",
+      "additionalProperties": false,
+      "required": ["frame_samples", "repaint_noise", "retake_noise", "audio2audio_noise", "noise_floor",
+                   "crossfade_seconds", "extend_context_seconds", "extend_chunk_seconds"],
+      "properties": {
+        "note": {"type": "string"},
+        "frame_samples": {"type": "integer", "minimum": 1},
+        "repaint_noise": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["conservative", "balanced", "aggressive"],
+          "properties": {
+            "conservative": {"$ref": "#/$defs/noise"},
+            "balanced": {"$ref": "#/$defs/noise"},
+            "aggressive": {"$ref": "#/$defs/noise"}
+          }
+        },
+        "retake_noise": {"$ref": "#/$defs/noise"},
+        "audio2audio_noise": {"$ref": "#/$defs/noise"},
+        "noise_floor": {"type": "number", "minimum": 0.01, "maximum": 1, "description": "Stability's MLX script refuses a start below 0.01."},
+        "crossfade_seconds": {"type": "number", "minimum": 0, "maximum": 2},
+        "extend_context_seconds": {"type": "number", "minimum": 0},
+        "extend_chunk_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      }
+    },
     "adapter": {
       "type": "object",
       "additionalProperties": false,
@@ -441,6 +468,7 @@
     }
   },
   "$defs": {
+    "noise": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
     "bound": {
       "type": "array",
       "items": {

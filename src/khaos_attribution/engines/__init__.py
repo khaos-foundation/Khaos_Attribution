@@ -101,6 +101,8 @@ def capabilities(engine_id: str) -> dict:
         # Any of tempo, key or time signature: the row the forms show them on.
         "musical": any(c.get(key) for key, _ in MUSICAL_CONDITIONING),
         "rework_modes": list(d.rework_modes),
+        # Several saved parts fixed in one render (the engine masks them all); else the rooms send one part a job.
+        "parts_in_one_pass": "repaint" in d.rework_modes and bool(d.rework),
         "bounds": {"duration": list(d.bound("duration_seconds")), "steps": list(d.bound("steps")),
                    "bpm": list(d.bound("bpm")), "takes": list(d.bound("takes"))},
         "variants": {name: {"step_clamp": d.step_clamp(name), "steps": list(d.bound("steps", name)),
