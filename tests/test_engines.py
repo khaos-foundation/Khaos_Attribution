@@ -127,6 +127,7 @@ def test_capabilities_say_what_a_form_may_offer_and_explain_each_control_it_must
                                         "describe the feel in the prompt instead.")
     assert not [k for k in sa3["absent"] if k.startswith("rework.")], "Stable Audio 3 does every rework the rooms offer"
     assert sa3["rework_modes"] == ["retake", "repaint", "extend", "audio2audio"]
+    assert sa3["parts_in_one_pass"] and not ace["parts_in_one_pass"], "ACE-Step fixes one part a render"
     assert E.capabilities("mimetic-a0")["absent"]["rework.extend"] == "mimetic-a0 cannot make a piece longer."
     assert sa3["vocal_languages"] == {} and sa3["sample_rate"] == 44100
     assert E.capabilities("mock")["absent"] == {}
