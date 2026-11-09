@@ -1,7 +1,8 @@
 """Stable Audio 3's render slot. Stability's code needs its own Python environment (its own torch, Flash Attention
 on CUDA, MLX on Apple silicon), so the renderer never imports it: it runs one worker per render in the engine's
-environment, hands it the request as JSON and reads the result back. Same seed, same bytes, on one runtime; the two
-runtimes size the latent differently. A rework is planned here (sa3/rework.py) and spliced into the source here."""
+environment, hands it the request as JSON and reads the result back. Both runtimes render an adapter on the base
+checkpoint it trained on. Same seed, same bytes, on one runtime; the two runtimes size the latent differently. A
+rework is planned here (sa3/rework.py) and spliced into the source here."""
 
 from __future__ import annotations
 

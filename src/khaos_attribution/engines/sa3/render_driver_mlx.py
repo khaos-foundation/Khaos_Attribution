@@ -1,7 +1,8 @@
-"""Stability's MLX render script, run inside the engine's MLX environment with what its command line lacks: several
-parts masked in one pass, and the source mixed into the starting noise when the parts start below pure noise, as
-the torch package does. Stability's code is not changed: the sampler and the DiT call the script imports are
-wrapped before it runs, and the script is given the span of the parts as its one inpaint range."""
+"""Stability's MLX render script, run inside the engine's MLX environment with what its command line lacks: the
+base checkpoint an adapter trained on, integrated with Euler as Stability's own MLX training demos integrate it;
+several parts masked in one pass; and the source mixed into the starting noise when the parts start below pure
+noise, as the torch package does. Stability's code is not changed: the weights lookup, the sampler and the DiT call
+the script imports are wrapped before it runs, and the script is given the span of the parts as its one range."""
 
 from __future__ import annotations
 
@@ -18,17 +19,20 @@ SAMPLES_PER_LATENT = 4096
 
 
 def split_khaos_flags(argv: list) -> tuple:
-    """``(script_args, regions)``: the script's own arguments, and the parts as ``[(start, end), ...]`` seconds."""
-    args, regions = [], []
+    """``(script_args, regions, base)``: the script's own arguments, the parts as ``[(start, end), ...]`` seconds,
+    and whether to render on the base checkpoint."""
+    args, regions, base = [], [], False
     items = iter(argv)
     for item in items:
-        if item == "--khaos-regions":
+        if item == "--khaos-base":
+            base = True
+        elif item == "--khaos-regions":
             for part in next(items).split(";"):
                 start, end = part.split(",")
                 regions.append((float(start), float(end)))
         else:
             args.append(item)
-    return args, regions
+    return args, regions, base
 
 
 def flag_value(args: list, flag: str, cast, default):
@@ -44,6 +48,35 @@ def latent_ranges(regions: list, frames: int, rate: int = SAMPLE_RATE, per_laten
         if s0 < s1:
             out.append((s0, s1))
     return out
+
+
+def base_checkpoint(ensure_local, is_present, distilled: str, base: str) -> tuple:
+    """The script's weights lookups with its distilled DiT file answered by the base one."""
+    swap = lambda rel: base if str(rel) == distilled else rel  # noqa: E731
+    return (lambda rel, *a, **kw: ensure_local(swap(rel), *a, **kw)), (lambda rel, *a, **kw: is_present(swap(rel), *a, **kw))
+
+
+def euler_sampler(mx):
+    """Euler integration of the base model's velocity, x += dt * v, as Stability's MLX demos run the base; with the
+    script's sampler signature, so its paste-back and progress hooks hold."""
+    def sample(model_fn, x, sigmas, seed=0, paste_back=None, on_step=None, before_step=None):
+        steps = sigmas.shape[0] - 1
+        for i in range(steps):
+            t_curr, t_next = sigmas[i], sigmas[i + 1]
+            if before_step is not None:
+                before_step(i)
+            v = model_fn(x, t_curr * mx.ones((x.shape[0],), dtype=x.dtype))
+            x = x + (t_next - t_curr).astype(x.dtype) * v
+            mx.eval(x)
+            if on_step is not None:
+                on_step(i + 1, steps)
+        if paste_back is not None:
+            init, mask = paste_back
+            keep = mask.astype(x.dtype)
+            x = init.astype(x.dtype) * keep + x * (1.0 - keep)
+            mx.eval(x)
+        return x
+    return sample
 
 
 def masked_sampler(sample, regions: list, sigma_max: float, state: dict, mx, np, rate: int = SAMPLE_RATE,
@@ -78,9 +111,7 @@ def masked_call(call, state: dict, mx):
 
 def main() -> int:
     script = Path(sys.argv[1]).resolve()
-    args, regions = split_khaos_flags(sys.argv[2:])
-    if not regions:
-        raise SystemExit("the driver is for a render with parts; run the script itself otherwise")
+    args, regions, base = split_khaos_flags(sys.argv[2:])
     # This file's folder holds the contract's own modules; Stability's must not meet them.
     sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != HERE]
     sys.path[:0] = [str(script.parent.parent), str(script.parent)]
@@ -89,12 +120,20 @@ def main() -> int:
     state: dict = {}
     script_module = importlib.import_module("sa3_mlx")
     pipeline = importlib.import_module("models.defs.sa3_pipeline")
-    pipeline.sample_flow_pingpong = masked_sampler(pipeline.sample_flow_pingpong, regions,
-                                                   flag_value(args, "--init-noise-level", float, 1.0), state, mx, np,
-                                                   script_module.SAMPLE_RATE, script_module.SAMPLES_PER_LATENT)
-    loader = script_module.DIT_CHOICES[flag_value(args, "--dit", str, "medium")]["loader"]
-    dit_cls = importlib.import_module(loader).DiT
-    dit_cls.__call__ = masked_call(dit_cls.__call__, state, mx)
+    dit = flag_value(args, "--dit", str, "medium")
+    if base:
+        # The trainer's own name for the base file of a DiT family; it loads through the same loader.
+        weights = importlib.import_module("weights")
+        weights.ensure_local, weights.is_present = base_checkpoint(
+            weights.ensure_local, weights.is_present, script_module.DIT_CHOICES[dit]["ckpt"],
+            f"models/mlx/dit_{dit}-base_f16.npz")
+        pipeline.sample_flow_pingpong = euler_sampler(mx)
+    if regions:
+        pipeline.sample_flow_pingpong = masked_sampler(pipeline.sample_flow_pingpong, regions,
+                                                       flag_value(args, "--init-noise-level", float, 1.0), state, mx,
+                                                       np, script_module.SAMPLE_RATE, script_module.SAMPLES_PER_LATENT)
+        dit_cls = importlib.import_module(script_module.DIT_CHOICES[dit]["loader"]).DiT
+        dit_cls.__call__ = masked_call(dit_cls.__call__, state, mx)
     sys.argv = [str(script), *args]
     runpy.run_path(str(script), run_name="__main__")
     return 0
