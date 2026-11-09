@@ -48,8 +48,13 @@ def render_torch(req: dict) -> dict:
     return {"seed": seed, "sample_rate": rate, "dropped": [], "runtime": "torch"}
 
 
+# The variant config whose DiT is the base checkpoint adapters train on; the MLX script ships only the distilled one.
+BASE_CONFIG = "medium-base"
+
+
 def render_mlx(req: dict) -> dict:
-    """Stability's MLX script, as the trial drove it; a rework with parts runs it under the contract's driver."""
+    """Stability's MLX script under the contract's driver: on the base checkpoint when the variant names it, with
+    every part of a rework masked in one pass."""
     here = Path.cwd() / "optimized" / "mlx"
     script = here / "scripts" / "sa3_mlx.py"
     seed = int(req["seed"]) if req.get("seed") is not None else int.from_bytes(os.urandom(4), "big") % (2 ** 31 - 1)
@@ -67,11 +72,10 @@ def render_mlx(req: dict) -> dict:
         args += ["--init-audio", str(req["source_audio"]), "--init-noise-level", str(float(req.get("noise_level") or 1.0))]
     if regions:
         args += ["--inpaint-range", f"{min(s for s, _ in regions)},{max(e for _, e in regions)}"]
-    cmd = [sys.executable, str(script), *args]
-    if regions:
-        # The script masks one range: the driver masks every part, and the script is given their span.
-        cmd = [sys.executable, str(Path(__file__).with_name("render_driver_mlx.py")), str(script),
-               "--khaos-regions", ";".join(f"{s},{e}" for s, e in regions), *args]
+    # The script masks one range: the driver masks every part, and the script is given their span.
+    cmd = [sys.executable, str(Path(__file__).with_name("render_driver_mlx.py")), str(script),
+           *(["--khaos-base"] if req.get("model") == BASE_CONFIG else []),
+           *(["--khaos-regions", ";".join(f"{s},{e}" for s, e in regions)] if regions else []), *args]
     done = _run_forwarding_stop(cmd, cwd=str(here))
     if done.returncode != 0:
         tail = "\n".join(done.stderr.strip().splitlines()[-8:])

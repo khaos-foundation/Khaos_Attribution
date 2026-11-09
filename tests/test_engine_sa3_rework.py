@@ -223,30 +223,38 @@ def test_a_rework_without_its_source_or_too_long_to_take_whole_is_refused(engine
 def test_the_mlx_worker_runs_a_fix_under_the_driver_and_a_take_through_the_script(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(WK, "_run_forwarding_stop", lambda cmd, cwd: seen.append(cmd) or type("D", (), {"returncode": 0})())
-    base = {"prompt": "p", "seconds": 30.0, "seed": 1, "steps": 50, "cfg_scale": 7.0, "out": str(tmp_path / "o.wav")}
+    base = {"prompt": "p", "seconds": 30.0, "seed": 1, "steps": 50, "cfg_scale": 7.0, "out": str(tmp_path / "o.wav"),
+            "model": "medium-base"}
     WK.render_mlx({**base, "mode": "repaint", "source_audio": "s.wav", "noise_level": 0.6,
                    "regions": [[8.0, 10.0], [20.0, 21.0]]})
     WK.render_mlx({**base, "mode": "retake", "source_audio": "s.wav", "noise_level": 0.3, "regions": []})
     WK.render_mlx({**base, "mode": "text2music"})
-    fix, take, fresh = seen
-    assert fix[1].endswith("render_driver_mlx.py") and fix[fix.index("--khaos-regions") + 1] == "8.0,10.0;20.0,21.0"
+    WK.render_mlx({**base, "model": "medium"})
+    fix, take, fresh, distilled = seen
+    assert all(c[1].endswith("render_driver_mlx.py") and c[2].endswith("sa3_mlx.py") for c in seen)
+    assert fix[fix.index("--khaos-regions") + 1] == "8.0,10.0;20.0,21.0"
     assert fix[fix.index("--inpaint-range") + 1] == "8.0,21.0", "the script's own separator, over the parts' span"
     assert fix[fix.index("--init-noise-level") + 1] == "0.6"
-    assert take[1].endswith("sa3_mlx.py") and "--inpaint-range" not in take and take[take.index("--init-noise-level") + 1] == "0.3"
+    assert "--inpaint-range" not in take and take[take.index("--init-noise-level") + 1] == "0.3"
     assert "--init-audio" not in fresh
+    assert all("--khaos-base" in c for c in (fix, take, fresh)), "an adapter renders on the base it trained on"
+    assert "--khaos-base" not in distilled
 
 
 class _NumpyMx:
     """Enough of mlx.core, in numpy, to drive the driver's wrappers."""
     float32 = np.float32
     array = staticmethod(np.asarray)
+    ones = staticmethod(lambda shape, dtype=None: np.ones(shape, dtype=dtype))
+    eval = staticmethod(lambda *a: None)
     concatenate = staticmethod(lambda xs, axis=0: np.concatenate(xs, axis=axis))
     broadcast_to = staticmethod(np.broadcast_to)
 
 
 def test_the_mlx_driver_masks_every_part_and_mixes_the_source_into_the_start():
-    args, regions = M.split_khaos_flags(["--prompt", "p", "--khaos-regions", "0.0,0.2786;0.9288,1.0", "--seconds", "1"])
-    assert args == ["--prompt", "p", "--seconds", "1"] and regions == [(0.0, 0.2786), (0.9288, 1.0)]
+    args, regions, base = M.split_khaos_flags(["--prompt", "p", "--khaos-regions", "0.0,0.2786;0.9288,1.0", "--khaos-base",
+                                                "--seconds", "1"])
+    assert args == ["--prompt", "p", "--seconds", "1"] and regions == [(0.0, 0.2786), (0.9288, 1.0)] and base
     assert M.latent_ranges(regions, 11) == [(0, 3), (10, 11)]
     got, state = {}, {}
     sampler = M.masked_sampler(lambda fn, x, s, **kw: got.update(x=x, **kw), regions, 0.6, state, _NumpyMx, np)
@@ -315,3 +323,20 @@ def test_the_noise_floor_cannot_go_below_what_the_mlx_script_accepts():
     doc["rework"]["noise_floor"] = 0.001
     with pytest.raises(DescriptorError, match="noise_floor|0.001"):
         validate_descriptor(doc)
+
+
+def test_the_mlx_driver_renders_on_the_base_checkpoint_with_euler_and_keeps_the_scripts_hooks():
+    """The distilled file the script names is answered by the base one; the base is integrated x += dt * v."""
+    asked = []
+    ensure, present = M.base_checkpoint(lambda rel: asked.append(rel) or rel, lambda rel: rel,
+                                        "models/mlx/dit_medium_f16.npz", "models/mlx/dit_medium-base_f16.npz")
+    assert ensure("models/mlx/dit_medium_f16.npz") == "models/mlx/dit_medium-base_f16.npz"
+    assert present("models/mlx/dit_medium_f16.npz") == "models/mlx/dit_medium-base_f16.npz"
+    assert ensure("models/mlx/t5gemma_f16.npz") == "models/mlx/t5gemma_f16.npz", "nothing else is redirected"
+    sample = M.euler_sampler(_NumpyMx)
+    steps, seen = [], []
+    x = sample(lambda x, t: np.full_like(x, 2.0), np.zeros((1, 2, 4), np.float32), np.array([1.0, 0.5, 0.0], np.float32),
+               on_step=lambda i, n: steps.append((i, n)), before_step=seen.append,
+               paste_back=(np.full((1, 2, 4), 9.0, np.float32), np.array([[[1, 0, 0, 1]]], np.float32)))
+    assert np.allclose(x[0, 0], [9, -2, -2, 9]), "two Euler steps of dt -0.5 at v 2, then the kept frames pasted back"
+    assert steps == [(1, 2), (2, 2)] and seen == [0, 1]
