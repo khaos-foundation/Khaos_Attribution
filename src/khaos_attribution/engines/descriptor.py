@@ -146,6 +146,12 @@ class Descriptor:
         return tuple(self.doc.get("rework_modes") or ())
 
     @property
+    def rework(self) -> dict:
+        """How the engine reworks around its own worker (noise per strength, seam, extend chunks); empty when its
+        engine does that itself."""
+        return copy.deepcopy(dict(self.doc.get("rework") or {}))
+
+    @property
     def weights(self) -> list:
         return list(self.doc["weights"])
 
