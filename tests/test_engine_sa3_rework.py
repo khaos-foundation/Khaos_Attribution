@@ -175,6 +175,7 @@ def test_another_take_noises_the_whole_source_with_a_new_seed_per_candidate(engi
     first, second = engine.requests()
     assert first["noise_level"] == 0.3 and first["regions"] == [] and first["source_audio"] == str(source.resolve())
     assert a.seed != b.seed and a.params["khaos_seed"] == a.seed, "the source's seed is not the candidate's"
+    assert a.params["duration"] == 30, "the record keeps the piece's length, not the worker's headroom"
     c = engine.generate(RenderRequest(prompt="p", duration_seconds=30, mode="retake", source_audio=source,
                                       retake_seed=42), None, tmp_path / "c.wav")
     assert c.seed == 42 and engine.requests()[-1]["noise_level"] == 0.5

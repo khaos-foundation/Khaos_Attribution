@@ -225,6 +225,7 @@ class Renderer:
                                       source_audio=str(self._readable(Path(req.source_audio).resolve(), work)),
                                       noise_level=level)
         reply = self._render(request, on_progress, should_stop, 0, 1)
+        request["seconds"] = n / sr
         facts = {"seed": seed, "mode": mode, "noise_level": level, "source_duration": n / sr,
                  **({"retake_variance": req.retake_variance} if mode == "retake" else {"cover_strength": req.cover_strength})}
         return self._result(req, request, reply, out, facts)
