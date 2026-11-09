@@ -277,3 +277,41 @@ def test_a_short_chunk_the_worker_renders_long_is_trimmed_to_its_plan(engine, tm
                           tmp_path / "x.wav")
     assert engine.requests()[0]["seconds"] == 5, "the worker is held to the engine's floor"
     assert sf.info(str(out.audio_path)).frames == 3 * SR, "what comes back is cut to what was asked"
+
+
+def test_a_piece_of_the_full_window_can_be_taken_again_and_fixed_at_both_ends(engine, tmp_path):
+    full = tmp_path / "full.wav"
+    sf.write(str(full), tone(120.0), SR, subtype="PCM_16")
+    engine.generate(RenderRequest(prompt="p", duration_seconds=120, mode="retake", source_audio=full), None,
+                    tmp_path / "t.wav")
+    out = engine.generate(RenderRequest(prompt="p", duration_seconds=120, mode="repaint", source_audio=full,
+                                        repaint_regions=[[0.0, 5.0], [115.0, 120.0]]), None, tmp_path / "f.wav")
+    assert [r["seconds"] for r in engine.requests()] == [120, 120], "the worker is held at the bound, not past it"
+    assert sf.info(str(out.audio_path)).frames == 120 * SR and out.params["window"] == [0.0, 120.0]
+
+
+def test_the_worker_reads_a_16_bit_copy_and_the_output_keeps_the_sources_own_format(engine, tmp_path):
+    deep = tmp_path / "deep.wav"
+    sf.write(str(deep), tone(30.0), SR, subtype="PCM_24")
+    out = engine.generate(RenderRequest(prompt="p", duration_seconds=30, mode="repaint", source_audio=deep,
+                                        repaint_start=8.0, repaint_end=10.0), None, tmp_path / "f.wav")
+    (w,) = engine.requests()
+    assert w["source_audio"] != str(deep.resolve()), "both runtimes read 16-bit WAV natively"
+    assert sf.info(str(out.audio_path)).subtype == "PCM_24"
+    got, _ = sf.read(str(out.audio_path), dtype="int32", always_2d=True)
+    orig, _ = sf.read(str(deep), dtype="int32", always_2d=True)
+    weights = RW.weights([(int(round(s * SR)), int(round(e * SR))) for s, e in out.params["regions"]], len(orig), 2205)
+    assert np.array_equal(got[weights == 0], orig[weights == 0])
+
+
+def test_a_head_extend_stops_at_the_length_the_room_asked_for(engine, source, tmp_path):
+    out = engine.generate(RenderRequest(prompt="p", duration_seconds=35, mode="extend", source_audio=source,
+                                        extend_head=10.0), None, tmp_path / "h.wav")
+    assert sf.info(str(out.audio_path)).frames == 35 * SR and out.params["added_seconds"] == 5
+
+
+def test_the_noise_floor_cannot_go_below_what_the_mlx_script_accepts():
+    doc = json.loads(resources.files("khaos_attribution.engines.sa3").joinpath("engine.json").read_text())
+    doc["rework"]["noise_floor"] = 0.001
+    with pytest.raises(DescriptorError, match="noise_floor|0.001"):
+        validate_descriptor(doc)

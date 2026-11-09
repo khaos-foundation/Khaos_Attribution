@@ -306,7 +306,7 @@
         },
         "retake_noise": {"$ref": "#/$defs/noise"},
         "audio2audio_noise": {"$ref": "#/$defs/noise"},
-        "noise_floor": {"$ref": "#/$defs/noise"},
+        "noise_floor": {"type": "number", "minimum": 0.01, "maximum": 1, "description": "Stability's MLX script refuses a start below 0.01."},
         "crossfade_seconds": {"type": "number", "minimum": 0, "maximum": 2},
         "extend_context_seconds": {"type": "number", "minimum": 0},
         "extend_chunk_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0}

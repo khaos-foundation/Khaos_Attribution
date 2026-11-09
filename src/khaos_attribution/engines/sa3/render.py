@@ -178,10 +178,27 @@ class Renderer:
 
     # ── the reworks ──────────────────────────────────────────────────────────
     def _limits(self) -> tuple:
-        """``(sample_rate, frame, window)`` in samples; a worker's seconds stay a quarter sample under the window."""
+        """``(sample_rate, frame, window)`` in samples; at the window the worker's seconds clamp to the bound itself."""
         sr = DESCRIPTOR.sample_rate
         frame = int(DESCRIPTOR.rework["frame_samples"])
-        return sr, frame, int(DESCRIPTOR.bound("duration_seconds")[1] * sr) - 1
+        return sr, frame, int(DESCRIPTOR.bound("duration_seconds")[1] * sr)
+
+    def _readable(self, path: Path, work: Path) -> Path:
+        """The source as both runtimes read it natively, 16-bit WAV at the engine's rate: the file itself when it
+        already is, else a copy; another rate is left to the MLX port's ffmpeg, which must then be installed."""
+        sf = RW._soundfile()
+        info = sf.info(str(path))
+        if info.format == "WAV" and info.subtype == WORKER_INPUT and info.samplerate == DESCRIPTOR.sample_rate:
+            return path
+        if info.samplerate == DESCRIPTOR.sample_rate:
+            audio, _ = sf.read(str(path), dtype="float32", always_2d=True)
+            copy = work / "source.wav"
+            RW.write_audio(copy, audio, info.samplerate, WORKER_INPUT)
+            return copy
+        if self.runtime == "mlx" and shutil.which("ffmpeg") is None:
+            raise RenderFailed(f"the source is at {info.samplerate} Hz; on this Mac Stable Audio 3 reads another "
+                               f"rate through ffmpeg, which is not installed (brew install ffmpeg)")
+        return path
 
     @staticmethod
     def _seconds(samples: int, sr: int) -> float:
@@ -199,12 +216,13 @@ class Renderer:
         n = int(round(info.frames * sr / info.samplerate))
         if n > window:
             raise RenderFailed(f"this piece is {n / sr:.0f} s; Stable Audio 3 takes a whole piece in at most "
-                               f"{(window + 1) / sr:.0f} s, so it can fix a part of it or make it longer but not "
+                               f"{window / sr:.0f} s, so it can fix a part of it or make it longer but not "
                                f"{'take it again' if mode == 'retake' else 'take it somewhere new'}")
         level = RW.noise_level(mode, req, DESCRIPTOR.rework)
         seed = self._seed(req.retake_seed if mode == "retake" else req.seed)
         request = self.worker_request(req, out, seconds=self._seconds(n, sr), mode=mode, seed=seed,
-                                      source_audio=str(Path(req.source_audio).resolve()), noise_level=level)
+                                      source_audio=str(self._readable(Path(req.source_audio).resolve(), work)),
+                                      noise_level=level)
         reply = self._render(request, on_progress, should_stop, 0, 1)
         facts = {"seed": seed, "mode": mode, "noise_level": level, "source_duration": n / sr,
                  **({"retake_variance": req.retake_variance} if mode == "retake" else {"cover_strength": req.cover_strength})}
@@ -222,7 +240,7 @@ class Renderer:
         regions = RW.plan_regions(asked, n, sr, frame)
         crossfade = int(round(float(table["crossfade_seconds"]) * sr))
         offset, length = RW.repaint_window(regions, n, window, frame, crossfade, sr)
-        given = Path(req.source_audio).resolve()
+        given = self._readable(Path(req.source_audio).resolve(), work)
         if offset or length < n:
             given = work / "window.wav"
             RW.write_audio(given, source[offset:offset + length], sr, WORKER_INPUT)
@@ -254,7 +272,13 @@ class Renderer:
             raise RenderFailed(f"the source is at {src_sr} Hz; a Stable Audio 3 extend joins at {sr} Hz")
         n = len(current)
         head = bool(req.extend_head and req.extend_head > 0)
-        add = int(round(float(req.extend_head) * sr)) if head else int(round(float(req.duration_seconds) * sr)) - n
+        asked = int(round(float(req.duration_seconds) * sr)) - n
+        if head:
+            # A head names its own length; the room's requested total still caps it.
+            wanted = int(round(float(req.extend_head) * sr))
+            add = min(wanted, asked) if asked > 0 else wanted
+        else:
+            add = asked
         if add <= 0:
             raise RenderFailed("nothing to add: the requested length is not longer than the piece")
         context = int(round(float(table["extend_context_seconds"]) * sr))

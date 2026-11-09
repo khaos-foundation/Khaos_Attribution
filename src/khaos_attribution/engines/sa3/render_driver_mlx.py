@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# The script's own constants, read from it when the driver runs; these are what it holds at the pin.
 SAMPLE_RATE = 44100
 SAMPLES_PER_LATENT = 4096
 
@@ -34,25 +35,26 @@ def flag_value(args: list, flag: str, cast, default):
     return cast(args[args.index(flag) + 1]) if flag in args else default
 
 
-def latent_ranges(regions: list, frames: int) -> list:
+def latent_ranges(regions: list, frames: int, rate: int = SAMPLE_RATE, per_latent: int = SAMPLES_PER_LATENT) -> list:
     """Each part as latent frames: the start rounded as the script rounds, the end up to cover a partial frame."""
     out = []
     for start, end in regions:
-        s0 = max(0, int(round(start * SAMPLE_RATE / SAMPLES_PER_LATENT)))
-        s1 = min(frames, math.ceil(end * SAMPLE_RATE / SAMPLES_PER_LATENT - 1e-6))
+        s0 = max(0, int(round(start * rate / per_latent)))
+        s1 = min(frames, math.ceil(end * rate / per_latent - 1e-6))
         if s0 < s1:
             out.append((s0, s1))
     return out
 
 
-def masked_sampler(sample, regions: list, sigma_max: float, state: dict, mx, np):
+def masked_sampler(sample, regions: list, sigma_max: float, state: dict, mx, np, rate: int = SAMPLE_RATE,
+                   per_latent: int = SAMPLES_PER_LATENT):
     """The script's sampler with every part masked and, below pure noise, the source mixed into the start."""
     def sampler(model_fn, x, sigmas, seed=0, paste_back=None, on_step=None, before_step=None):
         if paste_back is not None:
             init, _ = paste_back
             frames = init.shape[-1]
             keep = np.ones((1, 1, frames), dtype=np.float32)
-            for s0, s1 in latent_ranges(regions, frames):
+            for s0, s1 in latent_ranges(regions, frames, rate, per_latent):
                 keep[:, :, s0:s1] = 0.0
             mask = mx.array(keep)
             masked = init.astype(mx.float32) * mask
@@ -85,10 +87,12 @@ def main() -> int:
     import mlx.core as mx  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
     state: dict = {}
+    script_module = importlib.import_module("sa3_mlx")
     pipeline = importlib.import_module("models.defs.sa3_pipeline")
     pipeline.sample_flow_pingpong = masked_sampler(pipeline.sample_flow_pingpong, regions,
-                                                   flag_value(args, "--init-noise-level", float, 1.0), state, mx, np)
-    loader = importlib.import_module("sa3_mlx").DIT_CHOICES[flag_value(args, "--dit", str, "medium")]["loader"]
+                                                   flag_value(args, "--init-noise-level", float, 1.0), state, mx, np,
+                                                   script_module.SAMPLE_RATE, script_module.SAMPLES_PER_LATENT)
+    loader = script_module.DIT_CHOICES[flag_value(args, "--dit", str, "medium")]["loader"]
     dit_cls = importlib.import_module(loader).DiT
     dit_cls.__call__ = masked_call(dit_cls.__call__, state, mx)
     sys.argv = [str(script), *args]
