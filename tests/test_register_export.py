@@ -301,6 +301,30 @@ def test_an_export_killed_at_any_write_leaves_copies_that_verify(tmp_path, clock
     assert json.loads((public / "log" / "bodies.json").read_text())["pending_from"] not in (None, 0), "some bodies became public"
 
 
+def _withheld_inside_the_delay(tmp_path, clock) -> tuple:
+    """A body still inside the delay on the public copy, withheld before the delay passes it."""
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    for i in range(3):
+        _publish(store, f"model-{i}")
+    clock.pass_(24 * 30)
+    assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+    late = store.log.admit_leaf_of(_publish(store, "late"))
+    clock.pass_(24 * 6.5)
+    assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+    assert json.loads((public / "log" / "bodies.json").read_text())["bodies"][store.log.leaf(late)["idx"]] is None
+    clock.pass_(2)
+    store.log_withhold(late, "a private name")
+    return store, mirror, public
+
+
+def test_a_crash_anywhere_as_the_delay_passes_a_body_withheld_before_it_was_public(tmp_path, clock, monkeypatch):
+    """Exports a day apart: until the new head is filed, the body stays explained by the delay the old head knew."""
+    store, mirror, public = _withheld_inside_the_delay(tmp_path, clock)
+    clock.pass_(24)
+    assert _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) >= 8
+
+
 def test_a_publish_is_registered_and_mirrored_off_the_event_loop(tmp_path):
     import asyncio
 
