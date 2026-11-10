@@ -21,6 +21,7 @@ from khaos_attribution.engines.render import RenderFailed
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3 import train_driver as TD
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, python_for, runtime_for
+from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
 from khaos_attribution.engines import process_trainer as PT
 from khaos_attribution.engines.train import TrainingUnavailable, TrainingUpdate
@@ -228,8 +229,7 @@ def pre_encode(api: TrainingApi, clips_dir: Path, checkpoint_root: Path) -> dict
 
 
 def _env(api: TrainingApi) -> dict:
-    return {**os.environ, "PYTHONPATH": str(api.root), "SA3_ROOT": str(api.root), "WANDB_MODE": "disabled",
-            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1")}
+    return W.engine_env(api.root, SA3_ROOT=str(api.root))
 
 
 # ── the session ──────────────────────────────────────────────────────────────

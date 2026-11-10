@@ -43,8 +43,7 @@ def python_for(root: Path) -> Path:
 
 
 def worker_env(root: Path) -> dict:
-    return {**os.environ, "PYTHONPATH": str(root), "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
-            "WANDB_MODE": "disabled", "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
+    return W.engine_env(root, PYTORCH_ENABLE_MPS_FALLBACK="1")
 
 
 class Renderer:
@@ -131,7 +130,7 @@ class Renderer:
                             scale_applied_via="lora_strength" if self.adapter else None, dropped=list(reply.get("dropped") or []))
 
 
-def run_worker(root: Path, request: dict, *, should_stop=None, timeout: float | None = None) -> dict:
+def run_worker(root: Path, request: dict, *, should_stop=None, timeout=W.DEFAULT) -> dict:
     from khaos_attribution.engines import contract_guard  # noqa: PLC0415
     python = python_for(root)
     contract_guard.require(python, engine=DESCRIPTOR.name, engine_id=DESCRIPTOR.id, error=RenderFailed)
