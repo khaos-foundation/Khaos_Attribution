@@ -118,9 +118,9 @@ def log_places(cfg: dict) -> tuple:
     return mirror, public, delay, witnesses
 
 
-def export_all(cfg: dict, log, key: R.SigningKey, dev: bool) -> bool:
+def export_all(cfg: dict, log, key: R.SigningKey, dev: bool, full: bool = False) -> bool:
     mirror, public, delay, _ = log_places(cfg)
-    return export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay)
+    return export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay, full=full)
 
 
 def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
@@ -322,16 +322,19 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(422, "; ".join(problems))
         if record["model"]["machine_key_id"] != key_id:
             raise HTTPException(422, "the record names another machine as its maker")
-        # A countersignature this register made, presented again after a recovery, gets its reserved serial back.
-        issuer = store.register_key_pem(presented.get("register_key_id")) if isinstance(presented, dict) else None
-        if not (issuer and R.countersignature_valid(presented, signed["record_sha256"], issuer)):
-            presented = None
-        serial, counter, already = store.register(signed, key_id, machine["account_id"],
-                                                  lambda n, at: R.countersign(signed, n, key, at or now_utc()), presented)
-        if not already:
-            mirror_quietly(serial)
-        return {"serial": serial, "countersignature": counter, "already": already,
-                "page": f"{cfg['public_url']}/models/{serial}"}
+
+        def work():
+            # A countersignature this register made, presented again after a recovery, gets its reserved serial back.
+            issuer = store.register_key_pem(presented.get("register_key_id")) if isinstance(presented, dict) else None
+            mine = presented if issuer and R.countersignature_valid(presented, signed["record_sha256"], issuer) else None
+            serial, counter, already = store.register(signed, key_id, machine["account_id"],
+                                                      lambda n, at: R.countersign(signed, n, key, at or now_utc()), mine)
+            if not already:
+                mirror_quietly(serial)
+            return {"serial": serial, "countersignature": counter, "already": already,
+                    "page": f"{cfg['public_url']}/models/{serial}"}
+        # The database write and the mirror's files, off the event loop: reads stay answered while a model is registered.
+        return await run_in_threadpool(work)
 
     def serial_of(body: dict) -> int:
         try:
