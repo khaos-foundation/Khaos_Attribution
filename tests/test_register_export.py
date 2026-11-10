@@ -325,6 +325,38 @@ def test_a_crash_anywhere_as_the_delay_passes_a_body_withheld_before_it_was_publ
     assert _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) >= 8
 
 
+def test_whatever_a_crashed_export_left_log_export_makes_the_public_copy_verify(tmp_path, clock, monkeypatch):
+    """The corner the write order cannot close: exports more than two days apart, killed between the new head and the
+    last bodies file, leave the public copy failing; log-export's whole export, run after a crash, repairs every one."""
+    store, mirror, public = _withheld_inside_the_delay(tmp_path, clock)
+    clock.pass_(24 * 3)
+    with store._tx():
+        store.log.heartbeat_locked()
+    clock.pass_(1)
+    keep = tmp_path / "keep-corner"
+    for name, where in (("mirror", mirror), ("public", public)):
+        shutil.copytree(where, keep / name)
+    record = [tuple(r) for r in store.db.execute("SELECT * FROM log_exports").fetchall()]
+    pem, failing, k = store.log.signer.public_pem(), [], 0
+    while True:
+        for name, where in (("mirror", mirror), ("public", public)):
+            shutil.rmtree(where)
+            shutil.copytree(keep / name, where)
+        store.db.execute("DELETE FROM log_exports")
+        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?)", record)
+        finished = _export_dying_before(store, mirror, public, clock, monkeypatch, k)
+        try:
+            _every_leaf_proves(public, pem)
+        except T.LogError:
+            failing.append(k)
+            assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now, full=True)
+            assert _every_leaf_proves(public, pem) == _every_leaf_proves(mirror, pem) == store.log.size()
+        if finished:
+            break
+        k += 1
+    assert failing, "the corner is reached"
+
+
 def test_a_lost_leaf_the_old_head_knew_as_held_back_is_still_owed_the_delay(tmp_path):
     """A leaf a recovery put back without its body: nothing to keep, but the old head's delay still explains it."""
     root = tmp_path / "log"

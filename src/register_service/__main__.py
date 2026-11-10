@@ -37,8 +37,10 @@ def main(argv=None) -> int:
     w = sub.add_parser("log-withhold"); w.add_argument("leaf_hash"); w.add_argument("reason")
     sub.add_parser("log-stamp")
     sub.add_parser("log-upgrade")
-    sub.add_parser("log-recover")
-    sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again")
+    sub.add_parser("log-recover", help="put back entries the published log holds and this database lost, then write the "
+                                       "export whole; after a crashed export, run log-export")
+    sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again; after a "
+                                      "crashed export, run this")
     a = p.parse_args(argv)
     cfg = settings()
     if a.cmd == "make-key":
