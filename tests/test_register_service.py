@@ -352,6 +352,23 @@ def test_the_model_page_states_what_trained_the_model_and_how_it_was_declared(re
     assert any("declaration" in p for p in problems) and any("data_kinds" in p for p in problems)
 
 
+def test_the_register_refuses_a_signed_record_holding_a_number_that_is_not_finite(register):
+    """A client that signs without the contract's check is still refused at the door, in the check's own words."""
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    rec = _record()
+    rec["model"]["machine_key_id"] = key.key_id
+    rec["model"]["watermark_payload"] = derive_payload(key.key_id, rec["model"]["run_id"])
+    rec["training_set"]["tracks"][0]["writers"][0]["share"] = float("nan")
+    body = R.canonical_bytes(rec)
+    signed = {"signed_version": R.SIGNED_VERSION, "record": rec, "record_sha256": R.sha256_hex(body),
+              "machine_key_id": key.key_id, "machine_signature": key.sign(body)}
+    with pytest.raises(R.RegisterError) as e:
+        client.publish(signed)
+    assert e.value.status == 422 and "share is not finite" in str(e.value)
+    assert store.count() == 0
+
+
 def test_the_bucket_is_a_column_filled_for_older_records_and_withdrawn_ones_are_not_served(register, tmp_path):
     """A bucket lookup reads an indexed column; a file from before the column is filled on open; a withdrawn model
     is neither in its bucket nor accepted as serving."""
