@@ -2,7 +2,13 @@
 pages, counts are counted by the database, the ledger's check reads only what is new, and two writes at once never
 leave a torn ledger in the mirror."""
 import json
+import os
+import shutil
+import subprocess
+import sys
 import threading
+import time
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +16,7 @@ pytest.importorskip("cryptography")
 pytest.importorskip("fastapi")
 
 import register_service.store as S  # noqa: E402
+import register_service.translog as RT  # noqa: E402
 from register_service import app as A  # noqa: E402
 from tests.test_register_service import _machine, _signed, register  # noqa: E402,F401
 
@@ -192,3 +199,134 @@ def test_two_writes_at_once_leave_a_whole_ledger_in_the_mirror(register):
         go.set()
         del store.ledger, store.register
     assert _lines(ledger_file) == real_ledger(), "a row was filed twice, or not at all"
+
+
+def _ledger_one_row_behind(tmp_path) -> tuple:
+    store = S.Store(tmp_path / "data" / "register.sqlite3")
+    for i in range(3):
+        store.create_account(f"account-{i}")
+    path = tmp_path / "data" / "mirror" / "ledger.jsonl"
+    A.write_ledger(store, path, whole=True)
+    store.create_account("account-new")
+    return store, path
+
+
+def _append_with_a_whole_write_landing_after_its_read(store, path, start_whole) -> None:
+    """The service's append, with the operator's whole write started once the append has read what to add."""
+    real = store.ledger
+
+    def racing(since_seq=0, limit=None):
+        rows = real(since_seq, limit)
+        if since_seq and limit is None:
+            start_whole()
+        return rows
+    store.ledger = racing
+    try:
+        A.write_ledger(store, path)
+    finally:
+        del store.ledger
+
+
+def test_a_whole_write_waits_for_an_append_under_way_in_this_process(tmp_path):
+    store, path = _ledger_one_row_behind(tmp_path)
+    whole = []
+
+    def start_whole():
+        whole.append(threading.Thread(target=lambda: A.write_ledger(S.Store(store.path), path, whole=True)))
+        whole[0].start()
+        whole[0].join(1.0)
+    _append_with_a_whole_write_landing_after_its_read(store, path, start_whole)
+    whole[0].join(30)
+    assert [r["seq"] for r in _lines(path)] == [r["seq"] for r in store.ledger()], "a row was filed twice"
+    store.create_account("account-later")
+    A.write_ledger(store, path)
+    assert _lines(path) == store.ledger()
+
+
+WHOLE_WRITE = ("import sys\nfrom pathlib import Path\nfrom register_service.app import write_ledger\n"
+               "from register_service.store import Store\nstore = Store(Path(sys.argv[1]))\nprint('ready', flush=True)\n"
+               "write_ledger(store, Path(sys.argv[2]), whole=True)\n")
+
+
+def test_a_whole_write_from_another_process_waits_for_an_append_under_way(tmp_path):
+    """As register-cli log-export runs it: a process of its own, holding the lock file beside the ledger."""
+    store, path = _ledger_one_row_behind(tmp_path)
+    here = str(Path(A.__file__).parents[1])
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (here, os.environ.get("PYTHONPATH")) if p)}
+    other = []
+
+    def start_whole():
+        other.append(subprocess.Popen([sys.executable, "-c", WHOLE_WRITE, str(store.path), str(path)], env=env,
+                                      stdout=subprocess.PIPE, text=True))
+        assert other[0].stdout.readline().strip() == "ready"
+        try:
+            other[0].wait(1.5)
+        except subprocess.TimeoutExpired:
+            pass
+    _append_with_a_whole_write_landing_after_its_read(store, path, start_whole)
+    assert other[0].wait(60) == 0
+    other[0].stdout.close()
+    assert [r["seq"] for r in _lines(path)] == [r["seq"] for r in store.ledger()], "a row was filed twice"
+
+
+def test_a_ledger_whose_tail_repeats_or_reorders_rows_is_written_whole(tmp_path):
+    """Whatever left the file so, the next write notices that its tail is not the database's rows in order."""
+    store, path = _ledger_one_row_behind(tmp_path)
+    A.write_ledger(store, path)
+    for n, spoil in enumerate((lambda rows: rows + rows[-1:], lambda rows: rows + rows[-2:],
+                               lambda rows: rows[:-2] + [rows[-1], rows[-2]])):
+        path.write_text("".join(spoil(path.read_text().splitlines(keepends=True))))
+        store.create_account(f"account-after-{n}")
+        A.write_ledger(store, path)
+        assert _lines(path) == store.ledger(), n
+
+
+# flock(1) where util-linux has none: the lock the named file or descriptor takes, held until the command exits.
+FLOCK = """import fcntl, os, subprocess, sys, time
+args = sys.argv[1:]
+wait = float(args[1]) if args[0] == "-w" else 1e9
+args = args[2:] if args[0] == "-w" else args
+if args[0] == "-u":
+    fcntl.flock(int(args[1]), fcntl.LOCK_UN)
+    sys.exit(0)
+fd = int(args[0]) if args[0].isdigit() else os.open(args[0], os.O_RDWR | os.O_CREAT)
+deadline = time.monotonic() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() > deadline:
+            sys.exit(1)
+        time.sleep(0.05)
+sys.exit(subprocess.call(args[1:]) if len(args) > 1 else 0)
+"""
+
+
+def test_the_public_mirror_copies_the_ledger_only_while_no_writer_holds_the_mirror(tmp_path):
+    """register-mirror.sh copies under the lock every writer of the mirror takes, so no copy holds half an append."""
+    data = tmp_path / "srv" / "data"
+    store = S.Store(data / "register.sqlite3")
+    store.create_account("account-0")
+    A.write_ledger(store, data / "mirror" / "ledger.jsonl", whole=True)
+    repo = tmp_path / "ledger.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(repo)], check=True)
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    if shutil.which("flock") is None:
+        (tools / "flock").write_text(f"#!{sys.executable}\n{FLOCK}")
+        (tools / "flock").chmod(0o755)
+    env = {**os.environ, "REGISTER_DATA_DIR": str(data), "LEDGER_REPO": str(repo), "HOME": str(tmp_path),
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}
+    script = Path(__file__).resolve().parents[1] / "deploy" / "register-mirror.sh"
+    copied = tmp_path / "srv" / "ledger-mirror" / "ledger.jsonl"
+    with RT.export_lock(data / "mirror"):
+        run = subprocess.Popen(["bash", str(script)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not copied.exists() and run.poll() is None:
+            time.sleep(0.05)
+        early = copied.exists()
+    out = run.communicate(timeout=60)[0]
+    assert not early, "the ledger was copied while a writer held the mirror"
+    assert run.returncode == 0, out
+    assert copied.read_bytes() == (data / "mirror" / "ledger.jsonl").read_bytes()

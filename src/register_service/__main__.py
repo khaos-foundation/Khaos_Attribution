@@ -87,7 +87,7 @@ def main(argv=None) -> int:
         export_all(cfg, store.log, log_key, cfg["log_dev_key"])
         print(f"withheld {a.leaf_hash}; the withholding is leaf {out['index']} ({out['leaf_hash']}); the mirror is rewritten")
     elif a.cmd == "log-recover":
-        from register_service.app import export_all, log_places, write_ledger  # noqa: PLC0415
+        from register_service.app import export_all, log_places  # noqa: PLC0415
         from register_service.translog import recover  # noqa: PLC0415
         log_key = open_log(cfg, store)
         ok, lines = recover(store, log_places(cfg)[3], log_key.public_pem())
@@ -95,14 +95,14 @@ def main(argv=None) -> int:
         if not ok:
             return 1
         export_all(cfg, store.log, log_key, cfg["log_dev_key"], full=True)
-        write_ledger(store, cfg["data"] / "mirror" / "ledger.jsonl", whole=True)
+        ledger_whole(cfg, store)
         print("restart the service: systemctl restart register.service")
     elif a.cmd == "log-export":
-        from register_service.app import export_all, write_ledger  # noqa: PLC0415
+        from register_service.app import export_all  # noqa: PLC0415
         log_key = open_log(cfg, store)
         if not export_all(cfg, store.log, log_key, cfg["log_dev_key"], full=True):
             raise SystemExit(f"nothing was written: {store.log.blocked or 'another export held the lock'}")
-        write_ledger(store, cfg["data"] / "mirror" / "ledger.jsonl", whole=True)
+        ledger_whole(cfg, store)
         print(f"the static export and the mirror's ledger are written whole at size {store.log.size()}")
     elif a.cmd in ("log-stamp", "log-upgrade"):
         from register_service import anchor  # noqa: PLC0415
@@ -132,6 +132,16 @@ def main(argv=None) -> int:
             print(f"  {p_}")
         return 0 if ok and not problems else 1
     return 0
+
+
+def ledger_whole(cfg: dict, store: Store) -> None:
+    """The mirror's ledger written whole, once the service's append under way has finished."""
+    from register_service.app import write_ledger  # noqa: PLC0415
+    from register_service.translog import ExportBusy  # noqa: PLC0415
+    try:
+        write_ledger(store, cfg["data"] / "mirror" / "ledger.jsonl", whole=True)
+    except ExportBusy as e:
+        raise SystemExit(f"the mirror's ledger was not written ({e}); run register-cli log-export again") from None
 
 
 def open_log(cfg: dict, store: Store, appending: bool = False):

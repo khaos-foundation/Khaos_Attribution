@@ -709,13 +709,14 @@ def _json(doc) -> bytes:
 
 
 class ExportBusy(RuntimeError):
-    """Another export held the lock past the timeout."""
+    """Another writer held the lock past the timeout."""
 
 
 @contextmanager
-def _export_lock(mirror: Path):
-    """One export at a time: across threads by the lock, across processes by a lock file, each waited on for at most
-    EXPORT_LOCK_TIMEOUT seconds."""
+def export_lock(mirror: Path):
+    """One writer of a mirror at a time (an export, the ledger, the copy to the public repository): across threads by
+    the lock, across processes by the lock file in ``mirror`` (POSIX; the register is served from Linux only), each
+    waited on for at most EXPORT_LOCK_TIMEOUT seconds."""
     import time  # noqa: PLC0415
     mirror.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + EXPORT_LOCK_TIMEOUT
@@ -800,7 +801,7 @@ def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = Non
         return False
     places = [(Path(mirror) / "log", False)] + ([(Path(public) / "log", True)] if public is not None else [])
     try:
-        with _export_lock(Path(mirror)):
+        with export_lock(Path(mirror)):
             done = {root: None if full else _written(log, root) for root, _ in places}
             snap = snapshot(log, nodes=any(d is None for d in done.values()))
             for root, delayed in places:
@@ -924,7 +925,7 @@ def _write_anchors(root: Path, anchors: list) -> None:
 def export_anchors(log: TransLog, mirror: Path) -> None:
     """The anchor receipts, as OpenTimestamps files, and their list."""
     try:
-        with _export_lock(Path(mirror)):
+        with export_lock(Path(mirror)):
             _write_anchors(Path(mirror) / "log", log.anchors())
     except ExportBusy:
         pass

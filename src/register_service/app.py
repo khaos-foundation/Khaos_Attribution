@@ -26,7 +26,7 @@ from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of
 from register_service.store import Store, now_utc
-from register_service.translog import EntryRefused, LogBlocked, export as export_log, write_whole
+from register_service.translog import EntryRefused, LogBlocked, export as export_log, export_lock, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
@@ -133,43 +133,43 @@ def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
 LEDGER_TAIL_BYTES = 65536
 
 
-def _last_line(path: Path) -> str | None:
-    """A file's last whole line, or None when it has none: missing, empty, or ending in a line cut short."""
+def _tail_lines(path: Path) -> list:
+    """The whole lines in a file's last LEDGER_TAIL_BYTES; none when it is missing, empty, or ends in a line cut short."""
     try:
         with open(path, "rb") as fh:
             size = fh.seek(0, os.SEEK_END)
             fh.seek(max(0, size - LEDGER_TAIL_BYTES))
             tail = fh.read()
     except OSError:
-        return None
+        return []
     if not tail.endswith(b"\n"):
-        return None
+        return []
     lines = tail[:-1].split(b"\n")
-    # A tail that starts inside its only line does not hold that line whole.
-    return None if len(lines) == 1 and size > len(tail) else lines[-1].decode("utf-8", "replace")
+    # A tail that starts inside a line does not hold that line whole.
+    return [x.decode("utf-8", "replace") for x in (lines[1:] if size > len(tail) else lines)]
 
 
 def write_ledger(store, path: Path, whole: bool = False) -> None:
-    """The ledger as one JSON line a row. The rows after the file's last are appended in one write of whole lines,
-    while that last line is the database's own row of that number; otherwise, and when asked, the file is written
-    whole. A line a crash cut short is never built on."""
+    """The ledger as one JSON line a row, under the mirror's lock. The rows after the file's last are appended in one
+    write while the file's tail is the database's own rows in order; otherwise, and when asked, it is written whole."""
     def line(row: dict) -> str:
         return json.dumps(row, sort_keys=True) + "\n"
-    last = None if whole else _last_line(path)
-    try:
-        seq = int(json.loads(last)["seq"]) if last else None
-    except (ValueError, KeyError, TypeError):
-        seq = None
-    if seq is not None and [line(r) for r in store.ledger(seq - 1, limit=1)] == [last + "\n"]:
-        new = "".join(line(r) for r in store.ledger(seq)).encode("utf-8")
-        if new:
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND)
-            try:
-                os.write(fd, new)
-            finally:
-                os.close(fd)
-        return
-    write_whole(path, "".join(line(r) for r in store.ledger()).encode("utf-8"))
+    with export_lock(path.parent):
+        tail = [] if whole else _tail_lines(path)
+        try:
+            seq = int(json.loads(tail[-1])["seq"]) if tail else None
+        except (ValueError, KeyError, TypeError):
+            seq = None
+        if seq is not None and [line(r) for r in store.ledger(seq - len(tail), limit=len(tail))] == [x + "\n" for x in tail]:
+            new = "".join(line(r) for r in store.ledger(seq)).encode("utf-8")
+            if new:
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+                try:
+                    os.write(fd, new)
+                finally:
+                    os.close(fd)
+            return
+        write_whole(path, "".join(line(r) for r in store.ledger()).encode("utf-8"))
 
 
 def public_view(record: dict) -> dict:
