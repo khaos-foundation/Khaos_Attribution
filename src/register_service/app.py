@@ -26,7 +26,7 @@ from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of
 from register_service.store import Store, now_utc
-from register_service.translog import EntryRefused, LogBlocked, export as export_log
+from register_service.translog import EntryRefused, LogBlocked, export as export_log, export_lock, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
@@ -118,9 +118,9 @@ def log_places(cfg: dict) -> tuple:
     return mirror, public, delay, witnesses
 
 
-def export_all(cfg: dict, log, key: R.SigningKey, dev: bool) -> bool:
+def export_all(cfg: dict, log, key: R.SigningKey, dev: bool, full: bool = False) -> bool:
     mirror, public, delay, _ = log_places(cfg)
-    return export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay)
+    return export_log(log, mirror, log_key_doc(key, dev), public=public, delay_days=delay, full=full)
 
 
 def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
@@ -128,6 +128,48 @@ def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
     return {"log_id": T.LOG_ID, "key_id": key.key_id, "public_key_pem": key.public_pem(), "development": bool(dev),
             "committed": bool(committed and committed.key_id == key.key_id),
             "signed_bytes": "RFC 8785 JSON of {log_id, root_sha256, timestamp, tree_size, version}; Ed25519"}
+
+
+LEDGER_TAIL_BYTES = 65536
+
+
+def _tail_lines(path: Path) -> list:
+    """The whole lines in a file's last LEDGER_TAIL_BYTES; none when it is missing, empty, or ends in a line cut short."""
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - LEDGER_TAIL_BYTES))
+            tail = fh.read()
+    except OSError:
+        return []
+    if not tail.endswith(b"\n"):
+        return []
+    lines = tail[:-1].split(b"\n")
+    # A tail that starts inside a line does not hold that line whole.
+    return [x.decode("utf-8", "replace") for x in (lines[1:] if size > len(tail) else lines)]
+
+
+def write_ledger(store, path: Path, whole: bool = False) -> None:
+    """The ledger as one JSON line a row, under the mirror's lock. The rows after the file's last are appended in one
+    write while the file's tail is the database's own rows in order; otherwise, and when asked, it is written whole."""
+    def line(row: dict) -> str:
+        return json.dumps(row, sort_keys=True) + "\n"
+    with export_lock(path.parent):
+        tail = [] if whole else _tail_lines(path)
+        try:
+            seq = int(json.loads(tail[-1])["seq"]) if tail else None
+        except (ValueError, KeyError, TypeError):
+            seq = None
+        if seq is not None and [line(r) for r in store.ledger(seq - len(tail), limit=len(tail))] == [x + "\n" for x in tail]:
+            new = "".join(line(r) for r in store.ledger(seq)).encode("utf-8")
+            if new:
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+                try:
+                    os.write(fd, new)
+                finally:
+                    os.close(fd)
+            return
+        write_whole(path, "".join(line(r) for r in store.ledger()).encode("utf-8"))
 
 
 def public_view(record: dict) -> dict:
@@ -168,8 +210,11 @@ class RateLimit:
 
 
 PUBLIC_LIMITS = {"/api/verify": 20, "/api/enrol": 6}
-# The log's public reads: a verifier walks a few files per entry; a crawler is bounded.
-LOG_READ_LIMIT = 240
+# Reads a minute per address, counted apart for the log's files and for everything else, so a verifier walking the
+# log and a person reading pages do not spend each other's: both far under it, a crawler bounded.
+READ_LIMIT = 240
+LEDGER_PAGE = 1000
+SITEMAP_PAGE = 10000
 SIGNED_LIMIT = 120
 # A verify key's own lane: far above the public bound, still a bound, per key.
 KEYED_VERIFY_LIMIT = 600
@@ -233,23 +278,21 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(401, "the signature is not this machine's over this body")
         return body, machine, key_id, pem
 
+    mirror_lock = threading.Lock()
+
     def write_mirror(serial: int) -> None:
-        rec = store.record(serial)
-        doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
-               "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
-               "machine_public_pem": rec.get("machine_public_pem"),
-               "countersignature": rec["countersignature"], "served": rec["served"],
-               "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
-               "log_state": "unresolved" if serial in store.unresolved_serials() else None}
-        tmp = mirror / "models" / f"{serial}.json.new"
-        tmp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, mirror / "models" / f"{serial}.json")
-        # The mirror is rsynced on a timer; a reader must never meet a half-written ledger.
-        new = mirror / "ledger.jsonl.new"
-        with open(new, "w", encoding="utf-8") as fh:
-            for e in store.ledger():
-                fh.write(json.dumps(e, sort_keys=True) + "\n")
-        os.replace(new, mirror / "ledger.jsonl")
+        """One writer at a time: the mirror is rsynced on a timer, so a model's file goes through a temporary file of its
+        own, and the ledger gains its new rows as whole lines in one write."""
+        with mirror_lock:
+            rec = store.record(serial)
+            doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
+                   "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
+                   "machine_public_pem": rec.get("machine_public_pem"),
+                   "countersignature": rec["countersignature"], "served": rec["served"],
+                   "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
+                   "log_state": "unresolved" if serial in store.unresolved_serials() else None}
+            write_whole(mirror / "models" / f"{serial}.json", (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8"))
+            write_ledger(store, mirror / "ledger.jsonl")
 
     def log_mirror_quietly() -> None:
         try:
@@ -268,7 +311,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     log_mirror_quietly()
 
     limits = {path: RateLimit(n) for path, n in {**PUBLIC_LIMITS, **CLAIM_LIMITS}.items()}
-    log_read_limit = RateLimit(LOG_READ_LIMIT)
+    log_read_limit, read_limit = RateLimit(READ_LIMIT), RateLimit(READ_LIMIT)
     lookup_limits = {path: RateLimit(n) for path, n in softbinding.LIMITS.items()}
     signed_limit = RateLimit(SIGNED_LIMIT)
     from register_service.verify_keys import Allowed  # noqa: PLC0415
@@ -288,8 +331,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if not bucket.allow(client):
                 return JSONResponse({"detail": "too many requests from this address; try again in a minute"}, status_code=429,
                                     headers={"Retry-After": "60"})
-        elif request.method in ("GET", "HEAD") and path.startswith(("/log/", "/mirror/log/")):
-            if not log_read_limit.allow(client):
+        elif request.method in ("GET", "HEAD"):
+            bucket = log_read_limit if path.startswith(("/log/", "/mirror/log/")) else read_limit
+            if not bucket.allow(client):
                 return JSONResponse({"detail": "too many requests from this address; try again in a minute"}, status_code=429,
                                     headers={"Retry-After": "60"})
         elif request.method == "POST":
@@ -322,16 +366,19 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(422, "; ".join(problems))
         if record["model"]["machine_key_id"] != key_id:
             raise HTTPException(422, "the record names another machine as its maker")
-        # A countersignature this register made, presented again after a recovery, gets its reserved serial back.
-        issuer = store.register_key_pem(presented.get("register_key_id")) if isinstance(presented, dict) else None
-        if not (issuer and R.countersignature_valid(presented, signed["record_sha256"], issuer)):
-            presented = None
-        serial, counter, already = store.register(signed, key_id, machine["account_id"],
-                                                  lambda n, at: R.countersign(signed, n, key, at or now_utc()), presented)
-        if not already:
-            mirror_quietly(serial)
-        return {"serial": serial, "countersignature": counter, "already": already,
-                "page": f"{cfg['public_url']}/models/{serial}"}
+
+        def work():
+            # A countersignature this register made, presented again after a recovery, gets its reserved serial back.
+            issuer = store.register_key_pem(presented.get("register_key_id")) if isinstance(presented, dict) else None
+            mine = presented if issuer and R.countersignature_valid(presented, signed["record_sha256"], issuer) else None
+            serial, counter, already = store.register(signed, key_id, machine["account_id"],
+                                                      lambda n, at: R.countersign(signed, n, key, at or now_utc()), mine)
+            if not already:
+                mirror_quietly(serial)
+            return {"serial": serial, "countersignature": counter, "already": already,
+                    "page": f"{cfg['public_url']}/models/{serial}"}
+        # The database write and the mirror's files, off the event loop: reads stay answered while a model is registered.
+        return await run_in_threadpool(work)
 
     def serial_of(body: dict) -> int:
         try:
@@ -583,8 +630,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/ledger")
     def ledger(since: int = 0):
-        return PlainTextResponse("\n".join(json.dumps(e, sort_keys=True) for e in store.ledger(since)) + "\n",
-                                 media_type="application/x-ndjson")
+        """The rows after ``since``, a page of them; a Link header names the next page while there is one."""
+        rows = store.ledger(since, limit=LEDGER_PAGE + 1)
+        more, rows = len(rows) > LEDGER_PAGE, rows[:LEDGER_PAGE]
+        headers = {"Link": f'</api/ledger?since={rows[-1]["seq"]}>; rel="next"'} if more else {}
+        return PlainTextResponse("\n".join(json.dumps(e, sort_keys=True) for e in rows) + "\n",
+                                 media_type="application/x-ndjson", headers=headers)
 
     @app.api_route("/models/{serial}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def model_page(serial: int):
@@ -651,9 +702,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def home():
         from register_service import pages as P  # noqa: PLC0415
-        serials = store.serials()
         rows = []
-        for serial in serials[-100:][::-1]:
+        for serial in store.latest_serials(100):
             rec = store.record(serial)
             if not rec:
                 continue
@@ -662,7 +712,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                                 (P.state_chip(rec["state"]), "")]))
         para = ("The public ledger of registered fine-tuned models: what each was trained on, as its artist attested, "
                 "countersigned by the register and never edited.")
-        facts = [P.count(len(serials), "model") + " registered", "ledger unbroken" if store.ledger_status()["ok"] else "ledger BROKEN",
+        facts = [P.count(store.count(), "model") + " registered", "ledger unbroken" if store.ledger_status()["ok"] else "ledger BROKEN",
                  "serials from 65,536"]
         body = P.hero("", "The Guild Register", para, facts)
         body += P.section("Registered models", "newest first")
@@ -674,14 +724,17 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/robots.txt", methods=["GET", "HEAD"])
     def robots():
         from register_service import pages as P  # noqa: PLC0415
-        return PlainTextResponse(P.robots_txt(cfg["public_url"]))
+        return PlainTextResponse(P.robots_txt(cfg["public_url"], -(-store.count(listed=True) // SITEMAP_PAGE)))
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
-    def sitemap():
+    def sitemap(page: int = 1):
+        """A page of the models not withdrawn; the plain address is the first, which also names the home page."""
         from register_service import pages as P  # noqa: PLC0415
-        records = [(serial, store.record(serial) or {}) for serial in store.serials()]
-        models = [(serial, P.day(rec.get("published_at"))) for serial, rec in records if rec.get("state") != "withdrawn"]
-        return Response(P.sitemap_xml(cfg["public_url"], models), media_type="application/xml")
+        models = store.listed(SITEMAP_PAGE, (page - 1) * SITEMAP_PAGE) if page >= 1 else []
+        if page != 1 and not models:
+            raise HTTPException(404, "no such page of the sitemap")
+        return Response(P.sitemap_xml(cfg["public_url"], [(serial, P.day(at)) for serial, at in models], home=page == 1),
+                        media_type="application/xml")
 
     @app.api_route("/favicon.svg", methods=["GET", "HEAD"])
     def favicon_svg():
@@ -823,7 +876,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/health")
     def health():
-        return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": len(store.serials()), "outputs": index.count(),
+        return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": store.count(), "outputs": index.count(),
                              "log_blocked": store.log.blocked,
                              "development": bool(cfg["dev_key"])})
 

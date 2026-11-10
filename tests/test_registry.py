@@ -40,6 +40,21 @@ def test_the_derived_payload_is_a_bucket_outside_the_reserved_range_and_the_same
     assert decode_codeword(codeword)[0] == derive_payload("k", "r") and DERIVED_PAYLOADS.stop == PAYLOAD_SPACE
 
 
+def test_a_record_holding_a_number_that_is_not_finite_is_refused_wherever_it_sits():
+    """NaN and the infinities are not JSON: a record carrying one could not be read back by anything but Python."""
+    key = R.SigningKey.generate()
+    for value in (float("nan"), float("inf"), float("-inf")):
+        bad = _record()
+        bad["training_set"]["tracks"][0]["writers"][0]["share"] = value
+        assert [p for p in R.record_problems(bad) if "not finite" in p] == ["training_set.tracks[0].writers[0].share is not finite"]
+        deep = _record()
+        deep["measured"]["heldout"] = {"loss": [0.1, value]}
+        assert "measured.heldout.loss[1] is not finite" in R.record_problems(deep)
+        with pytest.raises(ValueError, match="not finite"):
+            R.sign_record(bad, key)
+    assert R.record_problems(_record()) == []
+
+
 def test_a_machine_key_is_made_once_and_its_id_is_the_public_keys(tmp_path):
     k1 = R.SigningKey.load_or_create(tmp_path / R.MACHINE_KEY_FILE)
     k2 = R.SigningKey.load_or_create(tmp_path / R.MACHINE_KEY_FILE)

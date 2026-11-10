@@ -18,6 +18,7 @@ from pathlib import Path
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, runtime_for, venv_python
 from khaos_attribution.engines.sa3.train import BASE_NPZ
+from khaos_attribution.engines.worker_process import host_env
 
 # Stability's CUDA 12.6 build of torch 2.7.1 cannot drive a Blackwell card; its CUDA 12.8 build can.
 TORCH = "torch==2.7.1"
@@ -58,7 +59,7 @@ def uv_path() -> str:
 
 def _run(cmd: list, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
     # The engine's interpreters never see the room's PYTHONPATH: its packages are not theirs.
-    env = {k: v for k, v in (env if env is not None else os.environ).items() if k != "PYTHONPATH"}
+    env = {k: v for k, v in (env if env is not None else host_env()).items() if k != "PYTHONPATH"}
     return subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
 
 
@@ -204,7 +205,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
                 return contract_into(python, root)
         if check_only:
             return False, f"no MLX environment at {python}"
-        done = _run(["bash", "install.sh", "-y"], cwd=mlx, env={**os.environ, "UV": uv_path()})
+        done = _run(["bash", "install.sh", "-y"], cwd=mlx, env={**host_env(), "UV": uv_path()})
         if done.returncode != 0:
             return False, f"the MLX installer failed: {done.stderr.strip()[-300:]}"
         _run([uv_path(), "pip", "install", "-q", "--python", python, "safetensors"])
@@ -398,7 +399,7 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
                 continue
             code = ("import sys; sys.path.insert(0, 'scripts'); from weights import ensure_local; "
                     "[ensure_local(p, verbose=False) for p in sys.argv[1:]]")
-            done = _run([python, "-c", code, *(w.get("components") or [])], cwd=mlx, env={**os.environ, "HF_HUB_OFFLINE": "0"})
+            done = _run([python, "-c", code, *(w.get("components") or [])], cwd=mlx, env={**host_env(), "HF_HUB_OFFLINE": "0"})
             whole = done.returncode == 0 and all(f.exists() for f in parts)
             out.append((whole, f"{w['repo']} fetched by the MLX port" if whole
                         else f"{w['repo']} could not be fetched: {done.stderr.strip()[-200:] or 'a file is still missing'}"))
@@ -416,7 +417,7 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
             continue
         code = ("import json, sys; from huggingface_hub import snapshot_download; "
                 "snapshot_download(sys.argv[1], allow_patterns=json.loads(sys.argv[2]) or None)")
-        done = _run([python, "-c", code, w["repo"], json.dumps(w.get("patterns") or [])], env={**os.environ, "HF_HUB_OFFLINE": "0"})
+        done = _run([python, "-c", code, w["repo"], json.dumps(w.get("patterns") or [])], env={**host_env(), "HF_HUB_OFFLINE": "0"})
         if done.returncode != 0 or not cached(w["repo"], files):
             why = done.stderr.strip().splitlines()[-1:] or ["a file is still missing"]
             note = (f"{w['repo']} could not be downloaded: {why[0][:200]}"

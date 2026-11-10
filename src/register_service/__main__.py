@@ -37,7 +37,10 @@ def main(argv=None) -> int:
     w = sub.add_parser("log-withhold"); w.add_argument("leaf_hash"); w.add_argument("reason")
     sub.add_parser("log-stamp")
     sub.add_parser("log-upgrade")
-    sub.add_parser("log-recover")
+    sub.add_parser("log-recover", help="put back entries the published log holds and this database lost, then write the "
+                                       "export whole; after a crashed export, run log-export")
+    sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again; after a "
+                                      "crashed export, run this")
     a = p.parse_args(argv)
     cfg = settings()
     if a.cmd == "make-key":
@@ -93,8 +96,16 @@ def main(argv=None) -> int:
         print("\n".join(lines))
         if not ok:
             return 1
-        export_all(cfg, store.log, log_key, cfg["log_dev_key"])
+        export_all(cfg, store.log, log_key, cfg["log_dev_key"], full=True)
+        ledger_whole(cfg, store)
         print("restart the service: systemctl restart register.service")
+    elif a.cmd == "log-export":
+        from register_service.app import export_all  # noqa: PLC0415
+        log_key = open_log(cfg, store)
+        if not export_all(cfg, store.log, log_key, cfg["log_dev_key"], full=True):
+            raise SystemExit(f"nothing was written: {store.log.blocked or 'another export held the lock'}")
+        ledger_whole(cfg, store)
+        print(f"the static export and the mirror's ledger are written whole at size {store.log.size()}")
     elif a.cmd in ("log-stamp", "log-upgrade"):
         from register_service import anchor  # noqa: PLC0415
         if a.cmd == "log-stamp":
@@ -116,13 +127,23 @@ def main(argv=None) -> int:
             verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], pub.read_text(encoding="ascii")),
                                              started=(cfg["data"] / "log-started").is_file())
             problems += [verdict] if verdict else []
-        print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {len(store.serials())} models")
+        print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {store.count()} models")
         print(f"log {'whole' if not problems else 'BROKEN'}: {store.log.size()} entries"
               + ("" if pub.is_file() else " (no log public key beside the key file; signatures not checked)"))
         for p_ in problems[:20]:
             print(f"  {p_}")
         return 0 if ok and not problems else 1
     return 0
+
+
+def ledger_whole(cfg: dict, store: Store) -> None:
+    """The mirror's ledger written whole, once the service's append under way has finished."""
+    from register_service.app import write_ledger  # noqa: PLC0415
+    from register_service.translog import ExportBusy  # noqa: PLC0415
+    try:
+        write_ledger(store, cfg["data"] / "mirror" / "ledger.jsonl", whole=True)
+    except ExportBusy as e:
+        raise SystemExit(f"the mirror's ledger was not written ({e}); run register-cli log-export again") from None
 
 
 def open_log(cfg: dict, store: Store, appending: bool = False):

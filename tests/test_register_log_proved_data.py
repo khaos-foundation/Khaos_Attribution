@@ -225,14 +225,14 @@ def test_overlapping_exports_never_move_latest_backwards(register):
     app, store, http = register
     key, client = _machine(register, "artist-one")
     client.publish(_signed(key))
-    original, gate, reached = RT._write, threading.Event(), threading.Event()
+    original, gate, reached = RT.write_whole, threading.Event(), threading.Event()
 
     def slow(path, data):
         if path.name == "latest.json" and threading.current_thread().name == "A":
             reached.set()
             gate.wait(5)
         original(path, data)
-    RT._write = slow
+    RT.write_whole = slow
     try:
         from register_service.app import log_key_doc
         a = threading.Thread(target=RT.export, args=(store.log, _mirror(app), log_key_doc(store.log.signer, True)), name="A")
@@ -245,7 +245,7 @@ def test_overlapping_exports_never_move_latest_backwards(register):
         a.join(5)
         worker.join(5)
     finally:
-        RT._write = original
+        RT.write_whole = original
     assert json.loads((_mirror(app) / "log" / "sth" / "latest.json").read_text())["tree_size"] == store.log.size()
 
 

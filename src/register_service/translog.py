@@ -6,6 +6,7 @@ Every append happens inside the Store's write transaction, so a record and its l
 from __future__ import annotations
 
 import base64
+import bisect
 import json
 import os
 import secrets
@@ -18,7 +19,7 @@ from khaos_attribution import translog as T
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS log_leaves (idx INTEGER PRIMARY KEY, leaf_hash TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
-  serial INTEGER, record_sha256 TEXT, refers TEXT);
+  serial INTEGER, record_sha256 TEXT, refers TEXT, waits INTEGER);
 CREATE INDEX IF NOT EXISTS log_leaves_record ON log_leaves (record_sha256);
 CREATE INDEX IF NOT EXISTS log_leaves_refers ON log_leaves (refers);
 CREATE TABLE IF NOT EXISTS log_bodies (leaf_hash TEXT PRIMARY KEY, body BLOB NOT NULL, withheld_at TEXT, withhold_reason TEXT);
@@ -30,8 +31,13 @@ CREATE TABLE IF NOT EXISTS log_reserved (serial INTEGER PRIMARY KEY, reason TEXT
 CREATE TABLE IF NOT EXISTS log_keys (key_id TEXT PRIMARY KEY, public_pem TEXT NOT NULL, first_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS log_anchors (tree_size INTEGER PRIMARY KEY, root_sha256 TEXT NOT NULL, backend TEXT NOT NULL,
   stamped_at TEXT NOT NULL, receipt BLOB NOT NULL, state TEXT NOT NULL, completed_at TEXT);
+CREATE TABLE IF NOT EXISTS log_exports (place TEXT PRIMARY KEY, format INTEGER NOT NULL, key_id TEXT NOT NULL,
+  tree_size INTEGER NOT NULL, pending_from INTEGER);
 """
 PAGE_MAX = 1000
+# The layout of the static export: a proof names the first head under the current key that holds its leaf and a
+# consistency file runs from one head to the next, so neither changes as the log grows.
+EXPORT_FORMAT = 2
 EXPORT_LOCK_TIMEOUT = 30.0   # seconds; a later export catches up with whatever this one skipped
 UNAVAILABLE = "unavailable: recovered without its body"
 TEXT_MAX = 400
@@ -68,6 +74,26 @@ class TransLog:
     def __init__(self, store):
         self.store, self.signer, self.blocked = store, None, None
         store.db.executescript(SCHEMA)
+        self._mark_waiting_admits()
+
+    def _mark_waiting_admits(self) -> None:
+        """``waits`` on an admit: 1 when its body names lost leaves it waits on (pending_lost), else 0. A column so the
+        unresolved models are found without reading every admit; a file from before it is filled here, once."""
+        columns = {r["name"] for r in self.db.execute("PRAGMA table_info(log_leaves)")}
+        if "waits" not in columns:
+            self.db.execute("ALTER TABLE log_leaves ADD COLUMN waits INTEGER")
+        self.db.execute("CREATE INDEX IF NOT EXISTS log_leaves_kind_waits ON log_leaves (kind, waits)")
+        if not self.db.execute("SELECT 1 FROM log_leaves WHERE kind = 'admit' AND waits IS NULL LIMIT 1").fetchone():
+            return
+        if self._lost():
+            rows = self.db.execute("SELECT l.leaf_hash, b.body FROM log_leaves l LEFT JOIN log_bodies b ON b.leaf_hash = l.leaf_hash"
+                                   " WHERE l.kind = 'admit' AND l.waits IS NULL").fetchall()
+            for r in rows:
+                names = (json.loads(bytes(r["body"])) if r["body"] else {}).get("pending_lost")
+                self.db.execute("UPDATE log_leaves SET waits = ? WHERE leaf_hash = ?", (1 if names else 0, r["leaf_hash"]))
+        else:
+            # An admit names only leaves this log holds as lost: with none lost, none waits.
+            self.db.execute("UPDATE log_leaves SET waits = 0 WHERE kind = 'admit' AND waits IS NULL")
 
     @property
     def db(self):
@@ -169,9 +195,13 @@ class TransLog:
                                          "time": entry.get("time"), "reason_withheld": body is None})
         return out
 
+    def _lost(self) -> dict:
+        """The leaves a recovery put back without their bodies, idx -> hash."""
+        return {r["idx"]: r["leaf_hash"] for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'unavailable'")}
+
     def _lost_and_answers(self) -> tuple:
         """(lost leaves as idx -> hash, confirms as (idx, answers, confirms-or-None))."""
-        lost = {r["idx"]: r["leaf_hash"] for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'unavailable'")}
+        lost = self._lost()
         answers = []
         for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'confirm'").fetchall():
             row = self.db.execute("SELECT body FROM log_bodies WHERE leaf_hash = ?", (r["leaf_hash"],)).fetchone()
@@ -211,12 +241,53 @@ class TransLog:
         return [k for k, v in self.admit_states(record_sha256).items() if v == "standing"]
 
     def unresolved_records(self) -> list:
-        """Records whose every live admit waits on a warden after a recovery lost an entry behind it."""
+        """Records whose every live admit waits on a warden after a recovery lost an entry behind it: admit_states'
+        rule, read at the cost of the losses. Only an admit before a loss still open, or one that names a loss
+        (``waits``), can be unresolved; every other admit stands unless struck, and none is read."""
+        lost = self._lost()
+        if not lost:
+            return []
+        _, answers = self._lost_and_answers()
+        # The newest confirm of each lost leaf: the one for every admit, and the one naming a single admit.
+        for_all, for_one = {}, {}
+        for c_idx, answered, confirms in answers:
+            if confirms is None:
+                for_all[answered] = max(for_all.get(answered, -1), c_idx)
+            else:
+                for_one[(answered, confirms)] = max(for_one.get((answered, confirms), -1), c_idx)
+        open_at = sorted(i for i, h in lost.items() if for_all.get(h, -1) <= i)
+        index_of = {h: i for i, h in lost.items()}
+        answered_for: dict = {}
+        for (h, admit_leaf), c_idx in for_one.items():
+            i = index_of.get(h)
+            if i is not None and for_all.get(h, -1) <= i < c_idx:
+                answered_for.setdefault(admit_leaf, []).append(i)
+        edge = open_at[-1] if open_at else -1
+        live = " AND NOT EXISTS (SELECT 1 FROM log_leaves r WHERE r.kind = 'revoke' AND r.refers = l.leaf_hash)"
+        states: dict = {}
+
+        def judge(a, named) -> None:
+            idx, leaf = a["idx"], a["leaf_hash"]
+            waits = len(open_at) - bisect.bisect_right(open_at, idx) - sum(1 for i in answered_for.get(leaf, ()) if i > idx)
+            if not waits:
+                waits = any(max(for_all.get(h, -1), for_one.get((h, leaf), -1)) <= idx for h in named)
+            states.setdefault(a["record_sha256"], set()).add("unresolved" if waits else "standing")
+        if open_at:
+            for a in self.db.execute("SELECT l.idx, l.leaf_hash, l.record_sha256 FROM log_leaves l WHERE l.kind = 'admit'"
+                                     " AND l.waits = 0 AND l.idx < ?" + live, (edge,)):
+                judge(a, ())
+        for a in self.db.execute("SELECT l.idx, l.leaf_hash, l.record_sha256, b.body FROM log_leaves l JOIN log_bodies b"
+                                 " ON b.leaf_hash = l.leaf_hash WHERE l.kind = 'admit' AND l.waits = 1" + live):
+            judge(a, (json.loads(bytes(a["body"])) if a["body"] else {}).get("pending_lost") or ())
+        waiting = [sha for sha, seen in states.items() if "unresolved" in seen and "standing" not in seen]
         out = []
-        for r in self.db.execute("SELECT DISTINCT record_sha256 FROM log_leaves WHERE kind = 'admit'").fetchall():
-            states = set(self.admit_states(r["record_sha256"]).values())
-            if "unresolved" in states and "standing" not in states:
-                out.append(r["record_sha256"])
+        for i in range(0, len(waiting), 500):
+            chunk = waiting[i:i + 500]
+            # An admit past every open loss that names none was not read above: it stands, unless struck.
+            standing = {r["record_sha256"] for r in self.db.execute(
+                "SELECT DISTINCT l.record_sha256 FROM log_leaves l WHERE l.kind = 'admit' AND l.waits = 0 AND l.idx > ?"
+                f" AND l.record_sha256 IN ({','.join('?' * len(chunk))})" + live, [edge, *chunk])}
+            out += [sha for sha in chunk if sha not in standing]
         return out
 
     def admit_leaf_of(self, record_sha256: str) -> str | None:
@@ -242,9 +313,10 @@ class TransLog:
     def _insert_leaf(self, body: bytes, entry: dict) -> tuple:
         leaf = T.leaf_hash(body)
         index = self.size()
-        self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind, serial, record_sha256, refers) VALUES (?, ?, ?, ?, ?, ?)",
+        self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind, serial, record_sha256, refers, waits) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (index, leaf.hex(), entry["kind"], entry.get("serial"), entry.get("record_sha256"),
-                         entry.get("withholds") or entry.get("revokes") or entry.get("answers")))
+                         entry.get("withholds") or entry.get("revokes") or entry.get("answers"),
+                         (1 if entry.get("pending_lost") else 0) if entry["kind"] == "admit" else None))
         self.db.execute("INSERT INTO log_bodies (leaf_hash, body) VALUES (?, ?)", (leaf.hex(), body))
         level, i, h = 0, index, leaf
         self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
@@ -620,7 +692,7 @@ def head_doc(row) -> dict:
 _EXPORT_LOCK = threading.Lock()
 
 
-def _write(path: Path, data: bytes) -> None:
+def write_whole(path: Path, data: bytes) -> None:
     """A temp file of this writer's own, then replace: a reader never meets a half-written file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.new")
@@ -628,18 +700,23 @@ def _write(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+def _remove(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
 def _json(doc) -> bytes:
     return (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
 
 class ExportBusy(RuntimeError):
-    """Another export held the lock past the timeout."""
+    """Another writer held the lock past the timeout."""
 
 
 @contextmanager
-def _export_lock(mirror: Path):
-    """One export at a time: across threads by the lock, across processes by a lock file, each waited on for at most
-    EXPORT_LOCK_TIMEOUT seconds."""
+def export_lock(mirror: Path):
+    """One writer of a mirror at a time (an export, the ledger, the copy to the public repository): across threads by
+    the lock, across processes by the lock file in ``mirror`` (POSIX; the register is served from Linux only), each
+    waited on for at most EXPORT_LOCK_TIMEOUT seconds."""
     import time  # noqa: PLC0415
     mirror.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + EXPORT_LOCK_TIMEOUT
@@ -664,14 +741,15 @@ def _export_lock(mirror: Path):
         _EXPORT_LOCK.release()
 
 
-def snapshot(log: TransLog) -> dict:
-    """Everything the export writes, read in one transaction so the files agree with each other."""
+def snapshot(log: TransLog, nodes: bool = True) -> dict:
+    """Everything the export writes, read in one transaction so the files agree with each other. Without ``nodes``
+    the tree reads its hashes from the database as a proof needs them: they never change once written."""
     db = log.db
     db.execute("BEGIN")
     try:
         rows = db.execute("SELECT l.idx, l.leaf_hash, l.kind, l.refers, b.body, b.withheld_at FROM log_leaves l"
                           " JOIN log_bodies b ON b.leaf_hash = l.leaf_hash ORDER BY l.idx").fetchall()
-        nodes = {(r["level"], r["idx"]): bytes(r["hash"]) for r in db.execute("SELECT level, idx, hash FROM log_nodes")}
+        held = {(r["level"], r["idx"]): bytes(r["hash"]) for r in db.execute("SELECT level, idx, hash FROM log_nodes")} if nodes else None
         heads = log.heads()
         first_current = db.execute("SELECT MIN(tree_size) AS m FROM log_heads WHERE key_id = ?", (log._key_id(),)).fetchone()["m"]
         struck = log.struck()
@@ -679,11 +757,13 @@ def snapshot(log: TransLog) -> dict:
     finally:
         db.execute("COMMIT")
     leaves = [r["leaf_hash"] for r in rows]
-    return {"leaves": leaves, "kinds": [r["kind"] for r in rows],
+    return {"leaves": leaves, "kinds": [r["kind"] for r in rows], "refers": [r["refers"] for r in rows],
             "bodies": [None if r["withheld_at"] else bytes(r["body"]) for r in rows],
+            "raw": [bytes(r["body"]) for r in rows],
             "withheld": sorted(r["leaf_hash"] for r in rows if r["withheld_at"]),
-            "tree": T.Tree(len(leaves), lambda level, index: nodes[(level, index)]),
-            "heads": heads, "first_current": first_current, "struck": struck, "anchors": anchors}
+            "tree": T.Tree(len(leaves), (lambda level, index: held[(level, index)]) if nodes else log._perfect),
+            "heads": heads, "first_current": first_current, "struck": struck, "anchors": anchors,
+            "current_sizes": [h["tree_size"] for h in heads if h["key_id"] == log._key_id()]}
 
 
 def pending_from(snap: dict, delay_days: float, now: datetime | None = None) -> int | None:
@@ -698,81 +778,155 @@ def pending_from(snap: dict, delay_days: float, now: datetime | None = None) -> 
     return None
 
 
-def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = None, delay_days: float = 7) -> bool:
+def _written(log: TransLog, root: Path) -> dict | None:
+    """What the last export left under ``root``, while the newest head there is the one it wrote and still the
+    database's head of that size; else None, and everything is written again."""
+    row = log.db.execute("SELECT * FROM log_exports WHERE place = ?", (str(root.resolve()),)).fetchone()
+    if row is None or row["format"] != EXPORT_FORMAT or row["key_id"] != log._key_id():
+        return None
+    try:
+        disk = json.loads((root / "sth" / "latest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return dict(row) if disk == log.head(row["tree_size"]) else None
+
+
+def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = None, delay_days: float = 7,
+           now: datetime | None = None, full: bool = False) -> bool:
     """Everything a verifier needs, under mirror/log/, and under public/log/ the same with new bodies held back for
-    `delay_days`; False when nothing was written (a blocked log, or the lock not had in time)."""
+    `delay_days`: what the entries since the last export add, or all of it with ``full`` and wherever the files are
+    not that export's. False when nothing was written (a blocked log, or the lock not had in time)."""
     import logging  # noqa: PLC0415
     if log.blocked:
         return False
+    places = [(Path(mirror) / "log", False)] + ([(Path(public) / "log", True)] if public is not None else [])
     try:
-        with _export_lock(Path(mirror)):
-            snap = snapshot(log)
-            _write_log(Path(mirror) / "log", snap, key_doc, None)
-            if public is not None:
-                _write_log(Path(public) / "log", snap, key_doc, pending_from(snap, delay_days))
+        with export_lock(Path(mirror)):
+            done = {root: None if full else _written(log, root) for root, _ in places}
+            snap = snapshot(log, nodes=any(d is None for d in done.values()))
+            for root, delayed in places:
+                pending = pending_from(snap, delay_days, now) if delayed else None
+                latest = _write_log(root, snap, key_doc, pending, done[root])
+                if latest is not None:
+                    with log.store._tx():
+                        log.db.execute("INSERT OR REPLACE INTO log_exports (place, format, key_id, tree_size, pending_from)"
+                                       " VALUES (?, ?, ?, ?, ?)", (str(root.resolve()), EXPORT_FORMAT, latest["key_id"],
+                                                                   latest["tree_size"], pending))
     except ExportBusy as e:
         logging.getLogger("register_service").warning("log export skipped: %s; the next export catches up", e)
         return False
     return True
 
 
-def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None) -> None:
+def _owed_to_the_old_head(root: Path, snap: dict, shown: list, done: dict | None, was_size: int) -> tuple:
+    """What a reader of the head still on disk needs that this export takes away: bodies whose withhold that head
+    does not hold. (kept, waiting): those it could read, as index -> body, stay until the new head is filed; those
+    it knew only as inside the delay, as indices, stay explained by the delay until then."""
+    if not was_size:
+        return {}, []
+    withheld_by = {}
+    for w, (kind, names) in enumerate(zip(snap["kinds"], snap["refers"])):
+        if kind == "withhold":
+            withheld_by.setdefault(names, w)
+    index_of = {leaf: i for i, leaf in enumerate(snap["leaves"])}
+    late = [index_of[leaf] for leaf, w in withheld_by.items() if leaf in index_of and index_of[leaf] < was_size <= w]
+    late = [i for i in late if shown[i] is None]
+    if not late:
+        return {}, []
+    if done is not None:
+        # The last export's own record says where its delay stood.
+        public = {i for i in late if done["pending_from"] is None or i < done["pending_from"]}
+    else:
+        try:
+            old = json.loads((root / "bodies.json").read_text(encoding="utf-8"))["bodies"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}, []
+        public = {i for i in late if i < len(old) and old[i] is not None}
+    # A leaf put back without its body has none to keep; one the old head held back is still owed the delay.
+    return {i: snap["raw"][i] for i in public if snap["raw"][i]}, sorted(set(late) - public)
+
+
+def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done: dict | None) -> dict | None:
+    """The files under ``root``; with ``done`` (the last export's record) only what changed since. Returns the head
+    now filed as the newest, or None when the files there are already ahead of this snapshot. In an order that
+    verifies wherever it stops: everything a reader of the old head can live with, the new head, then what is taken away."""
     tree, leaves, n = snap["tree"], snap["leaves"], len(snap["leaves"])
-    on_disk = root / "sth" / "latest.json"
+    on_disk, was_size = root / "sth" / "latest.json", 0
     if on_disk.is_file():
         try:
-            if json.loads(on_disk.read_text(encoding="utf-8"))["tree_size"] > n:
-                return
-        except (OSError, ValueError, KeyError):
+            was_size = int(json.loads(on_disk.read_text(encoding="utf-8"))["tree_size"])
+        except (OSError, ValueError, KeyError, TypeError):
             pass
+        if was_size > n:
+            return None
     # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing: neither waits.
     shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat") else b
              for i, b in enumerate(snap["bodies"])]
-    _write(root / "key.json", _json(key_doc))
-    for i, leaf_hex in enumerate(leaves):
-        path = root / "entries" / f"{leaf_hex}.json"
-        if shown[i] is None:
-            path.unlink(missing_ok=True)
-        elif not path.is_file():
-            _write(path, shown[i])
-        _write(root / "proofs" / f"{leaf_hex}.json",
-               _json({"leaf_hash": leaf_hex, "leaf_index": i, "tree_size": n, "audit_path": T.hexes(tree.inclusion(i))}))
-    hidden = {leaves[i] for i in range(n) if shown[i] is None and snap["bodies"][i] is not None}
-    struck = {k: v for k, v in snap["struck"].items() if v["leaf_hash"] not in hidden}
-    (root / "records.json").unlink(missing_ok=True)
-    _write(root / "struck.json", _json(struck))
-    _write(root / "withheld.json", _json(snap["withheld"]))
-    _write(root / "hashes.json", _json({"tree_size": n, "leaves": leaves}))
-    _write(root / "bodies.json", _json({"tree_size": n, "pending_from": pending,
-                                        "bodies": [b.decode("utf-8") if b is not None else None for b in shown]}))
-    latest = None
+    was = 0 if done is None else done["tree_size"]
+    # A body's place can change behind the newest leaf only where the delay's edge moved, or by a withhold.
+    edge = 0 if done is None else min(was, pending if pending is not None else n,
+                                      done["pending_from"] if done["pending_from"] is not None else was)
+
+    def bodies(kept: dict, edge_said: int | None) -> bytes:
+        return _json({"tree_size": n, "pending_from": edge_said,
+                      "bodies": [(kept.get(i) or b).decode("utf-8") if (b is not None or i in kept) else None
+                                 for i, b in enumerate(shown)]})
+    write_whole(root / "key.json", _json(key_doc))
+    for i in range(edge, n):
+        path = root / "entries" / f"{leaves[i]}.json"
+        if shown[i] is not None and not path.is_file():
+            write_whole(path, shown[i])
+    current = snap["current_sizes"]
+    for i in range(was, n):
+        at = bisect.bisect_left(current, i + 1)
+        size = current[at] if at < len(current) else n
+        write_whole(root / "proofs" / f"{leaves[i]}.json",
+                    _json({"leaf_hash": leaves[i], "leaf_index": i, "tree_size": size, "audit_path": T.hexes(tree.inclusion(i, size))}))
+    write_whole(root / "hashes.json", _json({"tree_size": n, "leaves": leaves}))
+    kept, waiting = _owed_to_the_old_head(root, snap, shown, done, was_size)
+    write_whole(root / "bodies.json", bodies(kept, min([pending if pending is not None else n, *waiting]) if waiting else pending))
+    latest = before = None
     for head in snap["heads"]:
-        path = root / "sth" / f"{head['tree_size']}.json"
-        if not path.is_file() or path.read_bytes() != _json(head):
-            _write(path, _json(head))
-        if head["tree_size"] < n:
-            _write(root / "consistency" / f"{head['tree_size']}.json",
-                   _json({"first": head["tree_size"], "second": n, "proof": T.hexes(tree.consistency(head["tree_size"], n))}))
-        latest = head
+        if head["tree_size"] > was:
+            write_whole(root / "sth" / f"{head['tree_size']}.json", _json(head))
+            if before is not None:
+                write_whole(root / "consistency" / f"{before['tree_size']}.json",
+                            _json({"first": before["tree_size"], "second": head["tree_size"],
+                                   "proof": T.hexes(tree.consistency(before["tree_size"], head["tree_size"]))}))
+        latest = before = head
     _write_anchors(root, snap["anchors"])
     if latest is not None:
-        _write(on_disk, _json(latest))
+        write_whole(on_disk, _json(latest))
+    # From here the new head is the one read, and it proves every withhold: what it hides can go.
+    if kept or waiting:
+        write_whole(root / "bodies.json", bodies({}, pending))
+    for leaf_hex in snap["withheld"] if done is not None else ():
+        _remove(root / "entries" / f"{leaf_hex}.json")
+    for i in range(edge, n):
+        if shown[i] is None:
+            _remove(root / "entries" / f"{leaves[i]}.json")
+    hidden = {leaves[i] for i in range(n) if shown[i] is None and snap["bodies"][i] is not None}
+    if done is None:
+        _remove(root / "records.json")
+    write_whole(root / "struck.json", _json({k: v for k, v in snap["struck"].items() if v["leaf_hash"] not in hidden}))
+    write_whole(root / "withheld.json", _json(snap["withheld"]))
+    return latest
 
 
 def _write_anchors(root: Path, anchors: list) -> None:
     rows = []
     for a in anchors:
         name = f"{a['tree_size']}.ots"
-        _write(root / "anchors" / name, bytes(a["receipt"]))
+        write_whole(root / "anchors" / name, bytes(a["receipt"]))
         rows.append({"tree_size": a["tree_size"], "root_sha256": a["root_sha256"], "backend": a["backend"], "state": a["state"],
                      "stamped_at": a["stamped_at"], "completed_at": a["completed_at"], "receipt": f"anchors/{name}"})
-    _write(root / "anchors.json", _json(rows))
+    write_whole(root / "anchors.json", _json(rows))
 
 
 def export_anchors(log: TransLog, mirror: Path) -> None:
     """The anchor receipts, as OpenTimestamps files, and their list."""
     try:
-        with _export_lock(Path(mirror)):
+        with export_lock(Path(mirror)):
             _write_anchors(Path(mirror) / "log", log.anchors())
     except ExportBusy:
         pass

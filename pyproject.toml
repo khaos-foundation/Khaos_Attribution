@@ -19,7 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7", "soundfile>=0.12", "pillow>=10"]  # fingerprint survival tests decode real audio; the seal-on-artwork tests read pixels
+# Fingerprint survival tests decode real audio; the seal-on-artwork tests read pixels; the register's tests drive it through
+# FastAPI's test client (httpx); the weights tests ask the hub's own library to read the cache they wrote.
+test = ["pytest>=7", "soundfile>=0.12", "pillow>=10", "httpx>=0.27", "huggingface_hub>=0.23"]
 # Placing the seal on hero artwork reads the artwork's pixels; the seal renderers themselves need nothing.
 artwork = ["pillow>=10"]
 # gradient.py: features of a live training module; the engine itself is found at run time.

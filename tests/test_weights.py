@@ -12,6 +12,32 @@ import pytest
 from khaos_attribution import weights as W
 
 
+class _Ranged(http.server.SimpleHTTPRequestHandler):
+    """A static server that answers `Range: bytes=N-` with the rest of the file, as the mirror's does; with
+    ``ranges`` off it sends the whole file whatever is asked. ``seen`` is (path, range asked, status, bytes sent)."""
+    seen: list = []
+    ranges = True
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        asked = self.headers.get("Range")
+        path = Path(self.translate_path(self.path))
+        if not (asked and self.ranges and path.is_file()):
+            super().do_GET()
+            _Ranged.seen.append((self.path, asked, 200, path.stat().st_size if path.is_file() else 0))
+            return
+        start = int(asked.removeprefix("bytes=").rstrip("-"))
+        data = path.read_bytes()[start:]
+        self.send_response(206)
+        self.send_header("Content-Range", f"bytes {start}-{start + len(data) - 1}/{start + len(data)}")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        _Ranged.seen.append((self.path, asked, 206, len(data)))
+
+
 @pytest.fixture
 def mirror(tmp_path):
     """A mirror on loopback holding one repository at one revision, with one file whose manifest lies."""
@@ -29,8 +55,8 @@ def mirror(tmp_path):
     (root / "org/liar" / ("b" * 40)).mkdir(parents=True)
     (root / "org/liar" / ("b" * 40) / "f.bin").write_bytes(b"12345")
     (root / "org/liar" / "manifest.json").write_text(json.dumps(liar))
-    handler = type("H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None})
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a, **k: handler(*a, directory=str(root), **k))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a, **k: _Ranged(*a, directory=str(root), **k))
+    _Ranged.seen, _Ranged.ranges = [], True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", repo, rev, files
@@ -44,10 +70,31 @@ def test_files_land_in_a_plain_folder_filtered_by_pattern_and_resume_a_partial_c
     assert (dest / "config.json").read_bytes() == files["config.json"]
     assert (dest / "weights" / "big.bin").read_bytes() == files["weights/big.bin"] and not (dest / "LICENSE").exists()
     # A partial copy is finished from where it stopped, never restarted from nothing.
+    whole = len(files["weights/big.bin"])
     (dest / "weights" / "big.bin").unlink()
     (dest / "weights" / "big.bin.part").write_bytes(files["weights/big.bin"][:100_000])
+    del _Ranged.seen[:]
     assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev
     assert (dest / "weights" / "big.bin").read_bytes() == files["weights/big.bin"] and not (dest / "weights" / "big.bin.part").exists()
+    assert [r[1:] for r in _Ranged.seen if r[0].endswith("big.bin")] == [("bytes=100000-", 206, whole - 100_000)], "only the rest was sent"
+
+
+def test_a_mirror_that_ignores_the_range_is_read_from_the_start_and_a_wrong_partial_copy_is_discarded(mirror, tmp_path):
+    base, repo, rev, files = mirror
+    dest, whole = tmp_path / "plain", files["weights/big.bin"]
+    part = dest / "weights" / "big.bin.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(whole[:100_000])
+    _Ranged.ranges = False
+    assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev
+    assert (dest / "weights" / "big.bin").read_bytes() == whole, "the whole answer replaced the partial copy, not followed it"
+    _Ranged.ranges = True
+    (dest / "weights" / "big.bin").unlink()
+    part.write_bytes(b"\0" * 100_000)
+    with pytest.raises(W.MirrorError, match="did not match"):
+        W.fetch_into_dir(repo, dest, ["weights/*"], base=base)
+    assert not part.exists() and not (dest / "weights" / "big.bin").exists()
+    assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev and (dest / "weights" / "big.bin").read_bytes() == whole
 
 
 def test_the_hub_cache_layout_is_what_the_hub_itself_reads(mirror, tmp_path):

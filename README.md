@@ -6,8 +6,8 @@ schemas — a **provenance record** attached to every generated output, a
 **attribution estimate**, and an output **tombstone** — plus Python
 functions that validate records against them using
 [jsonschema](https://python-jsonschema.readthedocs.io/), and the shared
-implementation modules the two apps pin: `watermark` (AudioSeal v2 —
-run-level SECDED codewords, retirement, the recorded reset history),
+implementation modules the two apps pin: `watermark` (AudioSeal — SECDED
+codewords, a bucket per model derived from its machine key and run id, retirement, the recorded reset history),
 `fingerprint`, `estimator` and `blend` (the attribution estimate and
 its blend of signals), `diagnostics` (whether that estimate's similarity
 signal varied with the output at all, or returns the same tracks whatever
@@ -121,7 +121,7 @@ was made.
 | `timestamp` | When the output was generated, in ISO 8601 date-time form, e.g. `2026-08-10T12:00:00Z`. |
 | `base_model` | The name and version of the underlying base model the adapter was applied to. |
 | `base_model_licence` | The licence the base model is distributed under, so downstream users know what terms apply. |
-| `watermark_id` | *(optional)* A small whole number between 0 and 65535 embedded in the audio watermark (AudioSeal, v2: the adapter RUN's ID from its model card), tying the file back to this record. `null` when the serving machine could not mark the output — the `/verify` surfaces say so loudly. |
+| `watermark_id` | *(optional)* A whole number between 0 and 65535 embedded in the audio watermark (AudioSeal): the codeword of the model's bucket, derived from its machine key and run id and written in its model card. Many models share a bucket, so the mark narrows a check to a few models and never names one; the Guild Register's serial names the model. `null` when the serving machine could not mark the output — the `/verify` surfaces say so loudly. |
 | `generation_mode` | *(optional, since v0.2.0)* How the output was produced: `text2music` for a fresh generation (the default when omitted), or `retake`, `repaint`, `extend`, `audio2audio` for outputs derived from an earlier one. |
 | `source_generation_id` | *(optional, since v0.2.0)* When the output was derived from an earlier generation, the generation ID of that source output, so lineage can be traced through the registry. `null` (or omitted) for fresh generations. |
 
@@ -148,6 +148,10 @@ which is where `reliability` and `aspects` ride — the document's top level is
 closed and its `schema_version` is a const, so a key there would invalidate
 every estimate ever written. Both schemas otherwise reject unknown fields, so typos in field names fail validation
 rather than passing silently.
+
+A new field always comes with a new `schema_version` (a test pins each schema's fields beside its version). A reader
+that meets a `schema_version` past the ones it reads raises `WrittenByNewerContract`, which says the record was written
+by a newer contract and which version this one reads up to; an unknown field under a known version is named as such.
 
 ## What the attribution estimate carries about its own signal
 

@@ -2,6 +2,7 @@
 
 from khaos_attribution.validation import (
     AttributionValidationError,
+    WrittenByNewerContract,
     load_schema,
     validate_attribution_estimate,
     validate_model_card,
@@ -24,6 +25,7 @@ __all__ = [
     "MODEL_CARD_SCHEMA_VERSION",
     "PROVENANCE_SCHEMA_VERSION",
     "TRACK_RIGHTS_SCHEMA_VERSION",
+    "WrittenByNewerContract",
     "load_schema",
     "validate_attribution_estimate",
     "validate_model_card",

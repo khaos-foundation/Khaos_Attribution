@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 
 
 ROLES = ("workshop", "space", "warden")
+# Between whole readings of the ledger's chain, a public page checks only the rows since the last one.
+LEDGER_WHOLE_CHECK_S = 3600.0
 
 
 def _payload_of(signed: dict) -> int:
@@ -296,14 +298,32 @@ class Store:
     def unresolved_serials(self) -> list:
         """Registered models the log holds unresolved after a recovery: not served until a warden answers."""
         shas = self.log.unresolved_records()
-        return sorted(r["serial"] for r in self.db.execute("SELECT serial, record_sha256 FROM records").fetchall()
-                      if r["record_sha256"] in shas)
+        out = []
+        for i in range(0, len(shas), 500):
+            chunk = shas[i:i + 500]
+            out += [r["serial"] for r in self.db.execute(
+                f"SELECT serial FROM records WHERE record_sha256 IN ({','.join('?' * len(chunk))})", chunk)]
+        return sorted(out)
 
     def withdrawn_serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'withdrawn' ORDER BY serial")]
 
     def serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records ORDER BY serial")]
+
+    def count(self, listed: bool = False) -> int:
+        """How many models are registered; with ``listed``, how many of them are not withdrawn."""
+        where = " WHERE state != 'withdrawn'" if listed else ""
+        return int(self.db.execute(f"SELECT COUNT(*) AS n FROM records{where}").fetchone()["n"])
+
+    def latest_serials(self, n: int) -> list:
+        return [r["serial"] for r in self.db.execute("SELECT serial FROM records ORDER BY serial DESC LIMIT ?", (int(n),))]
+
+    def listed(self, limit: int, offset: int = 0) -> list:
+        """(serial, published_at) of the models not withdrawn, in serial order, one page of them."""
+        return [(r["serial"], r["published_at"]) for r in self.db.execute(
+            "SELECT serial, published_at FROM records WHERE state != 'withdrawn' ORDER BY serial LIMIT ? OFFSET ?",
+            (int(limit), int(offset)))]
 
     def record_key(self, key_id: str, public_pem: str, present: list, note: str = "") -> None:
         """The ceremony's entry: which key countersigns from now on, and who was there when it was made."""
@@ -380,8 +400,9 @@ class Store:
                         " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (kind, serial, record_sha256, key_id, at, json.dumps(detail, sort_keys=True), entry_hash, prev_hash))
 
-    def ledger(self, since_seq: int = 0) -> list:
-        rows = self.db.execute("SELECT * FROM ledger WHERE seq > ? ORDER BY seq", (since_seq,))
+    def ledger(self, since_seq: int = 0, limit: int | None = None) -> list:
+        rows = self.db.execute("SELECT * FROM ledger WHERE seq > ? ORDER BY seq LIMIT ?",
+                               (since_seq, -1 if limit is None else int(limit)))
         out = []
         for r in rows:
             d = dict(r)
@@ -389,23 +410,31 @@ class Store:
             out.append(d)
         return out
 
-    def ledger_ok(self) -> bool:
-        """Every entry's hash is over its own body and names the entry before it: the chain is unbroken. Always the
-        whole chain: a remembered tip would miss an entry changed behind it."""
-        prev = None
-        for e in self.ledger():
+    def _chain(self, after_seq: int = 0, prev: str | None = None) -> tuple:
+        """(unbroken, seq, hash) for the rows after ``after_seq``, whose first must name ``prev``: every row's hash is
+        over its own body and names the row before it. The seq and hash are those the last row read follows."""
+        behind, last = (after_seq, prev), after_seq
+        for e in self.ledger(after_seq):
             body = {"kind": e["kind"], "serial": e["serial"], "record_sha256": e["record_sha256"], "key_id": e["key_id"],
                     "at": e["at"], "detail": e["detail"], "prev_sha256": prev}
             if e["prev_sha256"] != prev or e["entry_sha256"] != sha256_hex(canonical_bytes(body)):
-                return False
-            prev = e["entry_sha256"]
-        return True
+                return False, *behind
+            behind, last, prev = (last, prev), e["seq"], e["entry_sha256"]
+        return True, *behind
+
+    def ledger_ok(self) -> bool:
+        """The whole chain is unbroken: the operator's check, and the one that finds a row changed long ago."""
+        return self._chain()[0]
 
     def ledger_status(self, max_age_s: float = 60.0) -> dict:
-        """The public pages' reading: the last whole check, repeated at most once a minute, since those pages take
-        unlimited calls and the chain grows."""
+        """The public pages' reading, taken at most once a minute: the whole chain at start and once an hour, and
+        between those the rows since the last reading, checked from the row they follow."""
         now = time.monotonic()
         held = self._ledger_status
         if held is None or now - held["at"] > max_age_s:
-            self._ledger_status = held = {"ok": self.ledger_ok(), "at": now, "checked_at_utc": now_utc()}
+            # "Unbroken" can be up to LEDGER_WHOLE_CHECK_S stale for a row altered behind the last reading.
+            whole = held is None or not held["ok"] or now - held["whole_at"] > LEDGER_WHOLE_CHECK_S
+            ok, seq, prev = self._chain() if whole else self._chain(held["seq"], held["prev"])
+            self._ledger_status = held = {"ok": ok, "at": now, "checked_at_utc": now_utc(), "seq": seq, "prev": prev,
+                                          "whole_at": now if whole else held["whole_at"]}
         return {"ok": held["ok"], "checked_at_utc": held["checked_at_utc"]}

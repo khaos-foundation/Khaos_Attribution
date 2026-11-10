@@ -1,13 +1,6 @@
-"""Watermarking contract shared by every Khaos issuer.
-
-The watermark_id (0-65535) is AudioSeal's 16-bit message payload, carrying an
-extended-Hamming (16,11) SECDED codeword: single-bit detector errors are
-corrected, double errors refused. The 2048-payload space is partitioned by
-issuer (platform 0-1023, app 1024-2047) and, for run IDs, by machine band.
-The watermark delta is computed at 16 kHz and resampled onto the untouched
-original. AudioSeal is imported lazily so the codec and ranges work without
-the audio extras.
-"""
+"""The watermark every Khaos issuer shares: AudioSeal's 16-bit message carrying a (16,11) SECDED codeword, one bit
+corrected and two refused. A model's payload is a bucket derived from its machine key and run id, shared by many
+models; the issuer partition and the machine bands are the two earlier schemes, kept to read what they marked."""
 
 from __future__ import annotations
 
@@ -85,13 +78,10 @@ def watermark_issuer(codeword: int) -> str | None:
     return None
 
 
-# ---- watermarking v2: model-level allocation (docs/watermarking-v2.md) ----
-# One ID per training run, allocated into the model card. The payload space is
-# partitioned per training machine so machines allocate without coordination;
-# payloads issued by the retired per-output scheme are frozen out
-# (legacy_watermark_ids.json) so a decoded ID is owned by at most one thing.
-# Each artist's Workshop draws from its own 24-payload band, carved from the
-# old threadripper band; allocation reports exhaustion loudly.
+# ---- the earlier run-level allocation (docs/watermarking-v2.md) ----
+# One ID per training run from its machine's band, with the per-output scheme's
+# payloads frozen out (legacy_watermark_ids.json). New runs derive a bucket
+# instead (below); the bands stay so a card that carries a band ID still reads.
 ARTIST_BAND_START = 1376
 ARTIST_BAND_SIZE = 24
 ARTIST_BANDS = 20
@@ -179,8 +169,8 @@ def allocate_model_watermark_id(band: str, used: set[int]) -> int | None:
 
 
 def allocate_watermark_id(used: set[int], issuer: str = "platform") -> int | None:
-    """DEPRECATED: per-output allocation is retired — new audio carries its
-    model's run ID (allocate_model_watermark_id). Kept for legacy callers."""
+    """DEPRECATED: per-output allocation is retired; new audio carries its model's derived bucket
+    (derive_watermark_id). Kept for legacy callers."""
     payload_range = PAYLOAD_RANGES[issuer]
     span = len(payload_range)
     for _ in range(64):
@@ -219,6 +209,13 @@ def _load_models():
         return _MODELS
 
 
+def _framed(audio):
+    """The array as embed and detect take it, or ValueError: a guess at a caller's layout would mark the wrong axis."""
+    if getattr(audio, "ndim", 0) != 2 or not len(audio):
+        raise ValueError(f"audio must be shaped (frames, channels) with at least one frame, got {getattr(audio, 'shape', None)}")
+    return audio
+
+
 class Watermarker:
     """Embed/detect on in-memory audio arrays.
 
@@ -251,6 +248,7 @@ class Watermarker:
         """(marked audio, strength): the first strength whose id reads back clean, else the strongest whose id reads
         back corrected, else the strongest with a warning, since a present mark whose id cannot be read is still a
         mark."""
+        audio = _framed(audio)
         import torch
         import torchaudio
 
@@ -277,39 +275,10 @@ class Watermarker:
         return marked, Watermarker.STRENGTHS[-1]
 
     @staticmethod
-    def decode_consistent(audio, sample_rate: int, *, window_s: float = 6.0,
-                          hop_s: float = 3.0) -> tuple[float, int | None]:
-        """DEPRECATED: windowed agreement does not discriminate excerpts from
-        full files. Use cross-evidence (a fingerprint match whose recorded ID
-        confirms or contradicts the decoded payload) instead. Kept only so
-        pinned consumers keep importing."""
-        import numpy as np  # noqa: PLC0415
-
-        whole_prob, whole_id, _ = Watermarker.detect_array(audio, sample_rate)
-        if whole_id is None:
-            return whole_prob, None
-        window = int(window_s * sample_rate)
-        hop = int(hop_s * sample_rate)
-        agree = disagree = 0
-        for start in range(0, max(1, len(audio) - window + 1), hop):
-            segment = np.ascontiguousarray(audio[start:start + window])
-            if len(segment) < sample_rate:
-                continue
-            _, got, _ = Watermarker.detect_array(segment, sample_rate)
-            if got == whole_id:
-                agree += 1
-            elif got is not None:
-                disagree += 1
-        # Short clips may yield a single window; consistency then means
-        # "nothing contradicted the whole-clip decode".
-        if disagree == 0 and agree >= 1:
-            return whole_prob, whole_id
-        return whole_prob, None
-
-    @staticmethod
     def detect_array(audio, sample_rate: int) -> tuple[float, int | None, bool]:
         """(probability, clean codeword or None, corrected?) for audio
         shaped (frames, channels) float32."""
+        audio = _framed(audio)
         import torch
         import torchaudio
 

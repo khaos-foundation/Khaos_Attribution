@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 
 from khaos_attribution.base_model import is_base_model_id
 import os
@@ -127,6 +128,17 @@ def _is_sha256(v) -> bool:
     return isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v)
 
 
+def _not_finite(value, path: str = "") -> list:
+    """Where a document holds NaN or an infinity, as paths: neither is JSON, so no other reader could take the record."""
+    if isinstance(value, float):
+        return [] if math.isfinite(value) else [path]
+    if isinstance(value, dict):
+        return [p for k, v in value.items() for p in _not_finite(v, f"{path}.{k}" if path else str(k))]
+    if isinstance(value, list):
+        return [p for i, v in enumerate(value) for p in _not_finite(v, f"{path}[{i}]")]
+    return []
+
+
 def record_problems(record: dict) -> list:
     """What keeps a record out of the register, in words; empty means it may be signed.
     Every field the public page and the views read is checked here, so a numbered record never breaks them."""
@@ -213,6 +225,7 @@ def record_problems(record: dict) -> list:
         out.append("training_set.data_kinds must be a list of words")
     if record["public_view"] == "writers" and ts.get("writers_agreed") is not True:
         out.append("public_view 'writers' needs training_set.writers_agreed: true, every named writer having agreed")
+    out += [f"{path} is not finite" for path in _not_finite(record)]
     return out
 
 

@@ -222,7 +222,7 @@ def test_an_export_waits_a_bounded_time_for_the_lock_then_skips(register, monkey
     release = threading.Event()
 
     def hold():
-        with RT._export_lock(app.state.cfg["data"] / "mirror"):
+        with RT.export_lock(app.state.cfg["data"] / "mirror"):
             held.set()
             release.wait(5)
     t = threading.Thread(target=hold)

@@ -68,9 +68,10 @@ def flush_accelerator() -> None:
 # ── the features, by a worker in the engine's environment ─────────────────────────────────────────────────────────
 
 import json  # noqa: E402
-import subprocess  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+from khaos_attribution.engines.worker_process import ROW_PREFIX  # noqa: E402, F401 — the workers read it here
 
 MEASURE_WORKER = Path(__file__).with_name("measure_worker.py")
 MEASURE_WORKER_MLX = Path(__file__).with_name("measure_worker_mlx.py")
@@ -96,9 +97,8 @@ class Handle:
 
 
 def _env(handle: Handle) -> dict:
-    import os  # noqa: PLC0415
-    return {**os.environ, "PYTHONPATH": str(handle.root), "SA3_ROOT": str(handle.root), "WANDB_MODE": "disabled",
-            "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1")}
+    from khaos_attribution.engines.worker_process import engine_env  # noqa: PLC0415
+    return engine_env(handle.root, SA3_ROOT=str(handle.root))
 
 
 _REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("rows", "matrix"), "feature": ("feature",),
@@ -108,64 +108,19 @@ _REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("
                "tid_kernels": ("kernels", "draws_done", "grid", "live_tensors", "dropped_tensors", "normaliser_zero", "seconds")}
 
 
-ROW_PREFIX = "khaos-row "
-
-
 def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
     """The worker's reply; its ``khaos-row`` lines reach ``on_progress`` as they come, so a long index shows its
     progress while the worker runs."""
-    import tempfile  # noqa: PLC0415
     from khaos_attribution.engines import contract_guard  # noqa: PLC0415
+    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
     contract_guard.require(handle.python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=GradientUnavailable)
     worker = MEASURE_WORKER_MLX if handle.runtime == "mlx" else MEASURE_WORKER
-    lines = []
-    # stderr to a file, never a pipe: a worker that writes much to it would block while stdout is being read.
-    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
-        try:
-            proc = subprocess.Popen([str(handle.python), str(worker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                    stderr=err, cwd=str(handle.root), text=True, errors="replace", env=_env(handle))
-        except OSError as exc:
-            raise GradientUnavailable(f"the Stable Audio 3 measure worker could not start: {exc}") from exc
-        try:
-            try:
-                proc.stdin.write(json.dumps(request))
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
-            for line in proc.stdout:
-                if line.startswith(ROW_PREFIX):
-                    if on_progress is not None:
-                        try:
-                            on_progress(json.loads(line[len(ROW_PREFIX):]))
-                        except ValueError:
-                            pass
-                    continue
-                lines.append(line)
-            returncode = proc.wait()
-        finally:
-            # A worker left running would hold the device's memory after its caller has gone.
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait()
-            for pipe in (proc.stdin, proc.stdout):
-                if pipe is not None and not pipe.closed:
-                    pipe.close()
-        err.seek(0)
-        stderr = err.read()
-    last = "".join(lines).strip().splitlines()[-1:] or [""]
     try:
-        reply = json.loads(last[0])
-    except ValueError:
-        reply = None
-    if not isinstance(reply, dict) or reply.get("error") or returncode != 0:
-        why = (reply or {}).get("error") if isinstance(reply, dict) else "\n".join(stderr.splitlines()[-6:])
-        raise GradientUnavailable(f"the Stable Audio 3 measure worker failed: {why}")
-    missing = [k for k in _REPLY_KEYS.get(request.get("command"), ()) if k not in reply]
-    if missing:
-        raise GradientUnavailable(f"the Stable Audio 3 measure worker's reply lacks {', '.join(missing)}")
-    return reply
-
+        return W.stream(handle.python, worker, request, cwd=handle.root, env=_env(handle), label="Stable Audio 3 measure",
+                        on_row=on_progress, required=_REPLY_KEYS.get(request.get("command"), ()))
+    except W.WorkerFailed as exc:
+        raise GradientUnavailable(str(exc)) from exc
 
 
 def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:

@@ -221,3 +221,40 @@ def test_a_rights_record_with_a_nan_share_is_refused():
            "publishers": [], "source": "operator-entered", "verified_date": "2026-08-01"}
     with pytest.raises(AttributionValidationError, match="not a finite number"):
         validate_track_rights(rec)
+
+
+def test_a_record_from_a_newer_contract_says_so_in_plain_words():
+    """A room one version behind names the cause, not the validator's 'additional properties are not allowed'."""
+    from khaos_attribution import WrittenByNewerContract, validate_attribution_estimate, validate_tombstone, validate_track_rights
+    card = dict(GOOD_MODEL_CARD, schema_version="1.2.0", a_field_of_the_newer_contract=1)
+    with pytest.raises(WrittenByNewerContract) as newer:
+        validate_model_card(card)
+    said = str(newer.value)
+    assert "written by a newer contract" in said and "schema_version 1.2.0" in said and "reads up to 1.1.0" in said
+    assert "Additional properties" not in said and isinstance(newer.value, AttributionValidationError)
+    with pytest.raises(WrittenByNewerContract, match="reads up to 1.0.0"):
+        validate_provenance_record(dict(GOOD_PROVENANCE_RECORD, schema_version="2.0.0"))
+    for validate in (validate_track_rights, validate_attribution_estimate, validate_tombstone):
+        with pytest.raises(WrittenByNewerContract, match="newer contract"):
+            validate({"schema_version": "7.0.0"})
+
+
+def test_an_older_or_malformed_version_is_not_called_newer():
+    from khaos_attribution import WrittenByNewerContract
+    for version in ("0.9.0", "one", None, 3):
+        with pytest.raises(AttributionValidationError) as bad:
+            validate_provenance_record(dict(GOOD_PROVENANCE_RECORD, schema_version=version))
+        assert not isinstance(bad.value, WrittenByNewerContract) and "schema_version" in str(bad.value)
+    validate_model_card(dict(GOOD_MODEL_CARD, schema_version="1.0.0"))
+
+
+def test_an_unknown_field_under_a_known_version_is_named_in_plain_words():
+    with pytest.raises(AttributionValidationError) as bad:
+        validate_provenance_record(dict(GOOD_PROVENANCE_RECORD, prompt_languge="en", another=1))
+    said = str(bad.value)
+    assert "fields this contract does not know: another, prompt_languge" in said and "newer contract" in said
+    assert "Additional properties" not in said
+    card = copy.deepcopy(GOOD_MODEL_CARD)
+    card["training_catalogue"][0]["tempo"] = 120
+    with pytest.raises(AttributionValidationError, match="at training_catalogue/0: fields this contract does not know: tempo"):
+        validate_model_card(card)

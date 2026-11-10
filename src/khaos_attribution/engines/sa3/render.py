@@ -327,16 +327,14 @@ REWORKS = {"retake": Renderer._whole, "audio2audio": Renderer._whole, "repaint":
            "extend": Renderer._extend}
 
 
-def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, timeout: float | None = None) -> dict:
+def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, timeout=W.DEFAULT) -> dict:
     """One worker process through the contract's shared loop; a stop request kills it and nothing is kept."""
     from khaos_attribution.engines import contract_guard  # noqa: PLC0415
     python = python_for(root, runtime)
     contract_guard.require(python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=RenderFailed)
-    env = {**os.environ, "PYTHONPATH": str(root), "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
-           "WANDB_MODE": "disabled"}
     try:
-        return W.run(python, WORKER, request, cwd=root, env=env, label="Stable Audio 3", should_stop=should_stop,
-                     timeout=timeout, required="seed")
+        return W.run(python, WORKER, request, cwd=root, env=W.engine_env(root), label="Stable Audio 3",
+                     should_stop=should_stop, timeout=timeout, required="seed")
     except W.WorkerCancelled:
         raise RenderCancelled() from None
     except W.WorkerFailed as exc:

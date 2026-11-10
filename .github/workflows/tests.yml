@@ -14,6 +14,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      # A fresh runner venv; uv.lock still records an older version of this package, so --frozen, not --locked.
-      - run: uv sync --frozen --extra test
+      # A fresh runner venv. A release moves the version without locking again, so --frozen, not --locked.
+      # Every extra the register, the log, the registry and the credentials tests import; torch stays out, and the
+      # suite itself fails on a skip it does not expect (tests/conftest.py).
+      - run: uv sync --frozen --extra test --extra service --extra registry --extra credentials
       - run: .venv/bin/python -m pytest -q -rs

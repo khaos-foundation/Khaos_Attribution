@@ -5,13 +5,13 @@ weights the descriptor lists, from Khaos's own mirror first. --check reports wit
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
 from khaos_attribution import weights as mirror
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import find_root, venv_python
+from khaos_attribution.engines.worker_process import host_env
 from khaos_attribution.engines.sa3.provision import (Report, _from_mirror, _run, archive_url, contract_into, contract_mismatch,
                                                      contract_present, git_usable, unpack_archive, uv_path)
 
@@ -187,7 +187,7 @@ def weights(root: Path, *, check_only: bool = False) -> list:
             continue
         code = ("import json, sys; from huggingface_hub import snapshot_download; "
                 "snapshot_download(sys.argv[1], revision=sys.argv[2] or None, allow_patterns=json.loads(sys.argv[3]) or None)")
-        done = _run([python, "-c", code, repo, rev or "", json.dumps(w.get("patterns") or [])], env={**os.environ, "HF_HUB_OFFLINE": "0"})
+        done = _run([python, "-c", code, repo, rev or "", json.dumps(w.get("patterns") or [])], env={**host_env(), "HF_HUB_OFFLINE": "0"})
         if done.returncode != 0 or not cached(repo, files, rev):
             why = done.stderr.strip().splitlines()[-1:] or ["a file is still missing"]
             out.append((False, f"{repo} could not be downloaded: {why[0][:200]}"))
