@@ -194,3 +194,26 @@ def test_one_bad_file_never_stops_the_batch(tmp_path, capsys, no_detector, monke
     assert V.main([str(bad), str(good)]) == 2
     out = capsys.readouterr().out
     assert "bad.wav: boom" in out and "good.wav: No Khaos mark found" in out
+
+
+def _plain(path, frames, channels=1, level=0):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(22050)
+        w.writeframes(struct.pack("<h", level) * frames * channels)
+    return path
+
+
+@pytest.mark.parametrize("frames, channels", [(220, 1), (22050 * 3, 1), (22050 * 3, 2)])
+def test_a_clip_too_short_or_silent_is_none_and_the_register_is_not_asked(tmp_path, no_detector, frames, channels):
+    """Ten milliseconds, and three silent seconds in mono and stereo: nothing to fingerprint, said so, never a guess."""
+    r = V.verify_file(_plain(tmp_path / "quiet.wav", frames, channels), register_url="http://127.0.0.1:9")
+    assert r["verdict"] == "none" and "not proof a person made it" in r["message"]
+    assert r["register"] == {"grade": None, "url": "http://127.0.0.1:9", "error": "too short or too quiet to fingerprint"}
+
+
+def test_a_file_with_no_audio_is_never_handed_to_the_detector(tmp_path, detector):
+    """The stand-in detector hears a mark in anything; a file of no frames is not listened to at all."""
+    r = V.verify_file(_plain(tmp_path / "empty.wav", 0))
+    assert r["verdict"] == "none" and r["watermark"] == {"checked": False, "reason": "the file holds no audio"}

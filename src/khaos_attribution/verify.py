@@ -109,6 +109,8 @@ def _watermark(audio, sample_rate: int) -> dict:
     from khaos_attribution.watermark import Watermarker, decode_codeword  # noqa: PLC0415
     if not Watermarker.available():
         return {"checked": False, "reason": "the watermark detector (audioseal) is not installed"}
+    if not len(audio):
+        return {"checked": False, "reason": "the file holds no audio"}
     probability, codeword, corrected = Watermarker.detect_array(audio, sample_rate)
     detected = probability >= WATERMARK_THRESHOLD
     decoded = decode_codeword(codeword) if detected and codeword is not None else None

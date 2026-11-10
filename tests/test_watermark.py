@@ -205,3 +205,17 @@ def test_each_artist_has_a_band_of_its_own_and_the_old_bands_did_not_move():
     ids_a = {allocate_model_watermark_id("artist-01", set()) for _ in range(40)}
     ids_b = {allocate_model_watermark_id("artist-02", set()) for _ in range(40)}
     assert not (ids_a & ids_b)
+
+
+def test_audio_that_is_not_frames_by_channels_is_refused_in_words_before_any_model_loads():
+    """One-dimensional mono, an empty array and a batch are a caller's mistake: named, never marked or read on a guess."""
+    import numpy as np
+
+    from khaos_attribution import watermark as wm
+    for bad in (np.zeros(1600, dtype=np.float32), np.zeros((0, 2), dtype=np.float32), np.zeros((2, 3, 4), dtype=np.float32)):
+        with pytest.raises(ValueError, match=r"\(frames, channels\)"):
+            wm.Watermarker.embed_verified(bad, 16000, wm.encode_payload(40))
+        with pytest.raises(ValueError, match=r"\(frames, channels\)"):
+            wm.Watermarker.embed_array(bad, 16000, wm.encode_payload(40))
+        with pytest.raises(ValueError, match=r"\(frames, channels\)"):
+            wm.Watermarker.detect_array(bad, 16000)
