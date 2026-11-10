@@ -131,26 +131,35 @@ class Index:
         return int(self.db.execute("SELECT COUNT(*) FROM outputs").fetchone()[0])
 
     def _candidates(self, phases: list, payload: int | None) -> dict:
-        """The outputs sharing hashes with the query, by generation id, with the landmarks that share them: a vote
-        only ever comes from a shared hash, so the rest of a candidate's landmarks are never read. The bucket first;
-        a withdrawn model's pieces never."""
+        """The outputs sharing most hashes with the query, by generation id, with the landmarks that share them: a
+        vote only ever comes from a shared hash, so the rest of a candidate's landmarks are never read, and the
+        database makes the cut, so only the kept candidates' rows are. The bucket first; a withdrawn model's pieces never."""
         hashes = sorted({h for q in phases for h, _ in q})
         if not hashes:
             return {}
-        rows: dict = {}
-        for i in range(0, len(hashes), 900):
-            chunk = hashes[i:i + 900]
-            marks = ",".join("?" * len(chunk))
-            q = ("SELECT f.generation_id AS g, f.hash AS h, f.offset_ms AS o FROM fingerprints f"
-                 " JOIN outputs ou ON ou.generation_id = f.generation_id WHERE ou.withdrawn = 0 AND f.hash IN (%s)" % marks)
-            params: list = list(chunk)
-            if payload is not None:
-                q += " AND ou.payload = ?"
-                params.append(payload)
-            for row in self.db.execute(q, params):
-                rows.setdefault(row["g"], []).append((row["h"], row["o"]))
-        top = sorted(rows, key=lambda g: len(rows[g]), reverse=True)[:CANDIDATES]
-        return {g: rows[g] for g in top}
+        db = self.db
+        db.execute("CREATE TEMP TABLE IF NOT EXISTS query_hashes (h INTEGER PRIMARY KEY)")
+        db.execute("BEGIN")
+        try:
+            db.execute("DELETE FROM query_hashes")
+            db.executemany("INSERT INTO query_hashes (h) VALUES (?)", [(h,) for h in hashes])
+            shared = (" FROM query_hashes q JOIN fingerprints f ON f.hash = q.h JOIN outputs ou ON ou.generation_id = f.generation_id"
+                      " WHERE ou.withdrawn = 0" + (" AND ou.payload = ?" if payload is not None else ""))
+            bucket = [] if payload is None else [payload]
+            # Ties keep the order a hash-by-hash reading meets them in: the lowest shared hash, then the id.
+            top = [r["g"] for r in db.execute(
+                "SELECT f.generation_id AS g" + shared + " GROUP BY f.generation_id"
+                " ORDER BY COUNT(*) DESC, MIN(f.hash), f.generation_id LIMIT ?", [*bucket, CANDIDATES])]
+            rows: dict = {g: [] for g in top}
+            for i in range(0, len(top), 900):
+                chunk = top[i:i + 900]
+                for row in db.execute("SELECT f.generation_id AS g, f.hash AS h, f.offset_ms AS o" + shared
+                                      + " AND f.generation_id IN (%s) ORDER BY f.hash, f.generation_id, f.offset_ms" % ",".join("?" * len(chunk)),
+                                      [*bucket, *chunk]):
+                    rows[row["g"]].append((row["h"], row["o"]))
+        finally:
+            db.execute("COMMIT")
+        return rows
 
     def verify(self, phases: list, payload: int | None) -> dict:
         """The three grades: a named output; a watermark alone narrowing to a bucket; nothing."""
