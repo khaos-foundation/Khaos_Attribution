@@ -124,7 +124,7 @@ def main(argv=None) -> int:
             verdict = store.log.open_verdict(store.log.witness(log_places(cfg)[3], pub.read_text(encoding="ascii")),
                                              started=(cfg["data"] / "log-started").is_file())
             problems += [verdict] if verdict else []
-        print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {len(store.serials())} models")
+        print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {store.count()} models")
         print(f"log {'whole' if not problems else 'BROKEN'}: {store.log.size()} entries"
               + ("" if pub.is_file() else " (no log public key beside the key file; signatures not checked)"))
         for p_ in problems[:20]:

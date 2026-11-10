@@ -26,7 +26,7 @@ from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of
 from register_service.store import Store, now_utc
-from register_service.translog import EntryRefused, LogBlocked, export as export_log
+from register_service.translog import EntryRefused, LogBlocked, _write as write_whole, export as export_log
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
@@ -170,6 +170,10 @@ class RateLimit:
 PUBLIC_LIMITS = {"/api/verify": 20, "/api/enrol": 6}
 # The log's public reads: a verifier walks a few files per entry; a crawler is bounded.
 LOG_READ_LIMIT = 240
+# Every other read, pages and lists alike: a person and a Space's poll are far under it, a crawler is bounded.
+READ_LIMIT = 240
+LEDGER_PAGE = 1000
+SITEMAP_PAGE = 10000
 SIGNED_LIMIT = 120
 # A verify key's own lane: far above the public bound, still a bound, per key.
 KEYED_VERIFY_LIMIT = 600
@@ -233,23 +237,22 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(401, "the signature is not this machine's over this body")
         return body, machine, key_id, pem
 
+    mirror_lock = threading.Lock()
+
     def write_mirror(serial: int) -> None:
-        rec = store.record(serial)
-        doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
-               "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
-               "machine_public_pem": rec.get("machine_public_pem"),
-               "countersignature": rec["countersignature"], "served": rec["served"],
-               "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
-               "log_state": "unresolved" if serial in store.unresolved_serials() else None}
-        tmp = mirror / "models" / f"{serial}.json.new"
-        tmp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, mirror / "models" / f"{serial}.json")
-        # The mirror is rsynced on a timer; a reader must never meet a half-written ledger.
-        new = mirror / "ledger.jsonl.new"
-        with open(new, "w", encoding="utf-8") as fh:
-            for e in store.ledger():
-                fh.write(json.dumps(e, sort_keys=True) + "\n")
-        os.replace(new, mirror / "ledger.jsonl")
+        """One writer at a time, each file through a temporary file of its own: the mirror is rsynced on a timer, and a
+        reader must never meet a half-written ledger."""
+        with mirror_lock:
+            rec = store.record(serial)
+            doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
+                   "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
+                   "machine_public_pem": rec.get("machine_public_pem"),
+                   "countersignature": rec["countersignature"], "served": rec["served"],
+                   "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
+                   "log_state": "unresolved" if serial in store.unresolved_serials() else None}
+            write_whole(mirror / "models" / f"{serial}.json", (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8"))
+            ledger_lines = "".join(json.dumps(e, sort_keys=True) + "\n" for e in store.ledger())
+            write_whole(mirror / "ledger.jsonl", ledger_lines.encode("utf-8"))
 
     def log_mirror_quietly() -> None:
         try:
@@ -269,6 +272,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     limits = {path: RateLimit(n) for path, n in {**PUBLIC_LIMITS, **CLAIM_LIMITS}.items()}
     log_read_limit = RateLimit(LOG_READ_LIMIT)
+    read_limit = RateLimit(READ_LIMIT)
     lookup_limits = {path: RateLimit(n) for path, n in softbinding.LIMITS.items()}
     signed_limit = RateLimit(SIGNED_LIMIT)
     from register_service.verify_keys import Allowed  # noqa: PLC0415
@@ -288,8 +292,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if not bucket.allow(client):
                 return JSONResponse({"detail": "too many requests from this address; try again in a minute"}, status_code=429,
                                     headers={"Retry-After": "60"})
-        elif request.method in ("GET", "HEAD") and path.startswith(("/log/", "/mirror/log/")):
-            if not log_read_limit.allow(client):
+        elif request.method in ("GET", "HEAD"):
+            bucket = log_read_limit if path.startswith(("/log/", "/mirror/log/")) else read_limit
+            if not bucket.allow(client):
                 return JSONResponse({"detail": "too many requests from this address; try again in a minute"}, status_code=429,
                                     headers={"Retry-After": "60"})
         elif request.method == "POST":
@@ -586,8 +591,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/ledger")
     def ledger(since: int = 0):
-        return PlainTextResponse("\n".join(json.dumps(e, sort_keys=True) for e in store.ledger(since)) + "\n",
-                                 media_type="application/x-ndjson")
+        """The rows after ``since``, a page of them; a Link header names the next page while there is one."""
+        rows = store.ledger(since, limit=LEDGER_PAGE + 1)
+        more, rows = len(rows) > LEDGER_PAGE, rows[:LEDGER_PAGE]
+        headers = {"Link": f'</api/ledger?since={rows[-1]["seq"]}>; rel="next"'} if more else {}
+        return PlainTextResponse("\n".join(json.dumps(e, sort_keys=True) for e in rows) + "\n",
+                                 media_type="application/x-ndjson", headers=headers)
 
     @app.api_route("/models/{serial}", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def model_page(serial: int):
@@ -654,9 +663,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def home():
         from register_service import pages as P  # noqa: PLC0415
-        serials = store.serials()
         rows = []
-        for serial in serials[-100:][::-1]:
+        for serial in store.latest_serials(100):
             rec = store.record(serial)
             if not rec:
                 continue
@@ -665,7 +673,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                                 (P.state_chip(rec["state"]), "")]))
         para = ("The public ledger of registered fine-tuned models: what each was trained on, as its artist attested, "
                 "countersigned by the register and never edited.")
-        facts = [P.count(len(serials), "model") + " registered", "ledger unbroken" if store.ledger_status()["ok"] else "ledger BROKEN",
+        facts = [P.count(store.count(), "model") + " registered", "ledger unbroken" if store.ledger_status()["ok"] else "ledger BROKEN",
                  "serials from 65,536"]
         body = P.hero("", "The Guild Register", para, facts)
         body += P.section("Registered models", "newest first")
@@ -677,14 +685,17 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/robots.txt", methods=["GET", "HEAD"])
     def robots():
         from register_service import pages as P  # noqa: PLC0415
-        return PlainTextResponse(P.robots_txt(cfg["public_url"]))
+        return PlainTextResponse(P.robots_txt(cfg["public_url"], -(-store.count(listed=True) // SITEMAP_PAGE)))
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
-    def sitemap():
+    def sitemap(page: int = 1):
+        """A page of the models not withdrawn; the plain address is the first, which also names the home page."""
         from register_service import pages as P  # noqa: PLC0415
-        records = [(serial, store.record(serial) or {}) for serial in store.serials()]
-        models = [(serial, P.day(rec.get("published_at"))) for serial, rec in records if rec.get("state") != "withdrawn"]
-        return Response(P.sitemap_xml(cfg["public_url"], models), media_type="application/xml")
+        models = store.listed(SITEMAP_PAGE, (page - 1) * SITEMAP_PAGE) if page >= 1 else []
+        if page != 1 and not models:
+            raise HTTPException(404, "no such page of the sitemap")
+        return Response(P.sitemap_xml(cfg["public_url"], [(serial, P.day(at)) for serial, at in models], home=page == 1),
+                        media_type="application/xml")
 
     @app.api_route("/favicon.svg", methods=["GET", "HEAD"])
     def favicon_svg():
@@ -826,7 +837,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/health")
     def health():
-        return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": len(store.serials()), "outputs": index.count(),
+        return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": store.count(), "outputs": index.count(),
                              "log_blocked": store.log.blocked,
                              "development": bool(cfg["dev_key"])})
 

@@ -296,7 +296,7 @@ def test_the_public_doors_take_a_bounded_number_of_calls_a_minute_per_address(re
     assert codes[: PUBLIC_LIMITS["/api/verify"]] == [200] * PUBLIC_LIMITS["/api/verify"] and codes[-1] == 429
     r = http.post("/api/verify", json=bad)
     assert r.status_code == 429 and r.headers["retry-after"] == "60"
-    assert http.get("/api/withdrawn").status_code == 200, "reads are never limited"
+    assert http.get("/api/withdrawn").status_code == 200, "reads have a bucket of their own"
     assert http.post("/api/verify", json=bad, headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 200, "another address, its own bucket"
     # The proxy appends the real address last; a forged first entry does not buy a fresh bucket.
     forged = [http.post("/api/verify", json=bad, headers={"X-Forwarded-For": f"10.0.0.{i}, 203.0.113.9"}).status_code for i in range(30)]
@@ -394,9 +394,9 @@ def test_a_failed_write_leaves_nothing_behind(register, monkeypatch):
 def test_the_public_pages_read_the_ledger_check_at_most_once_a_minute(register):
     _, store, http = register
     first = store.ledger_status()
-    store.db.execute("UPDATE ledger SET detail_json = '{\"x\": 1}' WHERE seq = 1")
+    store.db.execute("UPDATE ledger SET detail_json = '{\"x\": 1}' WHERE seq = (SELECT MAX(seq) FROM ledger)")
     assert store.ledger_status()["checked_at_utc"] == first["checked_at_utc"], "within the minute, the last reading"
-    assert store.ledger_ok() is False, "the real check is always whole"
+    assert store.ledger_ok() is False, "the operator's check is always whole"
     assert store.ledger_status(max_age_s=0)["ok"] is False
 
 

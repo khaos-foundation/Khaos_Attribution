@@ -139,13 +139,15 @@ def site_json_ld(base: str) -> str:
     return '<script type="application/ld+json">' + json.dumps(doc).replace("<", "\\u003c") + "</script>"
 
 
-def robots_txt(base: str) -> str:
-    return f"User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: {base}/sitemap.xml\n"
+def robots_txt(base: str, pages: int = 1) -> str:
+    """The sitemap's first page under its plain address, and each later page by number."""
+    maps = "".join(f"Sitemap: {base}/sitemap.xml{f'?page={n}' if n > 1 else ''}\n" for n in range(1, max(1, pages) + 1))
+    return f"User-agent: *\nAllow: /\nDisallow: /api/\n\n{maps}"
 
 
-def sitemap_xml(base: str, models: list) -> str:
-    """The home page and every model page; ``models`` is (serial, last-changed day) pairs."""
-    urls = [f"<url><loc>{esc(base)}/</loc></url>"] + [
+def sitemap_xml(base: str, models: list, home: bool = True) -> str:
+    """One page of the sitemap: the home page on the first, and a model page for each (serial, last-changed day)."""
+    urls = ([f"<url><loc>{esc(base)}/</loc></url>"] if home else []) + [
         f"<url><loc>{esc(base)}/models/{int(serial)}</loc>" + (f"<lastmod>{esc(day)}</lastmod>" if day else "") + "</url>"
         for serial, day in models]
     return ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
