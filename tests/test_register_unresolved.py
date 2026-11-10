@@ -95,35 +95,78 @@ def test_the_generated_logs_hold_every_state_the_rule_tells_apart(tmp_path):
     assert seen == {"unresolved", "standing", "struck"} and some_unresolved >= 10
 
 
-def _statements(store, call) -> int:
-    seen = []
-    store.db.set_trace_callback(seen.append)
+def _work(store, call) -> int:
+    """The database's own count of the work a call made it do: virtual-machine steps, in hundreds."""
+    ticks = [0]
+
+    def tick():
+        ticks[0] += 1
+        return 0
+    store.db.set_progress_handler(tick, 100)
     try:
         call()
     finally:
-        store.db.set_trace_callback(None)
-    return len(seen)
+        store.db.set_progress_handler(None, 0)
+    return ticks[0]
 
 
-def test_a_log_that_lost_nothing_is_answered_without_reading_its_admits(tmp_path):
-    counts = []
-    for seed, steps in ((1000, 60), (1001, 600)):
-        store = _generated(tmp_path, seed, steps=steps, lost_share=0.0)
-        assert store.unresolved_serials() == []
-        counts.append(_statements(store, store.unresolved_serials))
-    assert counts[0] == counts[1] <= 2, counts
+def _grown(tmp_path, name: str, models: int, lost: str | None) -> Store:
+    """``models`` admitted records; with ``lost``, one leaf lost half-way and what the wardens did about it:
+    'answered' for every admit, or 'open'. Two later admits name the loss either way."""
+    store = Store(tmp_path / f"{name}.sqlite3")
+    log = store.log
+    with store._tx():
+        for n in range(models):
+            sha = _sha(f"{name}-{n}")
+            store.db.execute("INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json,"
+                             " state, published_at) VALUES (?, ?, 'k', 1, '{}', '{}', 'registered', 't')", (65536 + n, sha))
+            entry = T.make_entry("admit", serial=65536 + n, record_sha256=sha)
+            log._insert_leaf(T.jcs(entry), entry)
+            if lost and n == models // 2:
+                leaf = _sha(f"{name}-lost")
+                log.replay_leaf_locked(leaf)
+        if lost:
+            for n in (models, models + 1):
+                sha = _sha(f"{name}-{n}")
+                store.db.execute("INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json,"
+                                 " state, published_at) VALUES (?, ?, 'k', 1, '{}', '{}', 'registered', 't')", (65536 + n, sha))
+                entry = T.make_entry("admit", serial=65536 + n, record_sha256=sha, pending_lost=[leaf])
+                log._insert_leaf(T.jcs(entry), entry)
+            if lost == "answered":
+                entry = T.make_entry("confirm", answers=leaf, sitting="S1")
+                log._insert_leaf(T.jcs(entry), entry)
+    return store
 
 
-def test_a_log_with_losses_is_read_in_passes_not_once_per_model(tmp_path):
-    """The number of queries follows the wardens' answers, never the number of admitted models."""
-    small = _generated(tmp_path, 2000, steps=80, lost_share=0.1)
-    large = _generated(tmp_path, 2001, steps=1200, lost_share=0.1)
+def test_a_log_that_lost_nothing_costs_the_same_whatever_its_size(tmp_path):
+    """Measured in the database's own work, so reading every record to answer 'none' is seen."""
+    small, large = _grown(tmp_path, "small", 50, None), _grown(tmp_path, "large", 2000, None)
+    assert small.unresolved_serials() == large.unresolved_serials() == []
+    assert _work(large, large.unresolved_serials) <= _work(small, small.unresolved_serials) + 1
+
+
+def test_an_answered_loss_costs_by_the_loss_not_by_the_log(tmp_path):
+    """One lost leaf the wardens have answered for every model: nothing is under review, and finding that out reads
+    the loss, its answer and the admits that named it, however many models the log holds."""
+    small, large = _grown(tmp_path, "small", 50, "answered"), _grown(tmp_path, "large", 2000, "answered")
     for store in (small, large):
-        assert store.unresolved_serials() == _reference_serials(store) != []
-    admits = lambda s: s.db.execute("SELECT COUNT(*) FROM log_leaves WHERE kind = 'admit'").fetchone()[0]  # noqa: E731
-    confirms = lambda s: s.db.execute("SELECT COUNT(*) FROM log_leaves WHERE kind = 'confirm'").fetchone()[0]  # noqa: E731
-    assert admits(large) > 5 * admits(small)
-    assert _statements(large, large.unresolved_serials) <= 8 + confirms(large) + len(large.unresolved_serials()) // 400
+        assert store.unresolved_serials() == _reference_serials(store) == []
+    assert _work(large, large.unresolved_serials) <= 2 * _work(small, small.unresolved_serials) + 2
+
+
+def test_an_open_loss_puts_the_models_before_it_and_the_ones_naming_it_under_review(tmp_path):
+    store = _grown(tmp_path, "open", 60, "open")
+    assert store.unresolved_serials() == _reference_serials(store) == [65536 + n for n in range(31)] + [65536 + 60, 65536 + 61]
+
+
+def test_a_log_from_before_the_waiting_mark_is_marked_when_it_is_opened(tmp_path):
+    """An older database has no mark of which admits name a loss; opening it fills the mark from the bodies."""
+    store = _grown(tmp_path, "old", 40, "open")
+    expected = store.unresolved_serials()
+    store.db.execute("UPDATE log_leaves SET waits = NULL")
+    reopened = Store(store.path)
+    assert reopened.unresolved_serials() == expected == _reference_serials(reopened)
+    assert reopened.db.execute("SELECT COUNT(*) FROM log_leaves WHERE kind = 'admit' AND waits IS NULL").fetchone()[0] == 0
 
 
 def test_the_kinds_are_indexed(tmp_path):

@@ -19,10 +19,9 @@ from khaos_attribution import translog as T
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS log_leaves (idx INTEGER PRIMARY KEY, leaf_hash TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
-  serial INTEGER, record_sha256 TEXT, refers TEXT);
+  serial INTEGER, record_sha256 TEXT, refers TEXT, waits INTEGER);
 CREATE INDEX IF NOT EXISTS log_leaves_record ON log_leaves (record_sha256);
 CREATE INDEX IF NOT EXISTS log_leaves_refers ON log_leaves (refers);
-CREATE INDEX IF NOT EXISTS log_leaves_kind ON log_leaves (kind);
 CREATE TABLE IF NOT EXISTS log_bodies (leaf_hash TEXT PRIMARY KEY, body BLOB NOT NULL, withheld_at TEXT, withhold_reason TEXT);
 CREATE TABLE IF NOT EXISTS log_nodes (level INTEGER NOT NULL, idx INTEGER NOT NULL, hash BLOB NOT NULL, PRIMARY KEY (level, idx));
 CREATE TABLE IF NOT EXISTS log_heads (id INTEGER PRIMARY KEY, tree_size INTEGER UNIQUE NOT NULL, root_sha256 TEXT NOT NULL,
@@ -75,6 +74,26 @@ class TransLog:
     def __init__(self, store):
         self.store, self.signer, self.blocked = store, None, None
         store.db.executescript(SCHEMA)
+        self._mark_waiting_admits()
+
+    def _mark_waiting_admits(self) -> None:
+        """``waits`` on an admit: 1 when its body names lost leaves it waits on (pending_lost), else 0. A column so the
+        unresolved models are found without reading every admit; a file from before it is filled here, once."""
+        columns = {r["name"] for r in self.db.execute("PRAGMA table_info(log_leaves)")}
+        if "waits" not in columns:
+            self.db.execute("ALTER TABLE log_leaves ADD COLUMN waits INTEGER")
+        self.db.execute("CREATE INDEX IF NOT EXISTS log_leaves_kind_waits ON log_leaves (kind, waits)")
+        if not self.db.execute("SELECT 1 FROM log_leaves WHERE kind = 'admit' AND waits IS NULL LIMIT 1").fetchone():
+            return
+        if self._lost():
+            rows = self.db.execute("SELECT l.leaf_hash, b.body FROM log_leaves l LEFT JOIN log_bodies b ON b.leaf_hash = l.leaf_hash"
+                                   " WHERE l.kind = 'admit' AND l.waits IS NULL").fetchall()
+            for r in rows:
+                names = (json.loads(bytes(r["body"])) if r["body"] else {}).get("pending_lost")
+                self.db.execute("UPDATE log_leaves SET waits = ? WHERE leaf_hash = ?", (1 if names else 0, r["leaf_hash"]))
+        else:
+            # An admit names only leaves this log holds as lost: with none lost, none waits.
+            self.db.execute("UPDATE log_leaves SET waits = 0 WHERE kind = 'admit' AND waits IS NULL")
 
     @property
     def db(self):
@@ -223,11 +242,12 @@ class TransLog:
 
     def unresolved_records(self) -> list:
         """Records whose every live admit waits on a warden after a recovery lost an entry behind it: admit_states'
-        rule for every record in one pass over the admits, and none for a log that lost nothing, since an admit's
-        pending_lost names only leaves this log holds as lost."""
-        if not self._lost():
+        rule, read at the cost of the losses. Only an admit before a loss still open, or one that names a loss
+        (``waits``), can be unresolved; every other admit stands unless struck, and none is read."""
+        lost = self._lost()
+        if not lost:
             return []
-        lost, answers = self._lost_and_answers()
+        _, answers = self._lost_and_answers()
         # The newest confirm of each lost leaf: the one for every admit, and the one naming a single admit.
         for_all, for_one = {}, {}
         for c_idx, answered, confirms in answers:
@@ -242,21 +262,33 @@ class TransLog:
             i = index_of.get(h)
             if i is not None and for_all.get(h, -1) <= i < c_idx:
                 answered_for.setdefault(admit_leaf, []).append(i)
-        struck = {r["refers"] for r in self.db.execute("SELECT refers FROM log_leaves WHERE kind = 'revoke'")}
+        edge = open_at[-1] if open_at else -1
+        live = " AND NOT EXISTS (SELECT 1 FROM log_leaves r WHERE r.kind = 'revoke' AND r.refers = l.leaf_hash)"
         states: dict = {}
-        for a in self.db.execute("SELECT l.idx, l.leaf_hash, l.record_sha256, b.body FROM log_leaves l LEFT JOIN log_bodies b"
-                                 " ON b.leaf_hash = l.leaf_hash WHERE l.kind = 'admit' ORDER BY l.idx"):
+
+        def judge(a, named) -> None:
             idx, leaf = a["idx"], a["leaf_hash"]
-            if leaf in struck:
-                state = "struck"
-            else:
-                waits = len(open_at) - bisect.bisect_right(open_at, idx) - sum(1 for i in answered_for.get(leaf, ()) if i > idx)
-                if not waits:
-                    named = (json.loads(bytes(a["body"])) if a["body"] else {}).get("pending_lost") or []
-                    waits = any(max(for_all.get(h, -1), for_one.get((h, leaf), -1)) <= idx for h in named)
-                state = "unresolved" if waits else "standing"
-            states.setdefault(a["record_sha256"], set()).add(state)
-        return [sha for sha, seen in states.items() if "unresolved" in seen and "standing" not in seen]
+            waits = len(open_at) - bisect.bisect_right(open_at, idx) - sum(1 for i in answered_for.get(leaf, ()) if i > idx)
+            if not waits:
+                waits = any(max(for_all.get(h, -1), for_one.get((h, leaf), -1)) <= idx for h in named)
+            states.setdefault(a["record_sha256"], set()).add("unresolved" if waits else "standing")
+        if open_at:
+            for a in self.db.execute("SELECT l.idx, l.leaf_hash, l.record_sha256 FROM log_leaves l WHERE l.kind = 'admit'"
+                                     " AND l.waits = 0 AND l.idx < ?" + live, (edge,)):
+                judge(a, ())
+        for a in self.db.execute("SELECT l.idx, l.leaf_hash, l.record_sha256, b.body FROM log_leaves l JOIN log_bodies b"
+                                 " ON b.leaf_hash = l.leaf_hash WHERE l.kind = 'admit' AND l.waits = 1" + live):
+            judge(a, (json.loads(bytes(a["body"])) if a["body"] else {}).get("pending_lost") or ())
+        waiting = [sha for sha, seen in states.items() if "unresolved" in seen and "standing" not in seen]
+        out = []
+        for i in range(0, len(waiting), 500):
+            chunk = waiting[i:i + 500]
+            # An admit past every open loss that names none was not read above: it stands, unless struck.
+            standing = {r["record_sha256"] for r in self.db.execute(
+                "SELECT DISTINCT l.record_sha256 FROM log_leaves l WHERE l.kind = 'admit' AND l.waits = 0 AND l.idx > ?"
+                f" AND l.record_sha256 IN ({','.join('?' * len(chunk))})" + live, [edge, *chunk])}
+            out += [sha for sha in chunk if sha not in standing]
+        return out
 
     def admit_leaf_of(self, record_sha256: str) -> str | None:
         row = self.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx LIMIT 1",
@@ -281,9 +313,10 @@ class TransLog:
     def _insert_leaf(self, body: bytes, entry: dict) -> tuple:
         leaf = T.leaf_hash(body)
         index = self.size()
-        self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind, serial, record_sha256, refers) VALUES (?, ?, ?, ?, ?, ?)",
+        self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind, serial, record_sha256, refers, waits) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (index, leaf.hex(), entry["kind"], entry.get("serial"), entry.get("record_sha256"),
-                         entry.get("withholds") or entry.get("revokes") or entry.get("answers")))
+                         entry.get("withholds") or entry.get("revokes") or entry.get("answers"),
+                         (1 if entry.get("pending_lost") else 0) if entry["kind"] == "admit" else None))
         self.db.execute("INSERT INTO log_bodies (leaf_hash, body) VALUES (?, ?)", (leaf.hex(), body))
         level, i, h = 0, index, leaf
         self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
