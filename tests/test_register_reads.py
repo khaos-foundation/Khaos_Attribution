@@ -126,60 +126,69 @@ def test_a_row_changed_behind_the_last_reading_is_found_by_the_whole_check(regis
     assert S.Store(store.path).ledger_status()["ok"] is False, "a start reads the whole chain"
 
 
-def test_two_writes_at_once_leave_a_whole_ledger_in_the_mirror(register, monkeypatch):
-    """One writer at a time and a temporary file of its own: a reader of the mirror never meets a torn ledger, not
-    even while a second write is half-way through its own copy."""
-    import os
+def _lines(path) -> list:
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_write_appends_its_rows_to_the_mirrors_ledger_and_a_ledger_that_is_not_the_databases_is_written_whole(register, monkeypatch):
     app, store, http = register
     key, client = _machine(register, "artist-one")
     client.publish(_signed(key, run_id="run_0"))
     ledger_file = app.state.cfg["data"] / "mirror" / "ledger.jsonl"
-    at_replace, go_replace, mid_write, go_write = (threading.Event() for _ in range(4))
-    real_replace, real_ledger = os.replace, store.ledger
+    before, inode = ledger_file.read_bytes(), ledger_file.stat().st_ino
+    whole = []
+    monkeypatch.setattr(A, "write_whole", lambda path, data, real=A.write_whole: (whole.append(path.name), real(path, data))[1])
+    client.publish(_signed(key, run_id="run_1"))
+    after = ledger_file.read_bytes()
+    assert ledger_file.stat().st_ino == inode and after.startswith(before) and len(after) > len(before), "the new rows were appended"
+    assert "ledger.jsonl" not in whole and _lines(ledger_file) == store.ledger()
+    # A last line that is not the database's row of that number: the file is not this database's, and is replaced.
+    rows = after.decode().splitlines()
+    ledger_file.write_text("\n".join(rows[:-1] + [rows[-1].replace('"publish"', '"publish "')]) + "\n")
+    client.publish(_signed(key, run_id="run_2"))
+    assert "ledger.jsonl" in whole and _lines(ledger_file) == store.ledger()
+    # A line cut short by a crash is not built on.
+    ledger_file.write_bytes(ledger_file.read_bytes()[:-9])
+    client.publish(_signed(key, run_id="run_3"))
+    assert _lines(ledger_file) == store.ledger()
+    ledger_file.write_text("not the ledger\n")
+    A.write_ledger(store, ledger_file, whole=True)
+    assert _lines(ledger_file) == store.ledger()
 
-    def held_replace(src, dst):
-        if str(dst) == str(ledger_file) and threading.current_thread().name == "first":
-            at_replace.set()
-            go_replace.wait(10)
-        real_replace(src, dst)
+
+def test_two_writes_at_once_leave_a_whole_ledger_in_the_mirror(register):
+    """One writer at a time: the second reads where the ledger ends only after the first has added its rows, so no
+    row is filed twice and none is torn."""
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    client.publish(_signed(key, run_id="run_0"))
+    ledger_file = app.state.cfg["data"] / "mirror" / "ledger.jsonl"
+    reading, go = threading.Event(), threading.Event()
+    real_ledger, real_register, names = store.ledger, store.register, iter(("first", "second"))
 
     def held_ledger(since_seq=0, limit=None):
-        rows = real_ledger(since_seq) if limit is None else real_ledger(since_seq, limit)
-        if threading.current_thread().name != "second" or since_seq or limit is not None:
-            return rows
+        rows = real_ledger(since_seq, limit)
+        if threading.current_thread().name == "first" and since_seq and limit is None:
+            # The first writer knows where the file ends and what it will add; it is held before adding it.
+            reading.set()
+            go.wait(10)
+        return rows
 
-        def half_way():
-            yield from rows[:1]
-            mid_write.set()
-            go_write.wait(10)
-            yield from rows[1:]
-        return half_way()
-    monkeypatch.setattr(os, "replace", held_replace)
-    store.ledger = held_ledger
+    def named_register(*a, **k):
+        threading.current_thread().name = next(names)
+        return real_register(*a, **k)
+    store.ledger, store.register = held_ledger, named_register
     try:
-        from anyio import to_thread  # noqa: F401 — the publishes below run in its worker threads
-        names = iter(("first", "second"))
-        real_register = store.register
-
-        def named_register(*a, **k):
-            threading.current_thread().name = next(names)
-            return real_register(*a, **k)
-        store.register = named_register
         first = threading.Thread(target=lambda: client.publish(_signed(key, run_id="run_a")))
         first.start()
-        assert at_replace.wait(10)
+        assert reading.wait(10)
         second = threading.Thread(target=lambda: client.publish(_signed(key, run_id="run_b")))
         second.start()
-        mid_write.wait(1.5)
-        go_replace.set()
+        second.join(1.5)
+        go.set()
         first.join(10)
-        lines = ledger_file.read_text(encoding="utf-8").splitlines()
-        whole = real_ledger()
-        assert [json.loads(x) for x in lines] == whole[:len(lines)] and len(lines) >= len(whole) - 1, "a torn ledger was served"
-        go_write.set()
         second.join(10)
     finally:
-        go_replace.set()
-        go_write.set()
+        go.set()
         del store.ledger, store.register
-    assert [json.loads(x) for x in ledger_file.read_text(encoding="utf-8").splitlines()] == real_ledger()
+    assert _lines(ledger_file) == real_ledger(), "a row was filed twice, or not at all"

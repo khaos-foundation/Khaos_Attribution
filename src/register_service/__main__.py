@@ -11,7 +11,6 @@
     python -m register_service log-withhold <leaf_hash> <reason>    a body out of public view; proofs unchanged
     python -m register_service log-stamp | log-upgrade    the day's heartbeat entry and the anchor of its root; the upgrade
     python -m register_service log-recover    put back entries the published log holds and this database lost
-    python -m register_service log-export     write every file of the static export again, not only what is new
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ def main(argv=None) -> int:
     sub.add_parser("log-stamp")
     sub.add_parser("log-upgrade")
     sub.add_parser("log-recover")
-    sub.add_parser("log-export")
+    sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again")
     a = p.parse_args(argv)
     cfg = settings()
     if a.cmd == "make-key":
@@ -88,7 +87,7 @@ def main(argv=None) -> int:
         export_all(cfg, store.log, log_key, cfg["log_dev_key"])
         print(f"withheld {a.leaf_hash}; the withholding is leaf {out['index']} ({out['leaf_hash']}); the mirror is rewritten")
     elif a.cmd == "log-recover":
-        from register_service.app import export_all, log_places  # noqa: PLC0415
+        from register_service.app import export_all, log_places, write_ledger  # noqa: PLC0415
         from register_service.translog import recover  # noqa: PLC0415
         log_key = open_log(cfg, store)
         ok, lines = recover(store, log_places(cfg)[3], log_key.public_pem())
@@ -96,13 +95,15 @@ def main(argv=None) -> int:
         if not ok:
             return 1
         export_all(cfg, store.log, log_key, cfg["log_dev_key"], full=True)
+        write_ledger(store, cfg["data"] / "mirror" / "ledger.jsonl", whole=True)
         print("restart the service: systemctl restart register.service")
     elif a.cmd == "log-export":
-        from register_service.app import export_all  # noqa: PLC0415
+        from register_service.app import export_all, write_ledger  # noqa: PLC0415
         log_key = open_log(cfg, store)
         if not export_all(cfg, store.log, log_key, cfg["log_dev_key"], full=True):
             raise SystemExit(f"nothing was written: {store.log.blocked or 'another export held the lock'}")
-        print(f"the static export is written whole at size {store.log.size()}")
+        write_ledger(store, cfg["data"] / "mirror" / "ledger.jsonl", whole=True)
+        print(f"the static export and the mirror's ledger are written whole at size {store.log.size()}")
     elif a.cmd in ("log-stamp", "log-upgrade"):
         from register_service import anchor  # noqa: PLC0415
         if a.cmd == "log-stamp":

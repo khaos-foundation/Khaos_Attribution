@@ -130,6 +130,48 @@ def log_key_doc(key: R.SigningKey, dev: bool) -> dict:
             "signed_bytes": "RFC 8785 JSON of {log_id, root_sha256, timestamp, tree_size, version}; Ed25519"}
 
 
+LEDGER_TAIL_BYTES = 65536
+
+
+def _last_line(path: Path) -> str | None:
+    """A file's last whole line, or None when it has none: missing, empty, or ending in a line cut short."""
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - LEDGER_TAIL_BYTES))
+            tail = fh.read()
+    except OSError:
+        return None
+    if not tail.endswith(b"\n"):
+        return None
+    lines = tail[:-1].split(b"\n")
+    # A tail that starts inside its only line does not hold that line whole.
+    return None if len(lines) == 1 and size > len(tail) else lines[-1].decode("utf-8", "replace")
+
+
+def write_ledger(store, path: Path, whole: bool = False) -> None:
+    """The ledger as one JSON line a row. The rows after the file's last are appended in one write of whole lines,
+    while that last line is the database's own row of that number; otherwise, and when asked, the file is written
+    whole. A line a crash cut short is never built on."""
+    def line(row: dict) -> str:
+        return json.dumps(row, sort_keys=True) + "\n"
+    last = None if whole else _last_line(path)
+    try:
+        seq = int(json.loads(last)["seq"]) if last else None
+    except (ValueError, KeyError, TypeError):
+        seq = None
+    if seq is not None and [line(r) for r in store.ledger(seq - 1, limit=1)] == [last + "\n"]:
+        new = "".join(line(r) for r in store.ledger(seq)).encode("utf-8")
+        if new:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.write(fd, new)
+            finally:
+                os.close(fd)
+        return
+    write_whole(path, "".join(line(r) for r in store.ledger()).encode("utf-8"))
+
+
 def public_view(record: dict) -> dict:
     """The record as the artist chose to show it: model alone, with tracks, or with writers' shares."""
     view = record.get("public_view", "model")
@@ -168,9 +210,8 @@ class RateLimit:
 
 
 PUBLIC_LIMITS = {"/api/verify": 20, "/api/enrol": 6}
-# The log's public reads: a verifier walks a few files per entry; a crawler is bounded.
-LOG_READ_LIMIT = 240
-# Every other read, pages and lists alike: a person and a Space's poll are far under it, a crawler is bounded.
+# Reads a minute per address, counted apart for the log's files and for everything else, so a verifier walking the
+# log and a person reading pages do not spend each other's: both far under it, a crawler bounded.
 READ_LIMIT = 240
 LEDGER_PAGE = 1000
 SITEMAP_PAGE = 10000
@@ -240,8 +281,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     mirror_lock = threading.Lock()
 
     def write_mirror(serial: int) -> None:
-        """One writer at a time, each file through a temporary file of its own: the mirror is rsynced on a timer, and a
-        reader must never meet a half-written ledger."""
+        """One writer at a time: the mirror is rsynced on a timer, so a model's file goes through a temporary file of its
+        own, and the ledger gains its new rows as whole lines in one write."""
         with mirror_lock:
             rec = store.record(serial)
             doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
@@ -251,8 +292,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                    "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
                    "log_state": "unresolved" if serial in store.unresolved_serials() else None}
             write_whole(mirror / "models" / f"{serial}.json", (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8"))
-            ledger_lines = "".join(json.dumps(e, sort_keys=True) + "\n" for e in store.ledger())
-            write_whole(mirror / "ledger.jsonl", ledger_lines.encode("utf-8"))
+            write_ledger(store, mirror / "ledger.jsonl")
 
     def log_mirror_quietly() -> None:
         try:
@@ -271,8 +311,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     log_mirror_quietly()
 
     limits = {path: RateLimit(n) for path, n in {**PUBLIC_LIMITS, **CLAIM_LIMITS}.items()}
-    log_read_limit = RateLimit(LOG_READ_LIMIT)
-    read_limit = RateLimit(READ_LIMIT)
+    log_read_limit, read_limit = RateLimit(READ_LIMIT), RateLimit(READ_LIMIT)
     lookup_limits = {path: RateLimit(n) for path, n in softbinding.LIMITS.items()}
     signed_limit = RateLimit(SIGNED_LIMIT)
     from register_service.verify_keys import Allowed  # noqa: PLC0415
