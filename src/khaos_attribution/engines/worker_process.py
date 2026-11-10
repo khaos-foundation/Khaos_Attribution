@@ -177,18 +177,19 @@ def stop_tree(proc) -> None:
     if proc.poll() is not None:
         return
     # Read while the tree stands: a process whose parent has exited no longer names it.
-    below = _descendants(proc.pid)
+    below = set(_descendants(proc.pid))
     proc.terminate()
     for pid in below:
         _signal(pid, signal.SIGTERM)
     deadline = time.monotonic() + STOP_GRACE_S
-    while time.monotonic() < deadline and (proc.poll() is None or any(_running(p) for p in below)):
+    while time.monotonic() < deadline and (proc.poll() is None or below):
         time.sleep(0.1)
+        # Dropped the moment it is gone, so a number the system hands out again is never signalled.
+        below = {pid for pid in below if _running(pid)}
     if proc.poll() is None:
         proc.kill()
     for pid in below:
-        if _running(pid):
-            _signal(pid, signal.SIGKILL)
+        _signal(pid, signal.SIGKILL)
     proc.wait()
 
 
