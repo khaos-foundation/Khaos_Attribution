@@ -29,7 +29,7 @@ The service countersigns with the Ed25519 key at `REGISTER_KEY_FILE`, a PEM file
 
 ## The public reads
 
-Every read is bounded per address, 240 a minute, the log's files in a bucket of their own. `/api/ledger?since=<seq>` answers 1,000 rows at a time and names the next page in a `Link` header while there is one; `/sitemap.xml` lists 10,000 models a page (`?page=2` onwards, each named in `robots.txt`). The home page and `/health` say whether the ledger's chain is unbroken from a reading taken at most once a minute: the whole chain at start and once a day, the rows since the last reading in between; `register-cli check` always reads the whole chain.
+Every read is bounded per address, 240 a minute, the log's files in a bucket of their own. `/api/ledger?since=<seq>` answers 1,000 rows at a time and names the next page in a `Link` header while there is one; `/sitemap.xml` lists 10,000 models a page (`?page=2` onwards, each named in `robots.txt`). The home page and `/health` say whether the ledger's chain is unbroken from a reading taken at most once a minute: the whole chain at start and once an hour, the rows since the last reading in between (so a row altered behind the last reading shows within the hour); `register-cli check` always reads the whole chain.
 
 ## The log
 

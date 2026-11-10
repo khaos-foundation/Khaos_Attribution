@@ -110,15 +110,19 @@ def test_the_ledgers_check_reads_only_the_rows_since_the_last_one(register, monk
 
 
 def test_a_row_changed_behind_the_last_reading_is_found_by_the_whole_check(register, monkeypatch):
-    """The whole chain is read at start, once a day and by the operator's check; between those a page reads what is new."""
+    """The whole chain is read at start, once an hour and by the operator's check; between those a page reads what is new."""
     app, store, http = register
     _published(register, 3)
     assert store.ledger_status(max_age_s=0)["ok"]
     store.db.execute("UPDATE ledger SET detail_json = '{\"x\": 1}' WHERE seq = 1")
     assert store.ledger_ok() is False, "the operator's check is always whole"
     assert store.ledger_status(max_age_s=0)["ok"] is True
-    monkeypatch.setattr(S, "LEDGER_WHOLE_CHECK_S", 0.0)
-    assert store.ledger_status(max_age_s=0)["ok"] is False
+    clock = [S.time.monotonic()]
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
+    clock[0] += 3540
+    assert store.ledger_status()["ok"] is True, "inside the hour a page reads only what is new"
+    clock[0] += 120
+    assert store.ledger_status()["ok"] is False, "an altered row is said within the hour"
     assert S.Store(store.path).ledger_status()["ok"] is False, "a start reads the whole chain"
 
 

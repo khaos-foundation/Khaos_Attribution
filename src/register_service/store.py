@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 
 ROLES = ("workshop", "space", "warden")
 # Between whole readings of the ledger's chain, a public page checks only the rows since the last one.
-LEDGER_WHOLE_CHECK_S = 86400.0
+LEDGER_WHOLE_CHECK_S = 3600.0
 
 
 def _payload_of(signed: dict) -> int:
@@ -427,11 +427,12 @@ class Store:
         return self._chain()[0]
 
     def ledger_status(self, max_age_s: float = 60.0) -> dict:
-        """The public pages' reading, taken at most once a minute: the whole chain at start and once a day, and
+        """The public pages' reading, taken at most once a minute: the whole chain at start and once an hour, and
         between those the rows since the last reading, checked from the row they follow."""
         now = time.monotonic()
         held = self._ledger_status
         if held is None or now - held["at"] > max_age_s:
+            # "Unbroken" can be up to LEDGER_WHOLE_CHECK_S stale for a row altered behind the last reading.
             whole = held is None or not held["ok"] or now - held["whole_at"] > LEDGER_WHOLE_CHECK_S
             ok, seq, prev = self._chain() if whole else self._chain(held["seq"], held["prev"])
             self._ledger_status = held = {"ok": ok, "at": now, "checked_at_utc": now_utc(), "seq": seq, "prev": prev,
