@@ -270,10 +270,9 @@ def test_a_crash_right_after_a_withhold_leaves_a_copy_that_still_verifies(tmp_pa
 
 @pytest.mark.parametrize("seed", range(3))
 def test_an_export_killed_at_any_write_leaves_copies_that_verify(tmp_path, clock, monkeypatch, seed):
-    """Random admissions, strikes, withholds, heartbeats and days passing; every export is killed before each of
-    its writes in turn, and what is on disk after each death proves every leaf of the head it holds. Exports are
-    never further apart than the two days the verifiers allow a delayed copy beyond its week, as the daily
-    heartbeat keeps them."""
+    """Random writes and days passing; every export is killed before each of its writes in turn, and what is on disk
+    after each death proves every leaf of the head it holds. Exports are never further apart than the two days the
+    verifiers allow a delayed copy beyond its week, as the daily heartbeat keeps them."""
     rng = random.Random(1000 + seed)
     store = _store(tmp_path)
     mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"

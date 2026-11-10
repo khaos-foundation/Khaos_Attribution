@@ -1,13 +1,6 @@
-"""Watermarking contract shared by every Khaos issuer.
-
-The watermark_id (0-65535) is AudioSeal's 16-bit message payload, carrying an
-extended-Hamming (16,11) SECDED codeword: single-bit detector errors are
-corrected, double errors refused. A model's payload is a bucket derived from
-its machine key and run id: many models share one, the register's serial names
-the model and the payload only narrows a check. The issuer partition and the
-machine bands are the two earlier schemes, kept to read what they marked. The
-delta is computed at 16 kHz and resampled onto the untouched original.
-"""
+"""The watermark every Khaos issuer shares: AudioSeal's 16-bit message carrying a (16,11) SECDED codeword, one bit
+corrected and two refused. A model's payload is a bucket derived from its machine key and run id, shared by many
+models; the issuer partition and the machine bands are the two earlier schemes, kept to read what they marked."""
 
 from __future__ import annotations
 

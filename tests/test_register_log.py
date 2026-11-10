@@ -245,7 +245,7 @@ def test_anchors_stamp_the_newest_root_once_and_upgrade_into_the_mirror(register
     assert (_mirror(app) / "log" / "anchors" / f"{first['tree_size']}.ots").read_bytes().startswith(b"complete:")
 
 
-def test_the_public_reads_cache_with_etags_and_are_bounded_per_address(register):
+def test_the_public_reads_cache_with_etags_and_are_bounded_per_address(register, monkeypatch):
     app, store, http = register
     _publish(register)
     r = http.get("/log/sth/1")
@@ -260,9 +260,13 @@ def test_the_public_reads_cache_with_etags_and_are_bounded_per_address(register)
     assert http.get("/log/consistency", params={"from": 2, "to": 1}).status_code == 404
     assert http.get("/mirror/log/sth/latest.json").json() == http.get("/log/sth").json()
     assert http.get("/mirror/log/../register.sqlite3").status_code == 404
-    from register_service.app import LOG_READ_LIMIT
-    codes = [http.get("/log/sth", headers={"X-Forwarded-For": "198.51.100.7"}).status_code for _ in range(LOG_READ_LIMIT + 2)]
-    assert codes[-1] == 429
+    # A small bound, so the bucket's refill over the seconds a loaded machine takes cannot hide the refusal.
+    from register_service import app as A
+    monkeypatch.setattr(A, "READ_LIMIT", 6)
+    bounded = type(http)(A.create_app(app.state.cfg))
+    who = {"X-Forwarded-For": "198.51.100.7"}
+    assert [bounded.get("/log/sth", headers=who).status_code for _ in range(8)] == [200] * 6 + [429] * 2
+    assert bounded.get("/", headers=who).status_code == 200, "the pages have a bucket of their own"
 
 
 def test_the_verify_page_runs_the_browser_verifier_from_its_own_file(register):
