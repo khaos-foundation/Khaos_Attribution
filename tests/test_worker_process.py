@@ -225,6 +225,90 @@ def test_a_streaming_worker_that_exits_leaving_a_child_on_its_output_does_not_ha
         _kill(child)
 
 
+def _pid_in(path, within: float = 15.0) -> int:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return int(path.read_text())
+        time.sleep(0.05)
+    raise AssertionError(f"{path.name} was never written")
+
+
+def _children_of(pid: int) -> set:
+    return {child for child, parent in (W._parents() or {}).items() if parent == pid}
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_process_that_names_the_mark_only_in_its_arguments_is_left_alone(tmp_path):
+    """The mark is read from a process's environment, never its command line."""
+    proc = W._start(Path(sys.executable), Path("-"), cwd=tmp_path, env=dict(os.environ), stderr=subprocess.DEVNULL)
+    decoy = subprocess.Popen(["/bin/sh", "-c", f"/bin/sleep 60; : {W.MARK_ENV}={proc.khaos_mark}"],
+                             env={k: v for k, v in os.environ.items() if k != W.MARK_ENV})
+    try:
+        time.sleep(0.3)
+        W.stop_tree(proc)
+        assert proc.poll() is not None and decoy.poll() is None, "a process outside the worker's tree was stopped"
+    finally:
+        proc.stdin.close()
+        proc.stdout.close()
+        for pid in _children_of(decoy.pid):
+            _kill(pid)
+        decoy.kill()
+        decoy.wait()
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_shell_and_its_sleep_left_by_a_worker_that_exited_are_stopped(tmp_path):
+    """The worker starts a helper and exits; the helper's /bin/sh and /bin/sleep, whose environments macOS hides, are
+    found through the marked helper that started them."""
+    helper, script, shell_pid = tmp_path / "helper.py", tmp_path / "worker.py", tmp_path / "shell"
+    helper.write_text("import subprocess, time\nsh = subprocess.Popen(['/bin/sh', '-c', '/bin/sleep 60; true'])\n"
+                      f"open({str(shell_pid)!r}, 'w').write(str(sh.pid))\ntime.sleep(60)\n")
+    script.write_text("import subprocess, sys\nsys.stdin.read()\n"
+                      f"subprocess.Popen([sys.executable, {str(helper)!r}], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+    proc = W._start(Path(sys.executable), script, cwd=tmp_path, env=dict(os.environ), stderr=subprocess.DEVNULL)
+    proc.stdin.close()
+    assert proc.wait(15) == 0
+    shell = _pid_in(shell_pid)
+    deadline = time.monotonic() + 5
+    while not _children_of(shell) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    sleeper = _children_of(shell)
+    helper = W._parents().get(shell)
+    try:
+        assert sleeper, "the shell started its sleep"
+        W.stop_tree(proc)
+        assert all(_gone(pid) for pid in (helper, shell, *sleeper)), "the worker's tree outlived the stop"
+    finally:
+        proc.stdout.close()
+        for pid in (helper, shell, *sleeper):
+            _kill(pid)
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_descendant_whose_environment_cannot_be_read_is_said_once_and_still_stopped(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(W, "_warned", set())
+    with caplog.at_level("WARNING", logger=W.log.name):
+        for _ in range(2):
+            proc = W._start(Path(sys.executable), Path("-"), cwd=tmp_path, env=dict(os.environ), stderr=subprocess.DEVNULL)
+            proc.stdin.write("import subprocess, time\nsubprocess.Popen(['/bin/sleep', '60'])\ntime.sleep(60)\n")
+            proc.stdin.close()
+            deadline = time.monotonic() + 10
+            while not _children_of(proc.pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            child = _children_of(proc.pid)
+            monkeypatch.setattr(W, "_marked", lambda mark, hidden=set(child): (set(), hidden))
+            try:
+                W.stop_tree(proc)
+                assert child and all(_gone(pid) for pid in child)
+            finally:
+                proc.stdout.close()
+                for pid in child:
+                    _kill(pid)
+    said = [r.getMessage() for r in caplog.records if "environment" in r.getMessage()]
+    assert len(said) == 1, said
+
+
 def test_parents_are_read_from_proc_whatever_a_process_is_called(tmp_path):
     """A command name may hold spaces and brackets; the parent is the second field after the last bracket."""
     for pid, text in ((12, "12 (python3) S 7 12 7 0 -1"), (13, "13 (a b) c) R 12 13 7 0"), (14, "14 (tail) S 1 14 14")):

@@ -250,25 +250,43 @@ def _parents() -> dict | None:
     return {pid: int(rest) for pid, rest in rows if rest.strip().isdigit()}
 
 
-def _marked(mark: str) -> set | None:
-    """The processes whose environment carries a worker's mark: its tree, whoever their parent now is."""
+def _marked(mark: str) -> tuple | None:
+    """(the processes whose environment carries a worker's mark, those whose environment cannot be read), from the
+    environment alone, never the command line; None where the process table cannot be read."""
     needle = f"{MARK_ENV}={mark}"
+    found, unread = set(), set()
     if sys.platform.startswith("linux"):
-        found = set()
         try:
             entries = [e for e in os.listdir("/proc") if e.isdigit()]
         except OSError:
             entries = None
         for entry in entries or ():
             try:
-                if needle.encode() in (Path("/proc") / entry / "environ").read_bytes():
-                    found.add(int(entry))
+                env = (Path("/proc") / entry / "environ").read_bytes()
+            except PermissionError:
+                unread.add(int(entry))
+                continue
             except OSError:
-                continue   # another user's, or gone
+                continue   # gone
+            if needle.encode() in env.split(b"\0"):
+                found.add(int(entry))
         if entries:
-            return found
-    rows = _ps("-E", "-o", "pid=,command=")
-    return None if rows is None else {pid for pid, rest in rows if needle in rest}
+            return found, unread
+    # ps -E prints the environment after the command line; ps without it prints the command line alone.
+    shown, commands = _ps("-E", "-o", "pid=,command="), _ps("-o", "pid=,command=")
+    if shown is None or commands is None:
+        return None
+    commands = dict(commands)
+    for pid, rest in shown:
+        command = commands.get(pid)
+        if command is None or not rest.startswith(command):
+            continue   # started or changed between the two reads
+        env = rest[len(command):]
+        if not env.strip():
+            unread.add(pid)   # macOS shows no environment for its own programs
+        elif f" {needle} " in env + " ":
+            found.add(pid)
+    return found, unread
 
 
 def _below(pid: int, parents: dict) -> set:
@@ -285,14 +303,21 @@ def _below(pid: int, parents: dict) -> set:
 
 
 def _tree(proc) -> set:
-    """Everything the process started that still runs: by parent while it lives, by its mark when it carries one."""
-    parents = _parents() if proc.poll() is None else {}
+    """Everything the process started that still runs: what carries its mark, and what descends by parent from the
+    process while it lives or from anything carrying its mark."""
     mark = getattr(proc, "khaos_mark", None)
-    marked = _marked(mark) if mark else set()
-    if parents is None or marked is None:
+    seen = _marked(mark) if mark else (set(), set())
+    marked, unread = seen or (set(), set())
+    roots = marked | ({proc.pid} if proc.poll() is None else set())
+    parents = _parents() if roots else {}
+    if parents is None or seen is None:
         _warn_once("tree", "the process table cannot be read on this machine (no /proc and no ps): a worker is stopped, "
                            "but what a worker started may be left running")
-    return (_below(proc.pid, parents or {}) | (marked or set())) - {proc.pid, os.getpid()}
+    below = set().union(*(_below(root, parents or {}) for root in roots))
+    if below & unread:
+        _warn_once("environment", f"the environment of a process a worker started cannot be read (pid {min(below & unread)}): "
+                                  "it is found through its parent, and may be left running once that parent has gone")
+    return (below | marked) - {proc.pid, os.getpid()}
 
 
 def _signal(pid: int, sig) -> None:
