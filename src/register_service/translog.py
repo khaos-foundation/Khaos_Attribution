@@ -6,6 +6,7 @@ Every append happens inside the Store's write transaction, so a record and its l
 from __future__ import annotations
 
 import base64
+import bisect
 import json
 import os
 import secrets
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS log_leaves (idx INTEGER PRIMARY KEY, leaf_hash TEXT U
   serial INTEGER, record_sha256 TEXT, refers TEXT);
 CREATE INDEX IF NOT EXISTS log_leaves_record ON log_leaves (record_sha256);
 CREATE INDEX IF NOT EXISTS log_leaves_refers ON log_leaves (refers);
+CREATE INDEX IF NOT EXISTS log_leaves_kind ON log_leaves (kind);
 CREATE TABLE IF NOT EXISTS log_bodies (leaf_hash TEXT PRIMARY KEY, body BLOB NOT NULL, withheld_at TEXT, withhold_reason TEXT);
 CREATE TABLE IF NOT EXISTS log_nodes (level INTEGER NOT NULL, idx INTEGER NOT NULL, hash BLOB NOT NULL, PRIMARY KEY (level, idx));
 CREATE TABLE IF NOT EXISTS log_heads (id INTEGER PRIMARY KEY, tree_size INTEGER UNIQUE NOT NULL, root_sha256 TEXT NOT NULL,
@@ -169,9 +171,13 @@ class TransLog:
                                          "time": entry.get("time"), "reason_withheld": body is None})
         return out
 
+    def _lost(self) -> dict:
+        """The leaves a recovery put back without their bodies, idx -> hash."""
+        return {r["idx"]: r["leaf_hash"] for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'unavailable'")}
+
     def _lost_and_answers(self) -> tuple:
         """(lost leaves as idx -> hash, confirms as (idx, answers, confirms-or-None))."""
-        lost = {r["idx"]: r["leaf_hash"] for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'unavailable'")}
+        lost = self._lost()
         answers = []
         for r in self.db.execute("SELECT idx, leaf_hash FROM log_leaves WHERE kind = 'confirm'").fetchall():
             row = self.db.execute("SELECT body FROM log_bodies WHERE leaf_hash = ?", (r["leaf_hash"],)).fetchone()
@@ -211,13 +217,41 @@ class TransLog:
         return [k for k, v in self.admit_states(record_sha256).items() if v == "standing"]
 
     def unresolved_records(self) -> list:
-        """Records whose every live admit waits on a warden after a recovery lost an entry behind it."""
-        out = []
-        for r in self.db.execute("SELECT DISTINCT record_sha256 FROM log_leaves WHERE kind = 'admit'").fetchall():
-            states = set(self.admit_states(r["record_sha256"]).values())
-            if "unresolved" in states and "standing" not in states:
-                out.append(r["record_sha256"])
-        return out
+        """Records whose every live admit waits on a warden after a recovery lost an entry behind it: admit_states'
+        rule for every record in one pass over the admits, and none for a log that lost nothing, since an admit's
+        pending_lost names only leaves this log holds as lost."""
+        if not self._lost():
+            return []
+        lost, answers = self._lost_and_answers()
+        # The newest confirm of each lost leaf: the one for every admit, and the one naming a single admit.
+        for_all, for_one = {}, {}
+        for c_idx, answered, confirms in answers:
+            if confirms is None:
+                for_all[answered] = max(for_all.get(answered, -1), c_idx)
+            else:
+                for_one[(answered, confirms)] = max(for_one.get((answered, confirms), -1), c_idx)
+        open_at = sorted(i for i, h in lost.items() if for_all.get(h, -1) <= i)
+        index_of = {h: i for i, h in lost.items()}
+        answered_for: dict = {}
+        for (h, admit_leaf), c_idx in for_one.items():
+            i = index_of.get(h)
+            if i is not None and for_all.get(h, -1) <= i < c_idx:
+                answered_for.setdefault(admit_leaf, []).append(i)
+        struck = {r["refers"] for r in self.db.execute("SELECT refers FROM log_leaves WHERE kind = 'revoke'")}
+        states: dict = {}
+        for a in self.db.execute("SELECT l.idx, l.leaf_hash, l.record_sha256, b.body FROM log_leaves l LEFT JOIN log_bodies b"
+                                 " ON b.leaf_hash = l.leaf_hash WHERE l.kind = 'admit' ORDER BY l.idx"):
+            idx, leaf = a["idx"], a["leaf_hash"]
+            if leaf in struck:
+                state = "struck"
+            else:
+                waits = len(open_at) - bisect.bisect_right(open_at, idx) - sum(1 for i in answered_for.get(leaf, ()) if i > idx)
+                if not waits:
+                    named = (json.loads(bytes(a["body"])) if a["body"] else {}).get("pending_lost") or []
+                    waits = any(max(for_all.get(h, -1), for_one.get((h, leaf), -1)) <= idx for h in named)
+                state = "unresolved" if waits else "standing"
+            states.setdefault(a["record_sha256"], set()).add(state)
+        return [sha for sha, seen in states.items() if "unresolved" in seen and "standing" not in seen]
 
     def admit_leaf_of(self, record_sha256: str) -> str | None:
         row = self.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'admit' AND record_sha256 = ? ORDER BY idx LIMIT 1",

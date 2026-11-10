@@ -296,8 +296,12 @@ class Store:
     def unresolved_serials(self) -> list:
         """Registered models the log holds unresolved after a recovery: not served until a warden answers."""
         shas = self.log.unresolved_records()
-        return sorted(r["serial"] for r in self.db.execute("SELECT serial, record_sha256 FROM records").fetchall()
-                      if r["record_sha256"] in shas)
+        out = []
+        for i in range(0, len(shas), 500):
+            chunk = shas[i:i + 500]
+            out += [r["serial"] for r in self.db.execute(
+                f"SELECT serial FROM records WHERE record_sha256 IN ({','.join('?' * len(chunk))})", chunk)]
+        return sorted(out)
 
     def withdrawn_serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'withdrawn' ORDER BY serial")]
