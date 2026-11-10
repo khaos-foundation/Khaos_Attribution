@@ -1,13 +1,16 @@
 """What every engine trained as a process shares: clips written from a Khaos dataset, epochs as the trainer's
-steps, the checkpoint a file name carries, and the two waits a session makes (a checkpoint settling on disk, the
-epoch a step belongs to). Each engine's train.py keeps its own names over these."""
+steps, the checkpoint a file name carries, the two waits a session makes (a checkpoint settling on disk, the
+epoch a step belongs to) and the loop that follows a trainer process. Each engine's train.py keeps its own names over these."""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
+import time
 from pathlib import Path
+
+from khaos_attribution.engines.train import TrainingUpdate
 
 
 def resample_stereo(audio, sr: int, target_sr: int, *, engine_name: str, unavailable: type):
@@ -106,6 +109,63 @@ def releasable(queue: list, laid_out: set, steps: dict, alive: bool) -> list:
             break
         out.append(queue.pop(0)[2])
     return out
+
+
+def follow(session, offset: int, *, started: str, losses, run_steps: dict, poll: float):
+    """A trainer process as Khaos's updates: info at start, an epoch each time the step count crosses one (its loss
+    the mean of the epoch's steps), a checkpoint each time one lands, complete or fail at the end. ``losses`` reads
+    the trainer's (step, loss) rows so far; the session lays checkpoints out and names the epoch a step is in."""
+    yield TrainingUpdate(step=0, loss=0.0, msg=started, kind="info", epoch=offset)
+    seen_steps = 0
+    epoch_done = offset
+    laid_out: set = set()
+    epoch_losses: list = []
+    losses_by_step: dict = {}
+    last_loss = 0.0
+    start = time.monotonic()
+    per_epoch = session.steps["per_epoch"]
+    events: list = []
+    while True:
+        alive = session.process.poll() is None
+        rows = losses()
+        for step, loss in rows[seen_steps:]:
+            last_loss = loss
+            losses_by_step[step] = loss
+            epoch_losses.append(loss)
+            if step % per_epoch == 0:
+                epoch_done = offset + step // per_epoch
+                mean = sum(epoch_losses) / len(epoch_losses)
+                epoch_losses = []
+                events.append((step, 0, TrainingUpdate(step=step, loss=mean, msg=f"[OK] Epoch {epoch_done}", kind="epoch",
+                                                       epoch=epoch_done, epoch_time=time.monotonic() - start)))
+                start = time.monotonic()
+        seen_steps = len(rows)
+        highest = max(losses_by_step) if losses_by_step else 0
+        for step, path in sorted(session._checkpoints().items()):
+            # Laid out once complete and once its own loss row is in: the name carries that loss.
+            if step in laid_out or not session._settled(path, final=not alive) or (alive and highest < step):
+                continue
+            laid_out.add(step)
+            loss_at = losses_by_step.get(step, last_loss)
+            target_dir = session._lay_out(step, path, loss_at)
+            events.append((step, 1, TrainingUpdate(step=step, loss=loss_at, msg="[OK] Checkpoint", kind="checkpoint",
+                                                   epoch=session._epoch_of(step), checkpoint_path=str(target_dir))))
+        # In step order, a checkpoint after the epoch it closes; an epoch that saves waits for its weights.
+        for update in releasable(events, laid_out, run_steps, alive):
+            if update.kind == "epoch":
+                session.epoch_done = update.epoch
+            yield update
+        if not alive:
+            break
+        time.sleep(poll)
+    code = session.process.returncode
+    if code != 0:
+        tail = "\n".join((session.save_dir / "trainer_stdout.log").read_text(errors="ignore").splitlines()[-8:])
+        yield TrainingUpdate(step=seen_steps, loss=last_loss, msg=f"trainer exited {code}: {tail}", kind="fail",
+                             epoch=epoch_done)
+        return
+    yield TrainingUpdate(step=seen_steps, loss=last_loss, msg="[OK] done", kind="complete",
+                         epoch=max(epoch_done, session.steps["epochs"]))
 
 
 def scored_adapter(session, named, engine_name: str):

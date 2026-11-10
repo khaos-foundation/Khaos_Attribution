@@ -24,7 +24,7 @@ from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root,
 from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
 from khaos_attribution.engines import process_trainer as PT
-from khaos_attribution.engines.train import TrainingUnavailable, TrainingUpdate
+from khaos_attribution.engines.train import TrainingUnavailable
 from khaos_attribution.identifiers import track_of_segment
 
 log = logging.getLogger(__name__)
@@ -510,59 +510,8 @@ class Session:
             log_file.close()
 
     def _follow(self, offset: int):
-        yield TrainingUpdate(step=0, loss=0.0, msg=f"[OK] Stable Audio 3 trainer started ({self.api.runtime})",
-                             kind="info", epoch=offset)
-        seen_steps = 0
-        epoch_done = offset
-        laid_out: set = set()
-        epoch_losses: list = []
-        losses_by_step: dict = {}
-        last_loss = 0.0
-        start = time.monotonic()
-        per_epoch = self.steps["per_epoch"]
-        run_steps = self.run_steps()
-        events: list = []
-        while True:
-            alive = self.process.poll() is None
-            losses = self._losses()
-            for step, loss in losses[seen_steps:]:
-                last_loss = loss
-                losses_by_step[step] = loss
-                epoch_losses.append(loss)
-                if step % per_epoch == 0:
-                    epoch_done = offset + step // per_epoch
-                    mean = sum(epoch_losses) / len(epoch_losses)
-                    epoch_losses = []
-                    events.append((step, 0, TrainingUpdate(step=step, loss=mean, msg=f"[OK] Epoch {epoch_done}", kind="epoch",
-                                                           epoch=epoch_done, epoch_time=time.monotonic() - start)))
-                    start = time.monotonic()
-            seen_steps = len(losses)
-            highest = max(losses_by_step) if losses_by_step else 0
-            for step, path in sorted(self._checkpoints().items()):
-                # Laid out once complete and once its own loss row is in: the name carries that loss.
-                if step in laid_out or not self._settled(path, final=not alive) or (alive and highest < step):
-                    continue
-                laid_out.add(step)
-                loss_at = losses_by_step.get(step, last_loss)
-                target_dir = self._lay_out(step, path, loss_at)
-                events.append((step, 1, TrainingUpdate(step=step, loss=loss_at, msg="[OK] Checkpoint", kind="checkpoint",
-                                                       epoch=self._epoch_of(step), checkpoint_path=str(target_dir))))
-            # In step order, a checkpoint after the epoch it closes; an epoch that saves waits for its weights.
-            for update in PT.releasable(events, laid_out, run_steps, alive):
-                if update.kind == "epoch":
-                    self.epoch_done = update.epoch
-                yield update
-            if not alive:
-                break
-            time.sleep(POLL_SECONDS)
-        code = self.process.returncode
-        if code != 0:
-            tail = "\n".join((self.save_dir / "trainer_stdout.log").read_text(errors="ignore").splitlines()[-8:])
-            yield TrainingUpdate(step=seen_steps, loss=last_loss, msg=f"trainer exited {code}: {tail}", kind="fail",
-                                 epoch=epoch_done)
-            return
-        yield TrainingUpdate(step=seen_steps, loss=last_loss, msg="[OK] done", kind="complete",
-                             epoch=max(epoch_done, self.steps["epochs"]))
+        return PT.follow(self, offset, started=f"[OK] Stable Audio 3 trainer started ({self.api.runtime})",
+                         losses=self._losses, run_steps=self.run_steps(), poll=POLL_SECONDS)
 
     def heldout_evaluator(self, tensor_val_dir: Path | str, *, n_buckets: int):
         return HeldoutEvaluator(self, Path(tensor_val_dir), n_buckets=int(n_buckets))
