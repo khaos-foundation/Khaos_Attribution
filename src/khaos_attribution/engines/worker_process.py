@@ -5,12 +5,19 @@ Every such child takes its environment from engine_env, which starts from what t
 from __future__ import annotations
 
 import json
+import logging
 import os
+import queue
+import secrets
 import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Far past any render inside the engines' bounds (two minutes of audio, 200 steps); longer work names its own limit.
 DEFAULT_DEADLINE_S = 3600.0
@@ -18,6 +25,13 @@ DEFAULT_DEADLINE_S = 3600.0
 DEFAULT = object()
 ROW_PREFIX = "khaos-row "
 STOP_GRACE_S = 3.0
+POLL_S = 2.0
+# How long a worker that has exited is waited on for a pipe something it started still holds.
+PIPE_GRACE_S = 2.0
+# Carried by a worker and by everything it starts, so what it leaves behind is found after it has gone.
+MARK_ENV = "KHAOS_ENGINE_WORKER"
+POSIX_ONLY = "a process tree is told apart with POSIX signals"
+LINUX_ONLY = "the process table is read from /proc on Linux only"
 
 
 class WorkerFailed(RuntimeError):
@@ -54,22 +68,29 @@ def engine_env(root, **extra: str) -> dict:
 
 # ── one request, one reply ────────────────────────────────────────────────────
 
+def _start(python: Path, script: Path, *, cwd: Path, env: dict, stderr) -> subprocess.Popen:
+    """The worker, in its host's process group so the host's own signals reach it, and marked so its tree is found."""
+    mark = secrets.token_hex(8)
+    proc = subprocess.Popen([str(python), str(script)], cwd=str(cwd), env={**env, MARK_ENV: mark}, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=stderr, text=True, errors="replace")
+    proc.khaos_mark = mark
+    return proc
+
+
 def run(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, label: str, should_stop=None,
         timeout=DEFAULT, required: str | None = None) -> dict:
     """The worker's reply; WorkerFailed names the worker by ``label`` and carries the tail of its stderr."""
     if timeout is DEFAULT:
         timeout = DEFAULT_DEADLINE_S
     try:
-        proc = subprocess.Popen([str(python), str(script)], cwd=str(cwd), env=env, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+        proc = _start(python, script, cwd=cwd, env=env, stderr=subprocess.PIPE)
     except OSError as exc:
         raise WorkerFailed(f"the {label} worker could not start: {exc}") from exc
     try:
         stdout, stderr = communicate(proc, json.dumps(request), should_stop, timeout, label)
-    except BaseException:
-        # Not only the worker's own errors: an interrupt in the caller must not leave it holding the device.
+    finally:
+        # Whatever ended the wait, an interrupt in the caller included, nothing is left holding the device.
         stop_tree(proc)
-        raise
     reply = _last_json(stdout)
     if isinstance(reply, dict) and reply.get("error"):
         raise WorkerFailed(str(reply["error"]))
@@ -87,16 +108,48 @@ def _last_json(stdout: str):
         return None
 
 
+def _reader(pipe, take) -> threading.Thread:
+    """A pipe read to its end on a thread of its own, each line handed to ``take`` and None after the last."""
+    def drain():
+        try:
+            for line in pipe:
+                take(line)
+        except (OSError, ValueError):
+            pass   # closed under the reader: what was read stands
+        finally:
+            take(None)
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    return thread
+
+
+def _released(proc, readers) -> None:
+    """After the worker has exited: its pipes are waited on briefly, then whatever it left holding them is stopped."""
+    def wait(seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        for r in readers:
+            r.join(max(0.0, deadline - time.monotonic()))
+        return not any(r.is_alive() for r in readers)
+    if wait(PIPE_GRACE_S):
+        return
+    stop_tree(proc)
+    if not wait(STOP_GRACE_S):
+        log.warning("a worker's output is still held open after it exited (pid %s); its answer is read as it stands", proc.pid)
+
+
 def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, label: str, on_row=None,
            required=()) -> dict:
     """The worker's reply, its ``khaos-row`` lines handed to ``on_row`` as they come, so long work shows its
     progress; WorkerFailed says what went wrong and names the reply keys in ``required`` that are missing."""
-    lines = []
+    lines, arriving = [], queue.Queue()
     # stderr to a file, never a pipe: a worker that writes much to it would block while stdout is being read.
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
         try:
-            proc = subprocess.Popen([str(python), str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                    stderr=err, cwd=str(cwd), text=True, errors="replace", env=env)
+            proc = _start(python, script, cwd=cwd, env=env, stderr=err)
         except OSError as exc:
             raise WorkerFailed(f"the {label} worker could not start: {exc}") from exc
         try:
@@ -105,7 +158,19 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
                 proc.stdin.close()
             except BrokenPipeError:
                 pass
-            for line in proc.stdout:
+            reader = _reader(proc.stdout, arriving.put)
+            while True:
+                try:
+                    line = arriving.get(timeout=POLL_S)
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        # The worker has gone and its output has not ended: something it started holds the pipe.
+                        _released(proc, [reader])
+                        if reader.is_alive():
+                            arriving.put(None)
+                    continue
+                if line is None:
+                    break
                 if not line.startswith(ROW_PREFIX):
                     lines.append(line)
                 elif on_row is not None:
@@ -117,9 +182,8 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
         finally:
             # A worker left running would hold the device's memory after its caller has gone.
             stop_tree(proc)
-            for pipe in (proc.stdin, proc.stdout):
-                if pipe is not None and not pipe.closed:
-                    pipe.close()
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
         err.seek(0)
         stderr = err.read()
     reply = _last_json("".join(lines))
@@ -134,26 +198,101 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
 
 # ── stopping ──────────────────────────────────────────────────────────────────
 
-def _descendants(pid: int) -> list:
-    """Every process under ``pid`` from one reading of the process table; none where there is no ps to ask."""
-    if os.name == "nt":
-        return []
+_warned: set = set()
+
+
+def _warn_once(what: str, message: str) -> None:
+    if what not in _warned:
+        _warned.add(what)
+        log.warning(message)
+
+
+def _parents_from_proc(root: Path) -> dict:
+    """pid -> parent pid from ``<root>/<pid>/stat``; the name between brackets may itself hold brackets and spaces."""
+    out = {}
+    for entry in os.listdir(root):
+        if not entry.isdigit():
+            continue
+        try:
+            text = (Path(root) / entry / "stat").read_text(errors="replace")
+            out[int(entry)] = int(text[text.rindex(")") + 1:].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue   # gone between the listing and the read
+    return out
+
+
+def _ps(*columns: str) -> list | None:
+    """ps's rows as (pid, rest), or None where there is no ps to ask."""
     try:
-        table = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout
+        done = subprocess.run(["ps", "-A", "-ww", *columns], capture_output=True, text=True, errors="replace", timeout=5)
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
+    rows = []
+    for line in done.stdout.splitlines():
+        pid, _, rest = line.strip().partition(" ")
+        if pid.isdigit():
+            rows.append((int(pid), rest))
+    return rows if done.returncode == 0 else None
+
+
+def _parents() -> dict | None:
+    """pid -> parent pid for every process: /proc on Linux, ps elsewhere; None where neither can be read."""
+    if sys.platform.startswith("linux"):
+        try:
+            found = _parents_from_proc(Path("/proc"))
+        except OSError:
+            found = {}
+        if found:
+            return found
+    rows = _ps("-o", "pid=,ppid=")
+    if rows is None:
+        return None
+    return {pid: int(rest) for pid, rest in rows if rest.strip().isdigit()}
+
+
+def _marked(mark: str) -> set | None:
+    """The processes whose environment carries a worker's mark: its tree, whoever their parent now is."""
+    needle = f"{MARK_ENV}={mark}"
+    if sys.platform.startswith("linux"):
+        found = set()
+        try:
+            entries = [e for e in os.listdir("/proc") if e.isdigit()]
+        except OSError:
+            entries = None
+        for entry in entries or ():
+            try:
+                if needle.encode() in (Path("/proc") / entry / "environ").read_bytes():
+                    found.add(int(entry))
+            except OSError:
+                continue   # another user's, or gone
+        if entries:
+            return found
+    rows = _ps("-E", "-o", "pid=,command=")
+    return None if rows is None else {pid for pid, rest in rows if needle in rest}
+
+
+def _below(pid: int, parents: dict) -> set:
     children: dict = {}
-    for line in table.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            children.setdefault(int(parts[1]), []).append(int(parts[0]))
-    found, queue = [], [pid]
-    while queue:
-        for child in children.get(queue.pop(0), []):
+    for child, parent in parents.items():
+        children.setdefault(parent, []).append(child)
+    found, walk = set(), [pid]
+    while walk:
+        for child in children.get(walk.pop(), ()):
             if child not in found:
-                found.append(child)
-                queue.append(child)
+                found.add(child)
+                walk.append(child)
     return found
+
+
+def _tree(proc) -> set:
+    """Everything the process started that still runs: by parent while it lives, by its mark when it carries one."""
+    parents = _parents() if proc.poll() is None else {}
+    mark = getattr(proc, "khaos_mark", None)
+    marked = _marked(mark) if mark else set()
+    if parents is None or marked is None:
+        _warn_once("tree", "the process table cannot be read on this machine (no /proc and no ps): a worker is stopped, "
+                           "but what a worker started may be left running")
+    return (_below(proc.pid, parents or {}) | (marked or set())) - {proc.pid, os.getpid()}
 
 
 def _signal(pid: int, sig) -> None:
@@ -171,14 +310,29 @@ def _running(pid: int) -> bool:
     return True
 
 
+def _stop_windows(proc) -> None:
+    """taskkill takes the worker and its tree; where it cannot, the worker alone is killed and that is said."""
+    if proc.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _warn_once("taskkill", f"taskkill could not be run ({exc}): a worker is stopped, but what it started may be left running")
+        if proc.poll() is None:
+            proc.kill()
+    proc.wait()
+
+
 def stop_tree(proc) -> None:
-    """The process and whatever it spawned: asked first, killed after a short grace, always reaped. The tree is
-    read from the process table, so the child stays in its host's process group and the host's own signals reach it."""
-    if proc.poll() is not None:
+    """The process and whatever it started: asked first, killed after a short grace, always reaped. The tree is read
+    from the process table, so the worker stays in its host's process group and the host's own signals reach it."""
+    if os.name == "nt":
+        return _stop_windows(proc)
+    if proc.poll() is not None and not getattr(proc, "khaos_mark", None):
         return
     # Read while the tree stands: a process whose parent has exited no longer names it.
-    below = set(_descendants(proc.pid))
-    proc.terminate()
+    below = _tree(proc)
+    if proc.poll() is None:
+        proc.terminate()
     for pid in below:
         _signal(pid, signal.SIGTERM)
     deadline = time.monotonic() + STOP_GRACE_S
@@ -194,20 +348,24 @@ def stop_tree(proc) -> None:
 
 
 def communicate(proc, stdin: str, should_stop, timeout, label: str):
-    """stdin written, then polled: a stop between polls cancels the work."""
+    """stdin written, the pipes drained on threads, the worker polled: a stop between polls cancels the work, and a
+    worker that has exited is not waited on for a pipe something it started still holds."""
     try:
         proc.stdin.write(stdin)
         proc.stdin.close()
     except (BrokenPipeError, OSError):
         pass   # the worker died before reading; its exit code and stderr say why
-    proc.stdin = None   # communicate() would flush it again
+    out, err = [], []
+    readers = [_reader(proc.stdout, out.append), _reader(proc.stderr, err.append)]
     deadline = time.monotonic() + timeout if timeout else None
     while True:
         try:
-            out, err = proc.communicate(timeout=2.0)
-            return out or "", err or ""
+            proc.wait(timeout=POLL_S)
+            break
         except subprocess.TimeoutExpired:
             if should_stop is not None and should_stop():
                 raise WorkerCancelled()
             if deadline is not None and time.monotonic() > deadline:
                 raise WorkerFailed(f"the {label} worker ran past its time limit")
+    _released(proc, readers)
+    return "".join(x for x in out if x is not None), "".join(x for x in err if x is not None)

@@ -37,7 +37,7 @@ def host_env_reset():
     W.set_host_env(None)
 
 
-@pytest.mark.skipif(not POSIX, reason="the process table is read with ps")
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
 def test_a_stop_reaches_what_the_worker_started(tmp_path):
     """A worker that started a process of its own and forwards nothing: both are gone after the stop."""
     script = tmp_path / "parent.py"
@@ -164,3 +164,131 @@ def test_the_contract_probe_of_an_engine_interpreter_takes_the_host_environment_
     assert P._run([sys.executable, "-c", code]).stdout.strip() == "s3cret"
     W.set_host_env(lambda: {k: v for k, v in os.environ.items() if not k.startswith("HOST_SECRET_")})
     assert P._run([sys.executable, "-c", code]).stdout.strip() == "absent"
+
+
+LEAVES_A_CHILD = ("import json, subprocess, sys\nsys.stdin.read()\n"
+                  "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                  "print('khaos-row ' + json.dumps({'row': 0}), flush=True)\n"
+                  "print(json.dumps({'seed': 1, 'child': child.pid}), flush=True)\nsys.exit(%d)\n")
+
+
+def _kill(pid) -> None:
+    if pid and _alive(pid):
+        os.kill(pid, 9)
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_worker_that_exits_leaving_a_child_on_its_output_is_answered_at_once_and_the_child_stopped(tmp_path):
+    """The child holds the worker's pipes open; the worker's own exit decides, and nothing it started is left."""
+    script = tmp_path / "leaves.py"
+    script.write_text(LEAVES_A_CHILD % 0)
+    start = time.monotonic()
+    reply = W.run(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test", timeout=8, required="seed")
+    try:
+        assert reply["seed"] == 1 and time.monotonic() - start < 7.5, "answered by the worker's exit, not its deadline"
+        assert _gone(reply["child"]), "the process the worker left behind is still running"
+    finally:
+        _kill(reply["child"])
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_worker_that_fails_leaving_a_child_fails_by_its_own_exit_status(tmp_path):
+    script, seen = tmp_path / "leaves.py", {}
+    script.write_text(LEAVES_A_CHILD.replace("print(json.dumps({'seed': 1, 'child': child.pid}), flush=True)",
+                                             f"open({str(tmp_path / 'child')!r}, 'w').write(str(child.pid))") % 3)
+    try:
+        with pytest.raises(W.WorkerFailed, match=r"the test worker failed \(3\)"):
+            W.run(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test", timeout=8)
+        seen["child"] = int((tmp_path / "child").read_text())
+        assert _gone(seen["child"])
+    finally:
+        _kill(seen.get("child") or (int((tmp_path / "child").read_text()) if (tmp_path / "child").exists() else None))
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_streaming_worker_that_exits_leaving_a_child_on_its_output_does_not_hang(tmp_path):
+    import threading
+    script, got = tmp_path / "leaves.py", {}
+    script.write_text(LEAVES_A_CHILD % 0)
+
+    def ask():
+        got["reply"] = W.stream(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test",
+                                on_row=lambda row: got.setdefault("rows", []).append(row))
+    asking = threading.Thread(target=ask, daemon=True)
+    asking.start()
+    asking.join(15)
+    child = got.get("reply", {}).get("child")
+    try:
+        assert not asking.is_alive(), "the caller is still waiting on a pipe the worker's child holds"
+        assert got["reply"]["seed"] == 1 and got["rows"] == [{"row": 0}] and _gone(child)
+    finally:
+        _kill(child)
+
+
+def test_parents_are_read_from_proc_whatever_a_process_is_called(tmp_path):
+    """A command name may hold spaces and brackets; the parent is the second field after the last bracket."""
+    for pid, text in ((12, "12 (python3) S 7 12 7 0 -1"), (13, "13 (a b) c) R 12 13 7 0"), (14, "14 (tail) S 1 14 14")):
+        (tmp_path / str(pid)).mkdir()
+        (tmp_path / str(pid) / "stat").write_text(text)
+    (tmp_path / "self").mkdir()
+    (tmp_path / "15").mkdir()
+    assert W._parents_from_proc(tmp_path) == {12: 7, 13: 12, 14: 1}
+    assert W._below(7, {12: 7, 13: 12, 14: 1}) == {12, 13}
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason=W.LINUX_ONLY)
+def test_on_linux_a_stop_reaches_the_tree_with_no_ps_installed(tmp_path, monkeypatch):
+    script = tmp_path / "parent.py"
+    script.write_text("import subprocess, sys, time\n"
+                      "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                      "print(child.pid, flush=True)\ntime.sleep(120)\n")
+    proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
+    grandchild = int(proc.stdout.readline())
+    monkeypatch.setenv("PATH", str(tmp_path))
+    try:
+        W.stop_tree(proc)
+        assert _gone(grandchild)
+    finally:
+        proc.stdout.close()
+        _kill(grandchild)
+
+
+@pytest.mark.skipif(not POSIX, reason=W.POSIX_ONLY)
+def test_a_machine_that_cannot_name_a_workers_children_says_so_once_and_still_stops_the_worker(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(W, "_parents", lambda: None)
+    monkeypatch.setattr(W, "_marked", lambda token: None)
+    monkeypatch.setattr(W, "_warned", set())
+    with caplog.at_level("WARNING", logger=W.log.name):
+        for _ in range(2):
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+            W.stop_tree(proc)
+            assert proc.poll() is not None
+    said = [r.getMessage() for r in caplog.records if "cannot be read" in r.getMessage()]
+    assert len(said) == 1 and "what a worker started may be left running" in said[0]
+
+
+def test_on_windows_the_tree_is_taken_by_taskkill_and_a_failure_is_said(monkeypatch, caplog):
+    """Driven with a stand-in for taskkill: the command it is given, and the fall back to killing the worker alone."""
+    calls = []
+
+    class Proc:
+        pid, dead, killed = 4321, False, False
+
+        def poll(self):
+            return 0 if self.dead else None
+
+        def kill(self):
+            self.killed = self.dead = True
+
+        def wait(self, timeout=None):
+            return 0
+    took = Proc()
+    monkeypatch.setattr(W.subprocess, "run", lambda cmd, **k: calls.append(cmd) or setattr(took, "dead", True))
+    W._stop_windows(took)
+    assert calls == [["taskkill", "/T", "/F", "/PID", "4321"]] and not took.killed
+    left = Proc()
+    monkeypatch.setattr(W, "_warned", set())
+    monkeypatch.setattr(W.subprocess, "run", lambda cmd, **k: (_ for _ in ()).throw(FileNotFoundError("taskkill")))
+    with caplog.at_level("WARNING", logger=W.log.name):
+        W._stop_windows(left)
+    assert left.killed and any("taskkill" in r.getMessage() for r in caplog.records)
