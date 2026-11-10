@@ -117,6 +117,15 @@ def test_losses_and_checkpoints_are_read_from_what_the_driver_writes(tmp_path):
     assert T.checkpoint_step(tmp_path / "epoch=0-step=120.ckpt") == 120 and T.checkpoint_step(tmp_path / "last.ckpt") is None
 
 
+def test_only_laid_out_raw_checkpoints_are_dropped(tmp_path):
+    """A completed run drops each raw checkpoint it laid out and leaves anything it did not."""
+    from khaos_attribution.engines import process_trainer as PT
+    done, pending = tmp_path / "epoch=0-step=10.ckpt", tmp_path / "epoch=0-step=20.ckpt"
+    done.write_bytes(b"c"); pending.write_bytes(b"c")
+    PT.drop_laid_out({10: done, 20: pending}, {10})
+    assert not done.exists() and pending.exists()
+
+
 def test_a_session_refuses_a_resume_and_too_few_pairs(tmp_path):
     api = T.TrainingApi(root=tmp_path, runtime="torch", python=tmp_path / "python")
     clips = tmp_path / "clips"

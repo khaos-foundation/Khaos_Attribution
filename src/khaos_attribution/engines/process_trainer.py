@@ -72,6 +72,16 @@ def checkpoint_step(path: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def drop_laid_out(found: dict, laid_out: set) -> None:
+    """Remove the trainer's own file for each checkpoint already laid out; resume and every reader use the copy."""
+    for step, path in found.items():
+        if step in laid_out:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError as exc:
+                logging.getLogger(__name__).warning("could not remove %s: %s", path, exc)
+
+
 def settled(sizes: dict, path: Path, final: bool) -> bool:
     """Whether a checkpoint held still across two polls (size and mtime), or the trainer has exited: it is written
     in one long, non-atomic write. ``sizes`` is the session's memory of the last poll."""
@@ -164,6 +174,7 @@ def follow(session, offset: int, *, started: str, losses, run_steps: dict, poll:
         yield TrainingUpdate(step=seen_steps, loss=last_loss, msg=f"trainer exited {code}: {tail}", kind="fail",
                              epoch=epoch_done)
         return
+    drop_laid_out(session._checkpoints(), laid_out)
     yield TrainingUpdate(step=seen_steps, loss=last_loss, msg="[OK] done", kind="complete",
                          epoch=max(epoch_done, session.steps["epochs"]))
 
