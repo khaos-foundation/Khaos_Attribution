@@ -26,7 +26,7 @@ from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of
 from register_service.store import Store, now_utc
-from register_service.translog import EntryRefused, LogBlocked, _write as write_whole, export as export_log
+from register_service.translog import EntryRefused, LogBlocked, export as export_log, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes

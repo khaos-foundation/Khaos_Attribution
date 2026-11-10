@@ -3,6 +3,7 @@ byte for byte, after any sequence of writes, and every proof it publishes verifi
 import hashlib
 import json
 import random
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -119,12 +120,12 @@ def test_after_any_sequence_of_writes_the_files_are_a_whole_exports_files(tmp_pa
 
 
 def _writes(monkeypatch) -> list:
-    seen, original = [], RT._write
+    seen, original = [], RT.write_whole
 
     def counting(path, data):
         seen.append(path)
         original(path, data)
-    monkeypatch.setattr(RT, "_write", counting)
+    monkeypatch.setattr(RT, "write_whole", counting)
     return seen
 
 
@@ -192,6 +193,113 @@ def test_files_changed_behind_the_exports_back_are_written_again_whole(tmp_path,
     proof.write_text("{}")
     assert RT.export(store.log, mirror, _key_doc(store), full=True)
     assert proof.read_bytes() == good, "the whole export is the repair"
+
+
+class _Died(Exception):
+    """The export stopped here, as a crash would stop it."""
+
+
+def _export_dying_before(store, mirror, public, clock, monkeypatch, k: int) -> bool:
+    """One export that dies before its k-th change to the mirror's files; True when it finished with fewer."""
+    made, write, remove = [0], RT.write_whole, RT._remove
+
+    def step():
+        if made[0] == k:
+            raise _Died
+        made[0] += 1
+    with monkeypatch.context() as m:
+        m.setattr(RT, "write_whole", lambda path, data: (step(), write(path, data))[1])
+        m.setattr(RT, "_remove", lambda path: (step(), remove(path))[1])
+        try:
+            RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+        except _Died:
+            return False
+    return True
+
+
+def _every_leaf_proves(where: Path, pem: str) -> int:
+    """Each leaf the copy's newest head holds, proved from the copy's own files; a copy with no head yet holds none."""
+    if not (where / "log" / "sth" / "latest.json").is_file():
+        return 0
+    n = json.loads((where / "log" / "sth" / "latest.json").read_text())["tree_size"]
+    leaves = json.loads((where / "log" / "hashes.json").read_text())["leaves"][:n]
+    for leaf in leaves:
+        V.prove(leaf, V.Mirror(str(where)), pem)
+    return len(leaves)
+
+
+def _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) -> int:
+    """The export about to run, killed before each change it makes in turn, each time from the same files and the
+    same record of the last export; after every death both copies still prove every leaf their head holds."""
+    keep = tmp_path / "keep"
+    shutil.rmtree(keep, ignore_errors=True)
+    for name, where in (("mirror", mirror), ("public", public)):
+        if where.exists():
+            shutil.copytree(where, keep / name)
+    record = [tuple(r) for r in store.db.execute("SELECT * FROM log_exports").fetchall()]
+    pem, deaths = store.log.signer.public_pem(), 0
+    while True:
+        for name, where in (("mirror", mirror), ("public", public)):
+            shutil.rmtree(where, ignore_errors=True)
+            if (keep / name).exists():
+                shutil.copytree(keep / name, where)
+        store.db.execute("DELETE FROM log_exports")
+        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?)", record)
+        finished = _export_dying_before(store, mirror, public, clock, monkeypatch, deaths)
+        for where in (mirror, public):
+            _every_leaf_proves(where, pem)
+        if finished:
+            return deaths
+        deaths += 1
+
+
+def test_a_crash_right_after_a_withhold_leaves_a_copy_that_still_verifies(tmp_path, clock, monkeypatch):
+    """The withheld body is not taken away before the head that proves its withhold is filed."""
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    shas = [_publish(store, f"model-{i}") for i in range(4)]
+    clock.pass_(24 * 30)
+    assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+    store.log_withhold(store.log.admit_leaf_of(shas[1]), "a private name")
+    assert _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) >= 8
+    leaf = store.log.admit_leaf_of(shas[1])
+    for where in (mirror, public):
+        assert not (where / "log" / "entries" / f"{leaf}.json").exists(), "the finished export serves no withheld body"
+        assert json.loads((where / "log" / "bodies.json").read_text())["bodies"][store.log.leaf(leaf)["idx"]] is None
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_an_export_killed_at_any_write_leaves_copies_that_verify(tmp_path, clock, monkeypatch, seed):
+    """Random admissions, strikes, withholds, heartbeats and days passing; every export is killed before each of
+    its writes in turn, and what is on disk after each death proves every leaf of the head it holds. Exports are
+    never further apart than the two days the verifiers allow a delayed copy beyond its week, as the daily
+    heartbeat keeps them."""
+    rng = random.Random(1000 + seed)
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    admitted, deaths = [], 0
+    for step in range(14):
+        clock.pass_(rng.choice((6, 20, 40)))
+        roll = rng.random()
+        if roll < 0.45 or not admitted:
+            admitted.append(_publish(store, f"model-{seed}-{step}"))
+        elif roll < 0.6:
+            for leaf, state in store.log.admit_states(rng.choice(admitted)).items():
+                if state != "struck":
+                    with store._tx():
+                        store.log.revoke_locked(leaf, "struck")
+        elif roll < 0.85:
+            try:
+                store.log_withhold(store.log.admit_leaf_of(rng.choice(admitted)), "a private name")
+            except RT.EntryRefused:
+                pass
+        else:
+            with store._tx():
+                store.log.heartbeat_locked()
+        deaths += _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public)
+        _same_as_a_whole_export(store, tmp_path, clock, mirror, public, f"crash-{seed}-{step}")
+    assert deaths > 80
+    assert json.loads((public / "log" / "bodies.json").read_text())["pending_from"] not in (None, 0), "some bodies became public"
 
 
 def test_a_publish_is_registered_and_mirrored_off_the_event_loop(tmp_path):

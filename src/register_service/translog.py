@@ -692,12 +692,16 @@ def head_doc(row) -> dict:
 _EXPORT_LOCK = threading.Lock()
 
 
-def _write(path: Path, data: bytes) -> None:
+def write_whole(path: Path, data: bytes) -> None:
     """A temp file of this writer's own, then replace: a reader never meets a half-written file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.new")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+
+
+def _remove(path: Path) -> None:
+    path.unlink(missing_ok=True)
 
 
 def _json(doc) -> bytes:
@@ -752,8 +756,9 @@ def snapshot(log: TransLog, nodes: bool = True) -> dict:
     finally:
         db.execute("COMMIT")
     leaves = [r["leaf_hash"] for r in rows]
-    return {"leaves": leaves, "kinds": [r["kind"] for r in rows],
+    return {"leaves": leaves, "kinds": [r["kind"] for r in rows], "refers": [r["refers"] for r in rows],
             "bodies": [None if r["withheld_at"] else bytes(r["body"]) for r in rows],
+            "raw": [bytes(r["body"]) for r in rows],
             "withheld": sorted(r["leaf_hash"] for r in rows if r["withheld_at"]),
             "tree": T.Tree(len(leaves), (lambda level, index: held[(level, index)]) if nodes else log._perfect),
             "heads": heads, "first_current": first_current, "struck": struck, "anchors": anchors,
@@ -812,17 +817,46 @@ def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = Non
     return True
 
 
+def _owed_to_the_old_head(root: Path, snap: dict, shown: list, done: dict | None, was_size: int) -> tuple:
+    """What a reader of the head still on disk needs that this export takes away: bodies whose withhold that head
+    does not hold. (kept, waiting): those it could read, as index -> body, stay until the new head is filed; those
+    it knew only as inside the delay, as indices, stay explained by the delay until then."""
+    if not was_size:
+        return {}, []
+    withheld_by = {}
+    for w, (kind, names) in enumerate(zip(snap["kinds"], snap["refers"])):
+        if kind == "withhold":
+            withheld_by.setdefault(names, w)
+    index_of = {leaf: i for i, leaf in enumerate(snap["leaves"])}
+    late = [index_of[leaf] for leaf, w in withheld_by.items() if leaf in index_of and index_of[leaf] < was_size <= w]
+    late = [i for i in late if shown[i] is None and snap["raw"][i]]
+    if not late:
+        return {}, []
+    if done is not None:
+        # The last export's own record says where its delay stood.
+        public = {i for i in late if done["pending_from"] is None or i < done["pending_from"]}
+    else:
+        try:
+            old = json.loads((root / "bodies.json").read_text(encoding="utf-8"))["bodies"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}, []
+        public = {i for i in late if i < len(old) and old[i] is not None}
+    return {i: snap["raw"][i] for i in public}, sorted(set(late) - public)
+
+
 def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done: dict | None) -> dict | None:
     """The files under ``root``; with ``done`` (the last export's record) only what changed since. Returns the head
-    now filed as the newest, or None when the files there are already ahead of this snapshot."""
+    now filed as the newest, or None when the files there are already ahead of this snapshot. In an order that
+    verifies wherever it stops: everything a reader of the old head can live with, the new head, then what is taken away."""
     tree, leaves, n = snap["tree"], snap["leaves"], len(snap["leaves"])
-    on_disk = root / "sth" / "latest.json"
+    on_disk, was_size = root / "sth" / "latest.json", 0
     if on_disk.is_file():
         try:
-            if json.loads(on_disk.read_text(encoding="utf-8"))["tree_size"] > n:
-                return None
-        except (OSError, ValueError, KeyError):
+            was_size = int(json.loads(on_disk.read_text(encoding="utf-8"))["tree_size"])
+        except (OSError, ValueError, KeyError, TypeError):
             pass
+        if was_size > n:
+            return None
     # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing: neither waits.
     shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat") else b
              for i, b in enumerate(snap["bodies"])]
@@ -830,42 +864,50 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
     # A body's place can change behind the newest leaf only where the delay's edge moved, or by a withhold.
     edge = 0 if done is None else min(was, pending if pending is not None else n,
                                       done["pending_from"] if done["pending_from"] is not None else was)
-    _write(root / "key.json", _json(key_doc))
-    for leaf_hex in snap["withheld"] if done is not None else ():
-        (root / "entries" / f"{leaf_hex}.json").unlink(missing_ok=True)
+
+    def bodies(kept: dict, edge_said: int | None) -> bytes:
+        return _json({"tree_size": n, "pending_from": edge_said,
+                      "bodies": [(kept.get(i) or b).decode("utf-8") if (b is not None or i in kept) else None
+                                 for i, b in enumerate(shown)]})
+    write_whole(root / "key.json", _json(key_doc))
     for i in range(edge, n):
         path = root / "entries" / f"{leaves[i]}.json"
-        if shown[i] is None:
-            path.unlink(missing_ok=True)
-        elif not path.is_file():
-            _write(path, shown[i])
+        if shown[i] is not None and not path.is_file():
+            write_whole(path, shown[i])
     current = snap["current_sizes"]
     for i in range(was, n):
         at = bisect.bisect_left(current, i + 1)
         size = current[at] if at < len(current) else n
-        _write(root / "proofs" / f"{leaves[i]}.json",
-               _json({"leaf_hash": leaves[i], "leaf_index": i, "tree_size": size, "audit_path": T.hexes(tree.inclusion(i, size))}))
-    hidden = {leaves[i] for i in range(n) if shown[i] is None and snap["bodies"][i] is not None}
-    struck = {k: v for k, v in snap["struck"].items() if v["leaf_hash"] not in hidden}
-    if done is None:
-        (root / "records.json").unlink(missing_ok=True)
-    _write(root / "struck.json", _json(struck))
-    _write(root / "withheld.json", _json(snap["withheld"]))
-    _write(root / "hashes.json", _json({"tree_size": n, "leaves": leaves}))
-    _write(root / "bodies.json", _json({"tree_size": n, "pending_from": pending,
-                                        "bodies": [b.decode("utf-8") if b is not None else None for b in shown]}))
+        write_whole(root / "proofs" / f"{leaves[i]}.json",
+                    _json({"leaf_hash": leaves[i], "leaf_index": i, "tree_size": size, "audit_path": T.hexes(tree.inclusion(i, size))}))
+    write_whole(root / "hashes.json", _json({"tree_size": n, "leaves": leaves}))
+    kept, waiting = _owed_to_the_old_head(root, snap, shown, done, was_size)
+    write_whole(root / "bodies.json", bodies(kept, min([pending if pending is not None else n, *waiting]) if waiting else pending))
     latest = before = None
     for head in snap["heads"]:
         if head["tree_size"] > was:
-            _write(root / "sth" / f"{head['tree_size']}.json", _json(head))
+            write_whole(root / "sth" / f"{head['tree_size']}.json", _json(head))
             if before is not None:
-                _write(root / "consistency" / f"{before['tree_size']}.json",
-                       _json({"first": before["tree_size"], "second": head["tree_size"],
-                              "proof": T.hexes(tree.consistency(before["tree_size"], head["tree_size"]))}))
+                write_whole(root / "consistency" / f"{before['tree_size']}.json",
+                            _json({"first": before["tree_size"], "second": head["tree_size"],
+                                   "proof": T.hexes(tree.consistency(before["tree_size"], head["tree_size"]))}))
         latest = before = head
     _write_anchors(root, snap["anchors"])
     if latest is not None:
-        _write(on_disk, _json(latest))
+        write_whole(on_disk, _json(latest))
+    # From here the new head is the one read, and it proves every withhold: what it hides can go.
+    if kept or waiting:
+        write_whole(root / "bodies.json", bodies({}, pending))
+    for leaf_hex in snap["withheld"] if done is not None else ():
+        _remove(root / "entries" / f"{leaf_hex}.json")
+    for i in range(edge, n):
+        if shown[i] is None:
+            _remove(root / "entries" / f"{leaves[i]}.json")
+    hidden = {leaves[i] for i in range(n) if shown[i] is None and snap["bodies"][i] is not None}
+    if done is None:
+        _remove(root / "records.json")
+    write_whole(root / "struck.json", _json({k: v for k, v in snap["struck"].items() if v["leaf_hash"] not in hidden}))
+    write_whole(root / "withheld.json", _json(snap["withheld"]))
     return latest
 
 
@@ -873,10 +915,10 @@ def _write_anchors(root: Path, anchors: list) -> None:
     rows = []
     for a in anchors:
         name = f"{a['tree_size']}.ots"
-        _write(root / "anchors" / name, bytes(a["receipt"]))
+        write_whole(root / "anchors" / name, bytes(a["receipt"]))
         rows.append({"tree_size": a["tree_size"], "root_sha256": a["root_sha256"], "backend": a["backend"], "state": a["state"],
                      "stamped_at": a["stamped_at"], "completed_at": a["completed_at"], "receipt": f"anchors/{name}"})
-    _write(root / "anchors.json", _json(rows))
+    write_whole(root / "anchors.json", _json(rows))
 
 
 def export_anchors(log: TransLog, mirror: Path) -> None:
