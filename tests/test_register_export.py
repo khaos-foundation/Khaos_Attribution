@@ -199,7 +199,7 @@ class _Died(Exception):
     """The export stopped here, as a crash would stop it."""
 
 
-def _export_dying_before(store, mirror, public, clock, monkeypatch, k: int) -> bool:
+def _export_dying_before(store, mirror, public, clock, monkeypatch, k: int, full: bool = False) -> bool:
     """One export that dies before its k-th change to the mirror's files; True when it finished with fewer."""
     made, write, remove = [0], RT.write_whole, RT._remove
 
@@ -211,7 +211,7 @@ def _export_dying_before(store, mirror, public, clock, monkeypatch, k: int) -> b
         m.setattr(RT, "write_whole", lambda path, data: (step(), write(path, data))[1])
         m.setattr(RT, "_remove", lambda path: (step(), remove(path))[1])
         try:
-            RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+            RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now, full=full)
         except _Died:
             return False
     return True
@@ -228,7 +228,7 @@ def _every_leaf_proves(where: Path, pem: str) -> int:
     return len(leaves)
 
 
-def _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) -> int:
+def _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public, full: bool = False) -> int:
     """The export about to run, killed before each change it makes in turn, each time from the same files and the
     same record of the last export; after every death both copies still prove every leaf their head holds."""
     keep = tmp_path / "keep"
@@ -245,7 +245,7 @@ def _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) -> in
                 shutil.copytree(keep / name, where)
         store.db.execute("DELETE FROM log_exports")
         store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?)", record)
-        finished = _export_dying_before(store, mirror, public, clock, monkeypatch, deaths)
+        finished = _export_dying_before(store, mirror, public, clock, monkeypatch, deaths, full)
         for where in (mirror, public):
             _every_leaf_proves(where, pem)
         if finished:
@@ -323,6 +323,46 @@ def test_a_crash_anywhere_as_the_delay_passes_a_body_withheld_before_it_was_publ
     store, mirror, public = _withheld_inside_the_delay(tmp_path, clock)
     clock.pass_(24)
     assert _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public) >= 8
+
+
+def test_a_lost_leaf_the_old_head_knew_as_held_back_is_still_owed_the_delay(tmp_path):
+    """A leaf a recovery put back without its body: nothing to keep, but the old head's delay still explains it."""
+    root = tmp_path / "log"
+    root.mkdir()
+    (root / "bodies.json").write_text(json.dumps({"tree_size": 3, "pending_from": 2, "bodies": ["{}", "{}", None]}))
+    snap = {"leaves": ["l0", "l1", "l2", "l3"], "kinds": ["genesis", "admit", "unavailable", "withhold"],
+            "refers": [None, None, None, "l2"], "raw": [b"{}", b"{}", b"", b"{}"]}
+    shown = [b"{}", b"{}", None, b"{}"]
+    assert RT._owed_to_the_old_head(root, snap, shown, None, 3) == ({}, [2])
+    assert RT._owed_to_the_old_head(root, snap, shown, {"tree_size": 3, "pending_from": 2}, 3) == ({}, [2])
+
+
+def test_the_first_export_after_a_recovery_killed_anywhere_leaves_copies_that_verify(tmp_path, clock, monkeypatch):
+    """The database and the full export restored from before an admit the public copy still held back: the leaf comes
+    back without its body, and log-recover's whole export, killed before each write, never leaves it unexplained."""
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    for i in range(3):
+        _publish(store, f"model-{i}")
+    clock.pass_(24 * 30)
+    assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+    store.db.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy(store.path, tmp_path / "backup.sqlite3")
+    shutil.copytree(mirror, tmp_path / "mirror-backup")
+    _publish(store, "late")
+    assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
+    signer = store.log.signer
+    for p in tmp_path.glob("register.sqlite3*"):
+        p.unlink()
+    shutil.copy(tmp_path / "backup.sqlite3", tmp_path / "register.sqlite3")
+    shutil.rmtree(mirror)
+    shutil.copytree(tmp_path / "mirror-backup", mirror)
+    store = Store(tmp_path / "register.sqlite3")
+    store.log.signer = signer
+    clock.pass_(24 * 8)
+    ok, lines = RT.recover(store, [mirror, public], signer.public_pem())
+    assert ok and any("without its body" in x for x in lines), lines
+    assert _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public, full=True) >= 8
 
 
 def test_a_publish_is_registered_and_mirrored_off_the_event_loop(tmp_path):

@@ -830,7 +830,7 @@ def _owed_to_the_old_head(root: Path, snap: dict, shown: list, done: dict | None
             withheld_by.setdefault(names, w)
     index_of = {leaf: i for i, leaf in enumerate(snap["leaves"])}
     late = [index_of[leaf] for leaf, w in withheld_by.items() if leaf in index_of and index_of[leaf] < was_size <= w]
-    late = [i for i in late if shown[i] is None and snap["raw"][i]]
+    late = [i for i in late if shown[i] is None]
     if not late:
         return {}, []
     if done is not None:
@@ -842,7 +842,8 @@ def _owed_to_the_old_head(root: Path, snap: dict, shown: list, done: dict | None
         except (OSError, ValueError, KeyError, TypeError):
             return {}, []
         public = {i for i in late if i < len(old) and old[i] is not None}
-    return {i: snap["raw"][i] for i in public}, sorted(set(late) - public)
+    # A leaf put back without its body has none to keep; one the old head held back is still owed the delay.
+    return {i: snap["raw"][i] for i in public if snap["raw"][i]}, sorted(set(late) - public)
 
 
 def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done: dict | None) -> dict | None:
