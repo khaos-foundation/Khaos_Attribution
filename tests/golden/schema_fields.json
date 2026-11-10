@@ -1,0 +1,143 @@
+{
+ "attribution_estimate": [
+  {
+   "fields": [
+    "#party_split.name",
+    "#party_split.share_pct",
+    "#party_split.share_range_pct",
+    "adapter_version",
+    "artist_id",
+    "base_model_id",
+    "caveats",
+    "created_at",
+    "generation_id",
+    "influence",
+    "influence[].blended_share_pct",
+    "influence[].exposure_share_pct",
+    "influence[].influence_share_pct",
+    "influence[].share_range_pct",
+    "influence[].similarity_share_pct",
+    "influence[].title",
+    "influence[].track_id",
+    "method",
+    "method.embedding_model",
+    "method.embedding_version",
+    "method.estimator_version",
+    "method.exposure_basis",
+    "method.kind",
+    "method.similarity_informative",
+    "method.temperature",
+    "resemblance",
+    "schema_version",
+    "splits",
+    "splits.masters",
+    "splits.publishers",
+    "splits.unattributed_pct",
+    "splits.writers"
+   ],
+   "version": "1.1.0"
+  }
+ ],
+ "model_card": [
+  {
+   "fields": [
+    "adapter_version",
+    "artist_id",
+    "artist_name",
+    "base_model",
+    "base_model_id",
+    "base_model_licence",
+    "consent",
+    "consent.capacity",
+    "consent.date",
+    "consent.party",
+    "consent.scope",
+    "consent.scope.commercial_outputs",
+    "consent.scope.generate",
+    "consent.scope.train",
+    "consent.text_version",
+    "consent_statement",
+    "copyright_notice",
+    "credit_line",
+    "engine_commit",
+    "phonogram_notice",
+    "schema_version",
+    "training_catalogue",
+    "training_catalogue[].duration",
+    "training_catalogue[].title",
+    "training_catalogue[].vocal",
+    "training_date",
+    "watermark_id"
+   ],
+   "version": "1.1.0"
+  }
+ ],
+ "provenance_record": [
+  {
+   "fields": [
+    "adapter_hash",
+    "adapter_version",
+    "artist_id",
+    "artist_name",
+    "base_model",
+    "base_model_id",
+    "base_model_licence",
+    "engine_commit",
+    "generation_mode",
+    "prompt",
+    "schema_version",
+    "source_generation_id",
+    "timestamp",
+    "watermark_id"
+   ],
+   "version": "1.0.0"
+  }
+ ],
+ "tombstone": [
+  {
+   "fields": [
+    "artist_id",
+    "content_sha256",
+    "deleted_at_utc",
+    "fingerprint_version",
+    "fingerprints",
+    "generation_id",
+    "run_id",
+    "schema_version",
+    "watermark_id"
+   ],
+   "version": "1.0.0"
+  }
+ ],
+ "track_rights": [
+  {
+   "fields": [
+    "#isrc_field.status",
+    "#isrc_field.value",
+    "#iswc_field.status",
+    "#iswc_field.value",
+    "#publisher.ipi",
+    "#publisher.name",
+    "#publisher.share_pct",
+    "#writer.ipi",
+    "#writer.name",
+    "#writer.role",
+    "#writer.share_pct",
+    "isrc",
+    "iswc",
+    "masters",
+    "performers",
+    "performers[].name",
+    "performers[].role",
+    "publishers",
+    "schema_version",
+    "source",
+    "title",
+    "track_id",
+    "verified_date",
+    "writers"
+   ],
+   "version": "1.0.0"
+  }
+ ]
+}

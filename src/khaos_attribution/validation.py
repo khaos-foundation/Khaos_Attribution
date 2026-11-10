@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from importlib import resources
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -12,14 +13,46 @@ class AttributionValidationError(ValueError):
     """Raised when a record does not match its schema."""
 
 
+class WrittenByNewerContract(AttributionValidationError):
+    """The record's schema_version is past every version this contract reads: update the contract, not the record."""
+
+
 def load_schema(name):
     """Load a bundled schema by filename, e.g. 'provenance_record.schema.json'."""
     schema_file = resources.files("khaos_attribution").joinpath("schemas", name)
     return json.loads(schema_file.read_text(encoding="utf-8"))
 
 
+def known_versions(schema):
+    """The schema_version values a schema reads."""
+    spec = schema.get("properties", {}).get("schema_version", {})
+    return [spec["const"]] if "const" in spec else list(spec.get("enum") or [])
+
+
+def _version(text):
+    """A schema version as numbers to compare, or None when it is not three numbers."""
+    if not isinstance(text, str) or not re.fullmatch(r"\d+\.\d+\.\d+", text):
+        return None
+    return tuple(int(part) for part in text.split("."))
+
+
+def _words(error):
+    """One problem as the validator found it; a field the schema does not name, in plain words."""
+    if error.validator == "additionalProperties" and isinstance(error.instance, dict):
+        unknown = sorted(k for k in error.instance if k not in (error.schema.get("properties") or {}))
+        return f"fields this contract does not know: {', '.join(unknown)} (written by a newer contract, or misspelt)"
+    return error.message
+
+
 def _validate(record, schema_name, record_kind):
     schema = load_schema(schema_name)
+    theirs = _version(record.get("schema_version")) if isinstance(record, dict) else None
+    newest = max(known_versions(schema), key=_version, default=None)
+    # Said before anything else: a closed schema would otherwise report the newer record's fields one by one.
+    if theirs and newest and theirs > _version(newest):
+        raise WrittenByNewerContract(
+            f"Invalid {record_kind}: it was written by a newer contract (schema_version {record['schema_version']}; "
+            f"this contract reads up to {newest}). Update the contract here to read it.")
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     errors = sorted(validator.iter_errors(record), key=lambda e: list(e.absolute_path))
     if not errors:
@@ -28,10 +61,9 @@ def _validate(record, schema_name, record_kind):
     lines = []
     for error in errors:
         location = "/".join(str(part) for part in error.absolute_path) or "(top level)"
-        lines.append(f"  - at {location}: {error.message}")
-    primary = best_match(errors)
+        lines.append(f"  - at {location}: {_words(error)}")
     raise AttributionValidationError(
-        f"Invalid {record_kind}: {primary.message}\n"
+        f"Invalid {record_kind}: {_words(best_match(errors))}\n"
         f"All problems:\n" + "\n".join(lines)
     )
 

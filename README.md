@@ -149,6 +149,10 @@ closed and its `schema_version` is a const, so a key there would invalidate
 every estimate ever written. Both schemas otherwise reject unknown fields, so typos in field names fail validation
 rather than passing silently.
 
+A new field always comes with a new `schema_version` (a test pins each schema's fields beside its version). A reader
+that meets a `schema_version` past the ones it reads raises `WrittenByNewerContract`, which says the record was written
+by a newer contract and which version this one reads up to; an unknown field under a known version is named as such.
+
 ## What the attribution estimate carries about its own signal
 
 Since estimator 0.5.0 `method.similarity_scores` stores the raw per-track
