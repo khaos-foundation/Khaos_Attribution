@@ -132,7 +132,32 @@ def test_the_mlx_runtime_reads_the_telemetry_and_needs_the_base_npz(api, tmp_pat
     assert [u.kind for u in updates if u.kind in ("epoch", "checkpoint")] == ["epoch", "checkpoint", "epoch", "checkpoint"]
     laid = sorted((tmp_path / "run" / "checkpoints").glob("epoch_*/adapter_model.safetensors"))
     assert len(laid) == 2 and laid[0].read_bytes() == b"st", "a safetensors checkpoint is copied, not converted"
+    assert not list((tmp_path / "run" / "sa3").rglob("*.safetensors")), "the trainer's own copies go once laid out"
     assert T.trained_mask(tmp_path / "run") == "zeros", "the run records the mask it trained under"
+
+
+def test_a_completed_run_drops_the_trainers_raw_checkpoints_and_keeps_its_logs(api, tmp_path):
+    """Resume and every reader use the laid-out copies, so a completed run keeps no raw trainer checkpoint."""
+    tensors = tmp_path / "run" / "tensors"
+    _clips(tensors, 3)
+    session = T.open_session(api, RECIPE, checkpoint_root=tmp_path / "ck", tensor_dir=tensors,
+                             output_dir=tmp_path / "run", device="cuda", precision="bf16", seed=4)
+    assert list(session.train())[-1].kind == "complete"
+    sa3 = tmp_path / "run" / "sa3"
+    assert not list(sa3.rglob("*.ckpt"))
+    assert (sa3 / "khaos_losses.csv").is_file() and (sa3 / "trainer_stdout.log").is_file()
+    assert len(list((tmp_path / "run" / "checkpoints").glob("epoch_*/adapter_model.safetensors"))) == 2
+
+
+def test_a_run_that_fails_keeps_the_trainers_raw_checkpoints(api, tmp_path):
+    """Only a completed run drops its raw checkpoints; a failed one keeps everything it wrote."""
+    T.TRAIN_DRIVER.write_text(T.TRAIN_DRIVER.read_text() + "\nsys.exit(3)\n")
+    tensors = tmp_path / "run" / "tensors"
+    _clips(tensors, 3)
+    session = T.open_session(api, RECIPE, checkpoint_root=tmp_path / "ck", tensor_dir=tensors,
+                             output_dir=tmp_path / "run", device="cuda", precision="bf16", seed=4)
+    assert list(session.train())[-1].kind == "fail"
+    assert len(list((tmp_path / "run" / "sa3").glob("*.ckpt"))) == 2
 
 
 def test_a_trainer_that_dies_is_a_fail_update_with_its_last_lines(api, tmp_path):
