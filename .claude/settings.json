@@ -16,7 +16,7 @@
   },
   "hooks": {
     "Stop": [
-      {"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/gate.sh\" --hook", "timeout": 600}]}
+      {"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/gate.sh\" --hook", "timeout": 120}]}
     ],
     "PreToolUse": [
       {"matcher": "Edit|Write|NotebookEdit|Bash",

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs this repository's gates: those a change touches (--changed), named ones or all, or a Stop hook's (--hook).
+# Runs this repository's gates: those a change touches (--changed), named ones or all, or the quick check a Stop runs
+# (--quick, which --hook answers with): only the test files for what changed since its last green run.
 
 ALL_GATES="pytest"
 
@@ -22,9 +23,15 @@ VENV=.venv/bin
 GITDIR=$(git rev-parse --git-common-dir) || exit 2
 LOCK="$GITDIR/khaos-gate.lock"
 GREEN="$GITDIR/khaos-gate.green"
+# Per worktree: each checkout remembers its own last green quick run.
+QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
+# A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
+QUICK_SECONDS=90
+QUICK_MAX_FILES=25
+QUICK_PYTEST="PYTHONPATH=src $VENV/python -m pytest -q -p no:cacheprovider"
 
 usage() {
-  echo "usage: scripts/gate.sh [all | <gate>... | --changed | --hook] [--budget SECONDS]"
+  echo "usage: scripts/gate.sh [all | <gate>... | --changed | --quick | --hook] [--budget SECONDS]"
   echo "gates: $ALL_GATES"
 }
 
@@ -32,6 +39,30 @@ changed_paths() {
   local base
   base=$(git merge-base HEAD origin/main 2>/dev/null) || base=HEAD
   { git diff --name-only "$base" --; git ls-files --others --exclude-standard; } | sort -u
+}
+
+# Each changed file once, as "<blob> <path>" ("gone <path>" when deleted).
+branch_files() {
+  local p
+  changed_paths | while IFS= read -r p; do
+    if [ -f "$p" ]; then printf '%s %s\n' "$(git hash-object -- "$p")" "$p"; else printf 'gone %s\n' "$p"; fi
+  done
+}
+
+# Changed paths on stdin; on stdout, each once, a changed test file itself or the test files that name a changed file.
+quick_tests() {
+  local p base
+  while IFS= read -r p; do
+    case "$p" in
+      archive/*|docs/*|reports/*|*.md) continue ;;
+      tests/*test_*.py) [ -f "$p" ] && echo "$p"; continue ;;
+    esac
+    base=${p##*/}
+    case "$base" in
+      *.py) git grep --untracked -l -w -F -e "$base" -e "import ${base%.py}" -e "from ${base%.py}" -- 'tests/*.py' ;;
+      *) git grep --untracked -l -w -F -e "$base" -- 'tests/*.py' ;;
+    esac 2> /dev/null
+  done | grep -E '(^|/)test_[^/]*\.py$' | awk '!seen[$0]++'
 }
 
 state_key() {
@@ -129,6 +160,7 @@ NAMES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --changed) MODE=changed ;;
+    --quick) MODE=quick ;;
     --hook) MODE=hook ;;
     --budget) BUDGET=${2:-0}; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -141,13 +173,42 @@ case "$MODE" in
   hook)
     input=$(cat)
     out=$(mktemp)
-    bash "$SELF" --changed --budget 570 > "$out" 2>&1
+    bash "$SELF" --quick > "$out" 2>&1
     rc=$?
     red=0
     [ "$rc" -eq 1 ] && red=1
     hook_answer "$red" "$out" "$input"
     rm -f "$out"
     exit 0 ;;
+  quick)
+    now=$(branch_files)
+    fresh=$(comm -23 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
+    [ -z "$fresh" ] && exit 0
+    remember() { printf '%s\n' "$now" > "$QUICK.tmp" && mv "$QUICK.tmp" "$QUICK"; }
+    tests=$(printf '%s\n' "$fresh" | quick_tests)
+    [ -z "$tests" ] && { remember; exit 0; }
+    count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
+    if [ "$count" -gt "$QUICK_MAX_FILES" ]; then
+      echo "SKIP quick: $count test files name the change; gate.sh --changed checks it before the PR"
+      remember
+      exit 0
+    fi
+    take_lock || { echo "SKIP quick: another gate run holds this repository's lock"; exit 0; }
+    secs=$QUICK_SECONDS
+    [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
+    log=$(mktemp)
+    start=$(date +%s)
+    with_timeout "$secs" bash -c "$QUICK_PYTEST $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
+    rc=$?
+    took=$(( $(date +%s) - start ))
+    summary=$(grep -E '[0-9]+ (passed|failed)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
+    case "$rc" in
+      0|5) echo "PASS quick (${took}s, $count test files)${summary:+: $summary}"; remember; rc=0 ;;
+      124) echo "SKIP quick: over ${secs}s ($count test files); gate.sh --changed checks it before the PR"; remember; rc=0 ;;
+      *) echo "FAIL quick (${took}s, exit $rc): $(printf '%s' "$tests" | tr '\n' ' ')"; tail -60 "$log"; rc=1 ;;
+    esac
+    rm -f "$log"
+    exit "$rc" ;;
   changed)
     gates=$(changed_paths | gates_for | tr '\n' ' ')
     gates=${gates% }
