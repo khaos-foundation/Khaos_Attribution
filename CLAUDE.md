@@ -19,7 +19,7 @@ A whole-codebase pass on 2026-09-14 removed about 20,000 lines of such commentar
 
 ## Tests
 
-`bash scripts/gate.sh pytest` runs the suite (`.venv/bin/python -m pytest -q`); `--changed` runs what a change touches, and the Stop hook in `.claude/settings.json` calls it. The `release` skill makes a version.
+`bash scripts/gate.sh pytest` runs the suite (`.venv/bin/python -m pytest -q`); `--changed` runs what a change touches, once per branch before its PR; the Stop hook in `.claude/settings.json` runs only `--quick` (the test files for what changed since its last green run, within 90 seconds). The `release` skill makes a version.
 
 Sweeps search with `rg` or `git ls-files`, never a bare `find`; any `find` prunes `data/`.
 
