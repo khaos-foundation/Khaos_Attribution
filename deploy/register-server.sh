@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Guild Register on one small Ubuntu 24.04 server, run once as root and safe to run again:
-# updates on a timer, a firewall open on 22, 80 and 443, a service user with no shell, the register under
+# updates on a timer, a firewall open on 22, 80 and 443, logs kept 30 days, a service user with no shell, the register under
 # systemd on loopback port 8912, Caddy in front of it with HTTPS, a nightly backup to a storage box.
 #   REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=v0.27.0 bash register-server.sh
 # Until the Guardians' key exists the register signs with a development key and says so on every page;
@@ -24,7 +24,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "== packages"
 apt-get update -q
-apt-get install -y -q unattended-upgrades ufw fail2ban git curl sqlite3 rsync debian-keyring debian-archive-keyring apt-transport-https ca-certificates
+apt-get install -y -q -o Dpkg::Options::=--force-confold unattended-upgrades ufw fail2ban git curl sqlite3 rsync debian-keyring debian-archive-keyring apt-transport-https ca-certificates
 dpkg-reconfigure -f noninteractive unattended-upgrades
 
 echo "== ssh: keys only"
@@ -45,6 +45,20 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
 systemctl enable --now fail2ban
+
+echo "== logs: 30 days"
+# No journal line outlives 30 days (a file goes once its first line is 29 days old; files turn over daily). Named to sort
+# after rsyslog's syslog.conf, whose forwarding would keep a five-week copy in /var/log/syslog.
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/zz-retention.conf <<'CONF'
+[Journal]
+MaxRetentionSec=29day
+MaxFileSec=1day
+ForwardToSyslog=no
+CONF
+systemctl restart systemd-journald
+# The files rsyslog, the firewall and fail2ban still write, and the sign-in records, turn over daily and keep 28.
+install -m 644 "$(dirname "$0")"/logrotate/{rsyslog,ufw,fail2ban,btmp,wtmp} /etc/logrotate.d/
 
 echo "== caddy"
 if ! command -v caddy >/dev/null; then

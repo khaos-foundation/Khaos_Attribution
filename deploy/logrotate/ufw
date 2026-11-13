@@ -1,0 +1,12 @@
+/var/log/ufw.log
+{
+	rotate 28
+	daily
+	missingok
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		[ -x /usr/lib/rsyslog/rsyslog-rotate ] && /usr/lib/rsyslog/rsyslog-rotate || true
+	endscript
+}
