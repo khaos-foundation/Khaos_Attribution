@@ -18,6 +18,8 @@ gates_for() {
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.." || exit 2
+# Every gate reads this checkout's code: a worktree shares a venv whose editable install is the main checkout's.
+export PYTHONPATH="$PWD/src"
 VENV=.venv/bin
 [ -d "$VENV" ] || VENV=.venv/Scripts
 GITDIR=$(git rev-parse --git-common-dir) || exit 2
@@ -28,7 +30,7 @@ QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
 # A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
 QUICK_SECONDS=90
 QUICK_MAX_FILES=25
-QUICK_PYTEST="PYTHONPATH=src $VENV/python -m pytest -q -p no:cacheprovider"
+QUICK_PYTEST="$VENV/python -m pytest -q -p no:cacheprovider"
 
 usage() {
   echo "usage: scripts/gate.sh [all | <gate>... | --changed | --quick | --hook] [--budget SECONDS]"

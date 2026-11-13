@@ -51,7 +51,7 @@ def test_the_card_the_record_and_the_register_record_carry_the_id_in_one_shape(t
 
 
 def test_the_register_record_check_reads_the_id_when_present():
-    from test_registry import _record
+    from tests.test_registry import _record
     good = _record()
     assert R.record_problems(good) == []
     with_id = {**good, "model": {**good["model"], "base_model_id": "acestep-1.5@turbo"}}
