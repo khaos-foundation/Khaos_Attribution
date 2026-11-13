@@ -19,12 +19,12 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 
+from khaos_attribution.credentials import WATERMARK_ALG
 from khaos_attribution.watermark import decode_codeword
 from register_service.index import phases_of
 
 PREFIX = "/c2pa/v1"
 FINGERPRINT_ALG = "dev.khaos.landmarks.1"
-WATERMARK_ALG = "dev.khaos.audioseal-bucket.1"
 # The register's front door (Caddy) takes 10 MB a request: a minute of WAV, ten of MP3, and a short clip is enough.
 CONTENT_MAX_BYTES = 10_000_000
 # A clip is enough to name a piece, and the peak finder holds several times the decoded audio in memory.

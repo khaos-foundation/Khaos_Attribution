@@ -32,7 +32,7 @@ def _wav(path, seconds=3.0):
 
 
 def _signed(tmp_path, name="a.wav"):
-    ident = C.load_identity(tmp_path / "id", product="Khaos Workshop", subject_id="m1")
+    ident = C.load_identity(tmp_path / "id", product="Khaos Workshop", organisation="Khaos Test Ltd")
     wav = _wav(tmp_path / name)
     C.sign_file(wav, RECORD, ident, product="Khaos Workshop", version="0", timestamp_url=None)
     return wav
@@ -217,3 +217,70 @@ def test_a_file_with_no_audio_is_never_handed_to_the_detector(tmp_path, detector
     """The stand-in detector hears a mark in anything; a file of no frames is not listened to at all."""
     r = V.verify_file(_plain(tmp_path / "empty.wav", 0))
     assert r["verdict"] == "none" and r["watermark"] == {"checked": False, "reason": "the file holds no audio"}
+
+
+@pytest.fixture
+def silence(detector):
+    detector["probability"] = 0.02
+    return detector
+
+
+@needs_c2pa
+def test_an_intact_record_the_watermark_agrees_with_is_detected(tmp_path, detector):
+    r = V.verify_file(_signed(tmp_path))
+    assert r["verdict"] == "signed" and r["watermark"]["matches_record"] is True and r["status"] == "DETECTED"
+
+
+@needs_c2pa
+def test_a_disagreeing_watermark_or_a_broken_record_is_inconclusive(tmp_path, detector):
+    detector["codeword"] = W.encode_payload(1001)
+    assert V.verify_file(_signed(tmp_path, "b.wav"))["status"] == "INCONCLUSIVE"
+    detector["codeword"] = 59368
+    wav = _signed(tmp_path, "c.wav")
+    data = bytearray(wav.read_bytes())
+    data[60] ^= 0xFF
+    wav.write_bytes(bytes(data))
+    r = V.verify_file(wav)
+    assert r["verdict"] == "tampered" and r["status"] == "INCONCLUSIVE"
+
+
+def test_a_watermark_alone_is_inconclusive(tmp_path, detector):
+    r = V.verify_file(_wav(tmp_path / "plain.wav"))
+    assert r["verdict"] == "marked" and r["status"] == "INCONCLUSIVE"
+
+
+@needs_c2pa
+def test_nothing_found_after_every_check_is_not_detected(tmp_path, silence):
+    r = V.verify_file(_wav(tmp_path / "plain.wav"))
+    assert r["verdict"] == "none" and r["status"] == "NOT_DETECTED"
+
+
+def test_nothing_found_without_every_check_is_not_a_negative(tmp_path, no_detector):
+    assert V.verify_file(_wav(tmp_path / "plain.wav"))["status"] == "INCONCLUSIVE"
+
+
+@needs_c2pa
+def test_a_format_credentials_cannot_live_in_is_not_supported(tmp_path, silence):
+    sf = pytest.importorskip("soundfile")
+    audio, sr = sf.read(str(_wav(tmp_path / "src.wav")), dtype="float32")
+    sf.write(str(tmp_path / "x.ogg"), audio, sr, format="OGG", subtype="VORBIS")
+    r = V.verify_file(tmp_path / "x.ogg")
+    assert r["verdict"] == "none" and r["status"] == "NOT_SUPPORTED"
+
+
+@needs_c2pa
+def test_a_reader_that_fails_unexpectedly_is_an_error(tmp_path, silence, monkeypatch):
+    import c2pa
+    monkeypatch.setattr(c2pa, "Reader", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    r = V.verify_file(_wav(tmp_path / "plain.wav"))
+    assert r["status"] == "ERROR" and r["content_credentials"]["error"] == "boom"
+
+
+def test_a_file_that_cannot_be_read_is_an_error_in_the_json(tmp_path, capsys, no_detector):
+    (tmp_path / "junk.wav").write_bytes(b"not audio")
+    assert V.main([str(tmp_path / "junk.wav"), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "ERROR"
+
+
+def test_every_status_word_is_one_of_five():
+    assert set(V.STATUSES) == {"DETECTED", "NOT_DETECTED", "INCONCLUSIVE", "NOT_SUPPORTED", "ERROR"}
