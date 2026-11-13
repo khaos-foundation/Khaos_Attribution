@@ -18,7 +18,7 @@ argument-hint: <version> <one-line subject> | tag <version>
    - `$0` is `X.Y.Z` and newer than `version` in `pyproject.toml`;
    - no tag `v$0` and no branch `release/$0` exists here or on `origin` (`git ls-remote origin refs/tags/v$0 refs/heads/release/$0`).
 2. **Branch.** `git switch -c release/$0`.
-3. **Test.** `bash scripts/gate.sh pytest` must pass. Its torch-gated tests skip without torch: when an interpreter with torch is on this machine, run `<that python> -m pytest -q` too and report both counts.
+3. **Test.** `bash scripts/gate.sh pytest` must pass. Its torch-gated tests skip without torch: when an interpreter with torch is on this machine, run `PYTHONPATH="$PWD/src" <that python> -m pytest -q -p no:cacheprovider` too (its venv may hold an installed copy of the contract; the path makes it test this checkout) and report both counts.
 4. **Set the version** in exactly two places: `version = "$0"` in `pyproject.toml` and `__version__ = "$0"` in `src/khaos_attribution/__init__.py`. Run `.venv/bin/python -m pytest -q tests/test_version.py`; it holds the two equal.
 5. **Commit** both files on the branch with the subject `$0: <subject>`, a body saying what the version changes, and the session's attribution trailer. Pass the message on stdin (`git commit -F -`) and treat the commit as made only on exit code 0.
 6. **Open the pull request.** `git push -u origin release/$0`, then `gh pr create --base main --head release/$0 --title "$0: <subject>" --body-file -` with the commit's body and the gate counts, ending with the session's pull-request attribution line.
