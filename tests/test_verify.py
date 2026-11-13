@@ -302,3 +302,13 @@ def test_a_manifest_that_cannot_be_summarised_is_an_error(tmp_path, silence, mon
     wav = _signed(tmp_path)
     monkeypatch.setattr(C, "_summarise", lambda reader, out: (_ for _ in ()).throw(ValueError("garbled")))
     assert V.verify_file(wav)["status"] == "ERROR"
+
+
+@needs_c2pa
+def test_a_record_that_names_no_watermark_is_not_detected_by_any_watermark(tmp_path, detector):
+    ident = C.load_identity(tmp_path / "id", product="Khaos Workshop", organisation="Khaos Test Ltd")
+    wav = _wav(tmp_path / "n.wav")
+    C.sign_file(wav, {k: v for k, v in RECORD.items() if k != "watermark_id"}, ident, product="Khaos Workshop",
+                version="0", timestamp_url=None)
+    r = V.verify_file(wav)
+    assert r["verdict"] == "signed" and r["status"] == "INCONCLUSIVE"

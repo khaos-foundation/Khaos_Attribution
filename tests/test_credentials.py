@@ -176,13 +176,10 @@ def test_a_file_with_only_the_old_label_still_reads(tmp_path, monkeypatch):
     assert C.read_file(wav)["khaos"]["artist_id"] == "art"
 
 
-def test_the_watermark_travels_as_a_soft_binding(tmp_path):
-    import base64
-    got = _assertions(_sign(tmp_path, _identity(tmp_path)))[C.SOFT_BINDING]
-    assert got["alg"] == C.WATERMARK_ALG
-    assert int.from_bytes(base64.b64decode(got["blocks"][0]["value"]), "big") == 59368
-    unmarked = C.manifest({**RECORD, "watermark_id": None}, product="p", version="0", title="t", mime="audio/wav")
-    assert C.SOFT_BINDING not in [a["label"] for a in unmarked["assertions"]]
+def test_no_soft_binding_is_written_until_the_sdk_writes_its_value_as_bytes(tmp_path):
+    """Guards the held-out soft binding: a signed file keeps whatever shape its assertions were written in."""
+    labels = _assertions(_sign(tmp_path, _identity(tmp_path)))
+    assert "c2pa.soft-binding" not in labels and C.KHAOS_ASSERTION in labels
 
 
 @pytest.mark.parametrize("fmt", ["FLAC", "MP3"])

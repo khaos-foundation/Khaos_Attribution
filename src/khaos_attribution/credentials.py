@@ -28,8 +28,8 @@ KHAOS_ASSERTION = "dev.khaos.provenance"
 # Written beside the current label while verifiers that read only it are in use; read when it is the only one.
 LEGACY_ASSERTION = "org.khaos.provenance"
 ASSERTION_VERSION = 1
-SOFT_BINDING = "c2pa.soft-binding"
-# The watermark as a C2PA soft binding: the 16-bit codeword, big-endian. It names a group of models, never one piece.
+# The watermark's soft-binding algorithm name. No c2pa.soft-binding assertion is written: through the SDK's JSON
+# route its value is stored as an array, not the byte string the specification defines, and a signed file keeps it.
 WATERMARK_ALG = "dev.khaos.audioseal-bucket.1"
 # A public RFC 3161 time-stamping service; KHAOS_TSA_URL overrides it, "off" signs without a timestamp.
 DEFAULT_TSA_URL = "http://timestamp.digicert.com"
@@ -303,15 +303,9 @@ def manifest(record: dict, *, product: str, version: str, title: str, mime: str,
         {"label": KHAOS_ASSERTION, "data": khaos},
         {"label": LEGACY_ASSERTION, "data": khaos},
     ]
-    if record.get("watermark_id") is not None:
-        assertions.append({"label": SOFT_BINDING, "data": soft_binding(record["watermark_id"])})
     return {"claim_generator_info": [{"name": product, "version": version}], "title": title, "format": mime,
             "assertions": assertions}
 
-
-def soft_binding(codeword: int) -> dict:
-    """The watermark's soft-binding assertion; the SDK writes the value list as a byte string."""
-    return {"alg": WATERMARK_ALG, "blocks": [{"scope": {}, "value": list(int(codeword).to_bytes(2, "big"))}]}
 
 
 def tsa_url() -> str | None:
