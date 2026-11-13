@@ -164,7 +164,9 @@ def status(kind: str, credentials: dict, watermark: dict, register: dict | None)
     if credentials.get("error"):
         return "ERROR"
     if kind == "signed":
-        return "INCONCLUSIVE" if watermark.get("matches_record") is False else "DETECTED"
+        # A signature anyone can make is DETECTED only when the watermark it names is heard as well.
+        heard = watermark.get("detected") and watermark.get("matches_record") is not False
+        return "DETECTED" if heard else "INCONCLUSIVE"
     if kind in ("tampered", "marked"):
         return "INCONCLUSIVE"
     if not credentials.get("checked", True):

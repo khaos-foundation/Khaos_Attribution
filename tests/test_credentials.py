@@ -258,3 +258,45 @@ def test_a_new_company_name_reissues_the_certificates_over_the_same_keys(tmp_pat
     assert C.is_signed(signed_before) and C.is_signed(_sign(tmp_path, after, name="b.wav"))
     assert _identity(tmp_path, "KHAOS FOUNDATION LIMITED").chain_pem == after.chain_pem
     assert len(list((tmp_path / "id" / "archive").iterdir())) == 1
+
+
+def test_a_rename_that_stopped_half_way_keeps_the_signer_key(tmp_path, monkeypatch):
+    _identity(tmp_path, "Old Name Ltd")
+    signer_key = (tmp_path / "id" / "signer.key").read_bytes()
+    real = C._write
+
+    def crash(path, data, *, private):
+        if path.name == "signer.pem":
+            raise OSError("power cut")
+        real(path, data, private=private)
+    monkeypatch.setattr(C, "_write", crash)
+    with pytest.raises(OSError):
+        _identity(tmp_path, "KHAOS FOUNDATION LIMITED")
+    monkeypatch.setattr(C, "_write", real)
+    again = _identity(tmp_path, "KHAOS FOUNDATION LIMITED")
+    assert (tmp_path / "id" / "signer.key").read_bytes() == signer_key
+    assert C.is_signed(_sign(tmp_path, again))
+
+
+@pytest.mark.parametrize("raised,expected", [("NotSupported", "unsupported"), ("Other", "broken")])
+def test_what_the_sdk_cannot_open_or_cannot_read_is_never_signed_over(tmp_path, monkeypatch, raised, expected):
+    import c2pa
+    wav = _wav(tmp_path / "a.wav")
+    error = getattr(c2pa.C2paError, raised, RuntimeError)
+    monkeypatch.setattr(c2pa, "Reader", lambda *a, **k: (_ for _ in ()).throw(error("no")))
+    assert C.condition(wav) == expected
+
+
+def test_a_manifest_that_cannot_be_summarised_is_an_error_not_an_absence(tmp_path, monkeypatch):
+    wav = _sign(tmp_path, _identity(tmp_path))
+    monkeypatch.setattr(C, "_summarise", lambda reader, out: (_ for _ in ()).throw(ValueError("garbled")))
+    got = C.read_file(wav)
+    assert got["present"] and got["error"] == "garbled" and C.condition(wav) == "broken"
+
+
+@pytest.mark.parametrize("suffix", [".opus", ".aac", ".ogg"])
+def test_formats_that_cannot_carry_credentials_are_not_searched(tmp_path, suffix):
+    path = tmp_path / f"x{suffix}"
+    path.write_bytes(b"\x00" * 64)
+    got = C.read_file(path)
+    assert got["checked"] is False and "error" not in got

@@ -180,6 +180,20 @@ def _public(key) -> bytes:
     return key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
+def _reusable_signer(loaded) -> bool:
+    """A signer key that matches its in-date certificate signed by the issuer's key, whatever the names say: a rename
+    that stopped half-way reissues its certificate rather than minting a new key."""
+    if loaded is None:
+        return False
+    _, issuer_key, signer, signer_key = loaded
+    soon = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=RENEW_DAYS)
+    try:
+        issuer_key.public_key().verify(signer.signature, signer.tbs_certificate_bytes)
+    except Exception:  # noqa: BLE001 — not signed by this issuer's key
+        return False
+    return signer.public_key().public_bytes_raw() == _public(signer_key) and signer.not_valid_after_utc > soon
+
+
 def _sound(loaded) -> tuple[bool, bool]:
     """(issuer usable, signer usable): each key matches its certificate, the signer is the issuer's and in date."""
     if loaded is None:
@@ -252,7 +266,12 @@ def load_identity(directory: Path | str, *, product: str, organisation: str) -> 
                 _write(paths["issuer.pem"], issuer.public_bytes(pem), private=False)
             signer_name = _name(organisation, product, "signer", issuer_key)
             left = (issuer.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc)).days
-            if not (issuer_ok and signer_ok):
+            if issuer_ok and not signer_ok and _reusable_signer(loaded):
+                _archive(d, ("signer.pem",))
+                signer = _certificate(signer_name, loaded[3], issuer.subject, issuer_key,
+                                      ca=False, days=min(SIGNER_DAYS, left))
+                _write(paths["signer.pem"], signer.public_bytes(pem), private=False)
+            elif not (issuer_ok and signer_ok):
                 signer_key = ed25519.Ed25519PrivateKey.generate()
                 signer = _certificate(signer_name, signer_key, issuer.subject, issuer_key,
                                       ca=False, days=min(SIGNER_DAYS, left))
@@ -412,7 +431,7 @@ def read_file(path: Path | str) -> dict:
     try:
         return _summarise(reader, out)
     except Exception as exc:  # noqa: BLE001 — a manifest the SDK cannot summarise reads as present but not intact
-        out.update(present=True, state="Invalid", reason=str(exc)[:200])
+        out.update(present=True, state="Invalid", error=str(exc)[:200], reason=str(exc)[:200])
         return out
     finally:
         reader.close()

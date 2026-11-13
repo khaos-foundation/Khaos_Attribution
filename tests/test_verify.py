@@ -284,3 +284,21 @@ def test_a_file_that_cannot_be_read_is_an_error_in_the_json(tmp_path, capsys, no
 
 def test_every_status_word_is_one_of_five():
     assert set(V.STATUSES) == {"DETECTED", "NOT_DETECTED", "INCONCLUSIVE", "NOT_SUPPORTED", "ERROR"}
+
+
+@needs_c2pa
+def test_a_signature_over_audio_whose_watermark_is_not_heard_is_inconclusive(tmp_path, silence):
+    r = V.verify_file(_signed(tmp_path))
+    assert r["verdict"] == "signed" and r["status"] == "INCONCLUSIVE"
+
+
+@needs_c2pa
+def test_a_signature_without_a_detector_is_inconclusive(tmp_path, no_detector):
+    assert V.verify_file(_signed(tmp_path))["status"] == "INCONCLUSIVE"
+
+
+@needs_c2pa
+def test_a_manifest_that_cannot_be_summarised_is_an_error(tmp_path, silence, monkeypatch):
+    wav = _signed(tmp_path)
+    monkeypatch.setattr(C, "_summarise", lambda reader, out: (_ for _ in ()).throw(ValueError("garbled")))
+    assert V.verify_file(wav)["status"] == "ERROR"
