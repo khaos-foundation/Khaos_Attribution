@@ -89,6 +89,9 @@ DRM.
 /verify works even on a machine without audioseal installed — content
 matching stands alone.
 
+Audio you submit for checking is deleted as soon as the check finishes. We keep standard server logs for 30 days. This holds for a Listening Space's /verify and for the register's
+`POST /c2pa/v1/matches/byContent`, the two places that take audio.
+
 **Rights ride the answer** (2026-08-20): an identified output brings its
 computed attribution estimate's splits — writers, publishers, masters ℗,
 unattributed % — when the estimate exists; its absence is stated (with

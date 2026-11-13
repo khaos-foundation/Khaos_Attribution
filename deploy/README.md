@@ -12,7 +12,9 @@ What it leaves behind:
 
 - `/srv/register/`: the checkout at the tag, the venv (the `registry` and `service` extras only), `data/` (the two databases, the mirror files, the key), `backups/`.
 - `/etc/register.env`: the service's settings. `REGISTER_DEV_KEY=1` until the ceremony, with `REGISTER_DEV_KEY_PUBLIC=1` beside it: a development key serves behind the proxy only when the deploy says so (binding loopback keeps nothing private once Caddy fronts it).
-- `register.service` on loopback port 8912; Caddy on 80 and 443 with the certificate for the domain; the firewall open on 22, 80 and 443.
+- `register.service` on loopback port 8912; Caddy on 80 and 443 with the certificate for the domain (it writes no access log); the firewall open on 22, 80 and 443.
+- `/etc/systemd/journald.conf.d/zz-retention.conf`: the journal, which holds the service's request lines, keeps nothing older than 30 days (a file goes once its first line is 29 days old, and files turn over daily), and copies nothing on to rsyslog's `/var/log/syslog`. The name sorts after rsyslog's own `syslog.conf`, whose forwarding it overrides.
+- `/etc/logrotate.d/{rsyslog,ufw,fail2ban,btmp,wtmp}` from `deploy/logrotate/`: what rsyslog, the firewall and fail2ban still write, and the sign-in records, turn over daily and keep 28 days, in place of their packages' weeks and months. They replace files the packages own, so an update that changes one of them waits for an upgrade by hand (unattended-upgrades skips it); re-running this script puts ours back.
 - `register-backup.timer`: nightly at 03:30, a consistent copy of both databases and the mirror into `backups/`, kept 30 days, sent to `BACKUP_TARGET` over ssh when one is set in `/etc/register.env` (a Hetzner Storage Box takes rsync over ssh on port 23). The key is never in a backup.
 - `register-restore.sh <archive>`: the way back, ending with the ledger and log check.
 - `register-log-stamp.timer` (daily, 02:10) and `register-log-upgrade.timer` (four times a day): the newest root of the signed append-only log stamped with OpenTimestamps, and pending receipts completed once the calendars have them confirmed. Both run `register-cli log-stamp` / `log-upgrade` and write the receipts into `mirror/log/anchors/`. A calendar being down only delays an anchor.
@@ -28,6 +30,8 @@ Update the register by re-running `register-server.sh` with the new `REGISTER_TA
 The service countersigns with the Ed25519 key at `REGISTER_KEY_FILE`, a PEM file it reads at start. With `REGISTER_DEV_KEY=1` it makes one if none is there and says on every page that nothing it signs is a Guild record. The ceremony replaces that file with the Foundation's key and removes the line: the short version is `register-key make`, then `register-key switch "Name, Name"` (see `key-ceremony.md`). The code signs from a file, not from a hardware token: a key that must never touch a disk needs a signing step the service does not have yet.
 
 ## The public reads
+
+Audio you submit for checking is deleted as soon as the check finishes. We keep standard server logs for 30 days. The only audio the register takes is `POST /c2pa/v1/matches/byContent`'s, decoded in a temporary folder that goes when the answer is made, whatever it is.
 
 Every read is bounded per address, 240 a minute, the log's files in a bucket of their own. `/api/ledger?since=<seq>` answers 1,000 rows at a time and names the next page in a `Link` header while there is one; `/sitemap.xml` lists 10,000 models a page (`?page=2` onwards, each named in `robots.txt`). The home page and `/health` say whether the ledger's chain is unbroken from a reading taken at most once a minute: the whole chain at start and once an hour, the rows since the last reading in between (so a row altered behind the last reading shows within the hour); `register-cli check` always reads the whole chain.
 
