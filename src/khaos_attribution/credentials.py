@@ -307,7 +307,6 @@ def manifest(record: dict, *, product: str, version: str, title: str, mime: str,
             "assertions": assertions}
 
 
-
 def tsa_url() -> str | None:
     url = os.environ.get("KHAOS_TSA_URL", DEFAULT_TSA_URL).strip()
     return None if url.lower() in ("", "off", "none", "0", "false") else url
