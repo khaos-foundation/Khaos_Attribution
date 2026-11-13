@@ -25,7 +25,7 @@ def _signed_wav(tmp_path, audio, sr) -> bytes:
     """A real signed WAV's manifest store, as a Workshop or a Space would send it at release."""
     wav = tmp_path / "piece.wav"
     sf.write(str(wav), audio, sr, subtype="PCM_16")
-    ident = C.load_identity(tmp_path / "identity", product="Khaos Test", subject_id="softbinding")
+    ident = C.load_identity(tmp_path / "identity", product="Khaos Test", organisation="Khaos Test Ltd")
     assert C.sign_file(wav, {"generation_id": "gen-1", "watermark_id": 59368, "artist_name": "Artist X"}, ident,
                        product="Khaos Test", version="0", timestamp_url=None)["signed"]
     store = C.manifest_store(wav)

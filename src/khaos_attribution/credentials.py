@@ -1,7 +1,7 @@
 """Content Credentials (C2PA) for Khaos outputs: a signed, time-stamped record inside the audio file saying it is
 AI-generated, by which model, under which licence and with which watermark. Each installation signs with its own
-identity: a local issuer certificate (certified by Khaos when the machine enrols) and a signer certificate under it.
-Needs the `credentials` extra (c2pa-python, cryptography).
+identity: a local issuer certificate in the operating company's name and a signer certificate under it, both
+development certificates that C2PA checkers show as untrusted. Needs the `credentials` extra (c2pa-python).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
 import stat
 import socket
 import sys
@@ -23,8 +24,13 @@ from urllib.parse import urlsplit
 
 # The IPTC term C2PA uses for media made by a trained model.
 DIGITAL_SOURCE_TYPE = "http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia"
-KHAOS_ASSERTION = "org.khaos.provenance"
+KHAOS_ASSERTION = "dev.khaos.provenance"
+# Written beside the current label while verifiers that read only it are in use; read when it is the only one.
+LEGACY_ASSERTION = "org.khaos.provenance"
 ASSERTION_VERSION = 1
+# The watermark's soft-binding algorithm name. No c2pa.soft-binding assertion is written: through the SDK's JSON
+# route its value is stored as an array, not the byte string the specification defines, and a signed file keeps it.
+WATERMARK_ALG = "dev.khaos.audioseal-bucket.1"
 # A public RFC 3161 time-stamping service; KHAOS_TSA_URL overrides it, "off" signs without a timestamp.
 DEFAULT_TSA_URL = "http://timestamp.digicert.com"
 MIME_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".flac": "audio/flac", ".m4a": "audio/mp4"}
@@ -39,10 +45,19 @@ TSA_RETRY_S = 600.0
 # Record fields that travel inside the file; the prompt and anything about a listener never do.
 RECORD_FIELDS = ("artist_id", "artist_name", "adapter_version", "adapter_hash", "base_model", "base_model_id",
                  "base_model_licence", "engine_commit", "generation_id", "watermark_id", "register_serial", "timestamp")
+# Compared with the record a room signed from. A field the manifest does not carry was not signed by that version and
+# is not compared; these must always be there.
+AGREEMENT_FIELDS = ("artist_id", "artist_name", "adapter_version", "adapter_hash", "base_model", "base_model_id",
+                    "base_model_licence", "engine_commit", "generation_id", "watermark_id", "timestamp")
+AGREEMENT_REQUIRED = ("artist_id", "adapter_hash")
 
 
 class CredentialsUnavailable(RuntimeError):
     """The credentials extra is not installed, or the identity cannot be made."""
+
+
+class CredentialsBroken(RuntimeError):
+    """The file carries credentials whose signature no longer holds; it is never re-signed silently."""
 
 
 def available() -> bool:
@@ -63,12 +78,14 @@ class Identity:
     issuer_pem: str
 
 
-def _name(product: str, role: str, subject_id: str):
+def _name(organisation: str, product: str, role: str, issuer_key):
+    """Named for the company and product; the installation is told apart by its own issuer key, nothing else."""
     from cryptography import x509  # noqa: PLC0415
     from cryptography.x509.oid import NameOID  # noqa: PLC0415
-    return x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, product),
-                      x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, role),
-                      x509.NameAttribute(NameOID.COMMON_NAME, f"{product} {role} {subject_id}")])
+    installation = hashlib.sha256(_public(issuer_key)).hexdigest()[:16]
+    return x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, organisation),
+                      x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, product),
+                      x509.NameAttribute(NameOID.COMMON_NAME, f"{product} {role} {installation}")])
 
 
 def _certificate(subject, subject_key, issuer, issuer_key, *, ca: bool, days: int):
@@ -163,6 +180,20 @@ def _public(key) -> bytes:
     return key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
+def _reusable_signer(loaded) -> bool:
+    """A signer key that matches its in-date certificate signed by the issuer's key, whatever the names say: a rename
+    that stopped half-way reissues its certificate rather than minting a new key."""
+    if loaded is None:
+        return False
+    _, issuer_key, signer, signer_key = loaded
+    soon = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=RENEW_DAYS)
+    try:
+        issuer_key.public_key().verify(signer.signature, signer.tbs_certificate_bytes)
+    except Exception:  # noqa: BLE001 — not signed by this issuer's key
+        return False
+    return signer.public_key().public_bytes_raw() == _public(signer_key) and signer.not_valid_after_utc > soon
+
+
 def _sound(loaded) -> tuple[bool, bool]:
     """(issuer usable, signer usable): each key matches its certificate, the signer is the issuer's and in date."""
     if loaded is None:
@@ -179,9 +210,30 @@ def _sound(loaded) -> tuple[bool, bool]:
     return True, signer.public_key().public_bytes_raw() == _public(signer_key) and signer.not_valid_after_utc > soon
 
 
-def load_identity(directory: Path | str, *, product: str, subject_id: str) -> Identity:
-    """This installation's identity, made once under `directory` (keys readable by the owner only) and reused;
-    a signer that is near expiry, or not the issuer's, is remade under a lock."""
+def _named(loaded, organisation: str, product: str) -> bool:
+    """Whether both certificates carry the names this installation's identity should have."""
+    issuer, issuer_key, signer, _ = loaded
+    return (issuer.subject == _name(organisation, product, "issuer", issuer_key)
+            and signer.subject == _name(organisation, product, "signer", issuer_key)
+            and signer.issuer == issuer.subject)
+
+
+def _archive(d: Path, names: tuple[str, ...]) -> None:
+    """Keep the certificates about to be replaced; keys are never replaced by a rename."""
+    present = [n for n in names if (d / n).exists()]
+    if not present:
+        return
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    where = d / "archive" / stamp
+    where.mkdir(parents=True, exist_ok=True)
+    for n in present:
+        shutil.copy2(d / n, where / n)
+
+
+def load_identity(directory: Path | str, *, product: str, organisation: str) -> Identity:
+    """This installation's identity, made once under `directory` (keys readable by the owner only) and reused.
+    A signer near expiry or not the issuer's is remade; certificates under another name are reissued over the same
+    keys, the old ones archived."""
     if not available():
         raise CredentialsUnavailable("Content Credentials need the credentials extra (c2pa-python)")
     from cryptography.hazmat.primitives import serialization  # noqa: PLC0415
@@ -189,7 +241,7 @@ def load_identity(directory: Path | str, *, product: str, subject_id: str) -> Id
     d = Path(directory)
     paths = {name: d / name for name in IDENTITY_FILES}
     loaded = _loaded(paths)
-    if _sound(loaded) != (True, True):
+    if _sound(loaded) != (True, True) or not _named(loaded, organisation, product):
         d.mkdir(parents=True, exist_ok=True)
         os.chmod(d, 0o700)
         with _identity_lock(d):
@@ -197,20 +249,39 @@ def load_identity(directory: Path | str, *, product: str, subject_id: str) -> Id
             issuer_ok, signer_ok = _sound(loaded)
             pem = serialization.Encoding.PEM
             pkcs8 = (pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+            reissued = False
             if issuer_ok:
                 issuer, issuer_key = loaded[0], loaded[1]
+                name = _name(organisation, product, "issuer", issuer_key)
+                if issuer.subject != name:
+                    _archive(d, ("issuer.pem", "signer.pem"))
+                    issuer = _certificate(name, issuer_key, name, issuer_key, ca=True, days=ISSUER_DAYS)
+                    _write(paths["issuer.pem"], issuer.public_bytes(pem), private=False)
+                    reissued = True
             else:
                 issuer_key = ed25519.Ed25519PrivateKey.generate()
-                name = _name(product, "issuer", subject_id)
+                name = _name(organisation, product, "issuer", issuer_key)
                 issuer = _certificate(name, issuer_key, name, issuer_key, ca=True, days=ISSUER_DAYS)
                 _write(paths["issuer.key"], issuer_key.private_bytes(*pkcs8), private=True)
                 _write(paths["issuer.pem"], issuer.public_bytes(pem), private=False)
-            if not (issuer_ok and signer_ok):
+            signer_name = _name(organisation, product, "signer", issuer_key)
+            left = (issuer.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc)).days
+            if issuer_ok and not signer_ok and _reusable_signer(loaded):
+                _archive(d, ("signer.pem",))
+                signer = _certificate(signer_name, loaded[3], issuer.subject, issuer_key,
+                                      ca=False, days=min(SIGNER_DAYS, left))
+                _write(paths["signer.pem"], signer.public_bytes(pem), private=False)
+            elif not (issuer_ok and signer_ok):
                 signer_key = ed25519.Ed25519PrivateKey.generate()
-                left = (issuer.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc)).days
-                signer = _certificate(_name(product, "signer", subject_id), signer_key, issuer.subject, issuer_key,
+                signer = _certificate(signer_name, signer_key, issuer.subject, issuer_key,
                                       ca=False, days=min(SIGNER_DAYS, left))
                 _write(paths["signer.key"], signer_key.private_bytes(*pkcs8), private=True)
+                _write(paths["signer.pem"], signer.public_bytes(pem), private=False)
+            elif reissued or loaded[2].subject != signer_name:
+                if not reissued:
+                    _archive(d, ("signer.pem",))
+                signer = _certificate(signer_name, loaded[3], issuer.subject, issuer_key,
+                                      ca=False, days=min(SIGNER_DAYS, left))
                 _write(paths["signer.pem"], signer.public_bytes(pem), private=False)
             loaded = _loaded(paths)
     issuer, _, signer, key = loaded
@@ -225,17 +296,15 @@ def manifest(record: dict, *, product: str, version: str, title: str, mime: str,
              **{k: record[k] for k in RECORD_FIELDS if record.get(k) is not None}}
     if note:
         khaos["note"] = note
-    return {
-        "claim_generator_info": [{"name": product, "version": version}],
-        "title": title,
-        "format": mime,
-        "assertions": [
-            {"label": "c2pa.actions", "data": {"actions": [{
-                "action": "c2pa.created", "digitalSourceType": DIGITAL_SOURCE_TYPE,
-                "softwareAgent": {"name": product, "version": version}}]}},
-            {"label": KHAOS_ASSERTION, "data": khaos},
-        ],
-    }
+    assertions = [
+        {"label": "c2pa.actions", "data": {"actions": [{
+            "action": "c2pa.created", "digitalSourceType": DIGITAL_SOURCE_TYPE,
+            "softwareAgent": {"name": product, "version": version}}]}},
+        {"label": KHAOS_ASSERTION, "data": khaos},
+        {"label": LEGACY_ASSERTION, "data": khaos},
+    ]
+    return {"claim_generator_info": [{"name": product, "version": version}], "title": title, "format": mime,
+            "assertions": assertions}
 
 
 def tsa_url() -> str | None:
@@ -332,23 +401,30 @@ def is_signed(path: Path | str) -> bool:
 
 
 def read_file(path: Path | str) -> dict:
-    """What a file's Content Credentials say: {present, state, ai_generated, khaos, signer, timestamped, trusted}.
-    `state` is the SDK's verdict (Valid, Invalid, Trusted); absent credentials read as present=False."""
+    """What a file's Content Credentials say: {present, state, ai_generated, khaos, signer, timestamped, trusted,
+    checked}. `state` is the SDK's verdict (Valid, Invalid, Trusted); `checked` is False when the file could not be
+    searched for credentials at all, and `error` is set when the search failed unexpectedly."""
     out = {"present": False, "state": None, "ai_generated": False, "khaos": None, "signer": None,
-           "timestamped": False, "trusted": False}
+           "timestamped": False, "trusted": False, "checked": True}
     if not available():
-        out["reason"] = "the credentials extra is not installed"
+        out.update(checked=False, reason="the credentials extra is not installed")
         return out
     import c2pa  # noqa: PLC0415
     try:
         reader = c2pa.Reader(str(path))
-    except Exception as exc:  # noqa: BLE001 — no manifest, or a format the SDK cannot open
+    except c2pa.C2paError.ManifestNotFound as exc:
         out["reason"] = str(exc)[:200]
+        return out
+    except c2pa.C2paError.NotSupported as exc:
+        out.update(checked=False, reason=str(exc)[:200])
+        return out
+    except Exception as exc:  # noqa: BLE001 — unreadable, or credentials the SDK cannot parse
+        out.update(error=str(exc)[:200], reason=str(exc)[:200])
         return out
     try:
         return _summarise(reader, out)
     except Exception as exc:  # noqa: BLE001 — a manifest the SDK cannot summarise reads as present but not intact
-        out.update(present=True, state="Invalid", reason=str(exc)[:200])
+        out.update(present=True, state="Invalid", error=str(exc)[:200], reason=str(exc)[:200])
         return out
     finally:
         reader.close()
@@ -359,15 +435,43 @@ def _summarise(reader, out: dict) -> dict:
     results = (reader.get_validation_results() or {}).get("activeManifest") or {}
     codes = {r.get("code") for kind in ("success", "informational", "failure") for r in results.get(kind, [])}
     out.update(present=bool(active), state=reader.get_validation_state())
+    found = {}
     for a in active.get("assertions", []):
         data = a.get("data") or {}
         if a.get("label", "").startswith("c2pa.actions"):
             out["ai_generated"] = out["ai_generated"] or any(
                 act.get("digitalSourceType") == DIGITAL_SOURCE_TYPE for act in data.get("actions", []))
-        elif a.get("label") == KHAOS_ASSERTION:
-            out["khaos"] = data
+        elif a.get("label") in (KHAOS_ASSERTION, LEGACY_ASSERTION):
+            found[a["label"]] = data
+    out["khaos"] = found.get(KHAOS_ASSERTION) or found.get(LEGACY_ASSERTION)
     info = active.get("signature_info") or {}
     out["signer"] = info.get("common_name") or info.get("issuer")
     out["timestamped"] = "timeStamp.validated" in codes
     out["trusted"] = out["state"] == "Trusted"
     return out
+
+
+def condition(path: Path | str) -> str:
+    """What signing may do with a file: leave it ("intact"), sign it ("absent"), refuse it ("broken": credentials
+    whose signature no longer holds, never re-signed silently) or nothing ("unsupported")."""
+    if not available():
+        raise CredentialsUnavailable("Content Credentials need the credentials extra (c2pa-python)")
+    if Path(path).suffix.lower() not in MIME_TYPES:
+        return "unsupported"
+    got = read_file(path)
+    if got["state"] in SIGNED_STATES:
+        return "intact"
+    if got["present"] or got.get("error"):
+        return "broken"
+    return "absent" if got["checked"] else "unsupported"
+
+
+def agrees(path: Path | str, record: dict) -> bool:
+    """True when the file's signature holds and its Khaos assertion says what `record` says, field by field."""
+    got = read_file(path)
+    khaos = got.get("khaos")
+    if got["state"] not in SIGNED_STATES or not khaos:
+        return False
+    if any(khaos.get(k) is None for k in AGREEMENT_REQUIRED):
+        return False
+    return all(khaos[k] == record.get(k) for k in AGREEMENT_FIELDS if k in khaos)

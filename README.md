@@ -63,8 +63,12 @@ khaos-verify song.mp3 --register https://register.example --json
 The answer is one of five verdicts. **confirmed**: the audio matches a released Khaos output in the Register's
 index. **signed**: an intact signed record claims Khaos made it; the signing machine is not yet certified, so this
 alone is not proof. **tampered**: the file was changed after it was signed. **marked**: a watermark alone, which
-is not proof either. **none**: no Khaos mark was found, which never proves a person made the audio. Files longer
-than 20 minutes are not decoded. Authorities, researchers and the press can ask for a verify key at
+is not proof either. **none**: no Khaos mark was found, which never proves a person made the audio. Beside the
+verdict, `status` says it in one of five words: **DETECTED** (a Register match, or an intact record whose watermark
+is heard too; a mark was found, which is not proof of origin), **INCONCLUSIVE** (a broken record, an intact record
+whose watermark is not heard or is contradicted, a watermark alone, or not every check could run), **NOT_DETECTED** (every check ran and found
+nothing), **NOT_SUPPORTED** (nothing found, and the file's format cannot carry Content Credentials: OGG, Opus, AAC)
+and **ERROR**. The record is the C2PA assertion `dev.khaos.provenance`. Files longer than 20 minutes are not decoded. Authorities, researchers and the press can ask for a verify key at
 foundation@khaos.dev; it lifts the per-address limit (`--key` or `KHAOS_VERIFY_KEY`).
 
 ## Verify an entry in the Guild Register

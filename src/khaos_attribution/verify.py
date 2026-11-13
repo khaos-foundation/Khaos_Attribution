@@ -18,7 +18,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-VERIFY_VERSION = 1
+VERIFY_VERSION = 2
 FORMATS = (".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".mp4")
 WATERMARK_THRESHOLD = 0.5
 REGISTER_TIMEOUT_S = 20.0
@@ -35,6 +35,8 @@ VERDICTS = {
     "marked": "A Khaos watermark is present. A watermark alone does not prove Khaos made it.",
     "none": "No Khaos mark found. That is not proof a person made it: marks can be removed or never added.",
 }
+# The verdict in five words. DETECTED means a Khaos mark was found, never that Khaos is proven to have made the audio.
+STATUSES = ("DETECTED", "NOT_DETECTED", "INCONCLUSIVE", "NOT_SUPPORTED", "ERROR")
 
 
 class AudioUnreadable(ValueError):
@@ -102,7 +104,9 @@ def read_credentials(path: Path | str) -> dict:
     return {"present": got["present"], "state": got["state"], "intact": got["state"] in C.SIGNED_STATES,
             "ai_generated": got["ai_generated"], "khaos": bool(khaos), "record": khaos or None,
             "signer": got["signer"], "timestamped": got["timestamped"], "trusted": got["trusted"],
-            **({"reason": got["reason"]} if got.get("reason") and not got["present"] else {})}
+            "checked": got.get("checked", True),
+            **({"reason": got["reason"]} if got.get("reason") and not got["present"] else {}),
+            **({"error": got["error"]} if got.get("error") else {})}
 
 
 def _watermark(audio, sample_rate: int) -> dict:
@@ -153,6 +157,24 @@ def verdict(credentials: dict, watermark: dict, register: dict | None) -> str:
     return "none"
 
 
+def status(kind: str, credentials: dict, watermark: dict, register: dict | None) -> str:
+    """The verdict in one of STATUSES; first match wins, and a negative needs every check to have run."""
+    if kind == "confirmed":
+        return "DETECTED"
+    if credentials.get("error"):
+        return "ERROR"
+    if kind == "signed":
+        # A signature anyone can make is DETECTED only when the watermark it names is heard as well.
+        return "DETECTED" if watermark.get("detected") and watermark.get("matches_record") is True else "INCONCLUSIVE"
+    if kind in ("tampered", "marked"):
+        return "INCONCLUSIVE"
+    if not credentials.get("checked", True):
+        return "NOT_SUPPORTED"
+    if not watermark.get("checked") or (register is not None and register.get("grade") is None):
+        return "INCONCLUSIVE"
+    return "NOT_DETECTED"
+
+
 def message(kind: str, credentials: dict) -> str:
     """The verdict in words; a signed record's AI-generated statement is said only when the record makes it."""
     text = VERDICTS[kind]
@@ -176,13 +198,14 @@ def verify_file(path: Path | str, *, register_url: str | None = None, register_k
     if mark.get("detected") and record.get("watermark_id") is not None:
         mark["matches_record"] = mark.get("watermark_id") == record.get("watermark_id")
     kind = verdict(creds, mark, register)
-    return {"verify_version": VERIFY_VERSION, "file": path.name, "verdict": kind, "message": message(kind, creds),
+    return {"verify_version": VERIFY_VERSION, "file": path.name, "verdict": kind,
+            "status": status(kind, creds, mark, register), "message": message(kind, creds),
             "content_credentials": creds, "watermark": mark, "register": register}
 
 
 def _line(result: dict) -> str:
     creds, mark, reg = result["content_credentials"], result["watermark"], result["register"]
-    parts = [f"{result['file']}: {result['message']}"]
+    parts = [f"{result['file']}: {result['message']}", f"  Status: {result['status']}"]
     if creds["present"]:
         rec = creds.get("record") or {}
         who = rec.get("artist_name") or rec.get("artist_id")
@@ -230,7 +253,7 @@ def main(argv=None) -> int:
                                        watermark=not args.no_watermark))
         except Exception as exc:  # noqa: BLE001 — one bad file never stops the rest
             failed = True
-            results.append({"file": str(f), "error": str(exc) or type(exc).__name__})
+            results.append({"file": str(f), "status": "ERROR", "error": str(exc) or type(exc).__name__})
     for r in results:
         if args.json:
             continue
