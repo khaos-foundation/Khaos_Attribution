@@ -104,27 +104,36 @@ owed_tests() {
   [ -s "$OWED" ] && while IFS= read -r t; do [ -f "$t" ] && printf '%s\n' "$t"; done < "$OWED"
 }
 
-# Runs test files with $QUICK_PYTEST, one pytest process per top-level test folder: two folders' conftest.py share
-# one module name, so in one process the second folder's `from conftest import` reads the first's. The last line
-# sums the folders' counts; the exit is the worst folder's (5, nothing collected, only when every folder has none).
+# Runs test files with $QUICK_PYTEST, one pytest process per top-level test folder: in one process a module name is
+# imported once, so two folders' modules of the same name (a conftest.py, a helper imported by name) collide. Each
+# red folder's FAILED and ERROR lines come again at the end, then the folders' counts summed; the exit is the worst
+# folder's (5, nothing collected, only when every folder has none). Output is held in variables: no temp file to leak.
 pytest_by_folder() {
-  local folder files log one worst=0 ran=0
-  log=$(mktemp)
-  : > "$log.counts"
+  local folder files out one worst=0 ran=0 counts="" failures=""
   for folder in $(printf '%s\n' "$@" | awk -F/ '{ print (NF > 2 ? $1 "/" $2 : $1) }' | awk '!seen[$0]++'); do
     files=$(printf '%s\n' "$@" | awk -F/ -v f="$folder" '(NF > 2 ? $1 "/" $2 : $1) == f' | tr '\n' ' ')
-    bash -c "$QUICK_PYTEST $files" > "$log" 2>&1
+    out=$(bash -c "$QUICK_PYTEST $files" 2>&1)
     one=$?
-    cat "$log"
-    grep -E '[0-9]+ (passed|failed|error)' "$log" | tail -1 >> "$log.counts"
-    case "$one" in 0) ran=1 ;; 5) ;; *) worst=$one ;; esac
+    printf '%s\n' "$out"
+    counts="$counts$(printf '%s\n' "$out" | grep -E '[0-9]+ (passed|failed|errors?|skipped)' | tail -1)
+"
+    case "$one" in
+      0) ran=1 ;;
+      5) ;;
+      *)
+        worst=$one
+        failures="$failures$folder (exit $one)
+$(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) ' | head -20)
+"
+        ;;
+    esac
   done
+  [ -n "$failures" ] && printf 'red folders:\n%s' "$failures"
   printf '%s passed, %s failed, %s skipped, %s errors (one pytest per folder)\n' \
-    "$(grep -oE '[0-9]+ passed' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')" \
-    "$(grep -oE '[0-9]+ failed' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')" \
-    "$(grep -oE '[0-9]+ skipped' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')" \
-    "$(grep -oE '[0-9]+ errors?' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')"
-  rm -f "$log" "$log.counts"
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ passed' | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ failed' | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ skipped' | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ errors?' | awk '{ n += $1 } END { print n + 0 }')"
   [ "$worst" -ne 0 ] && return "$worst"
   [ "$ran" -eq 1 ] && return 0
   return 5
