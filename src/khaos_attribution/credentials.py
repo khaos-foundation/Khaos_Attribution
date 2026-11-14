@@ -39,6 +39,12 @@ SIGNER_DAYS = 825
 ISSUER_DAYS = 3650
 RENEW_DAYS = 30
 SIGNED_STATES = ("Valid", "Trusted")
+# The SDK's codes that tell an expiry from a change. A certificate past its date fails the SDK's check though the file
+# is as it was signed, time-stamped or not: the SDK holds no trust list for the time-stamping service.
+UNTRUSTED = "signingCredential.untrusted"
+EXPIRED = "signingCredential.expired"
+SIGNATURE_VALIDATED = "claimSignature.validated"
+CONTENT_MATCHES = ("assertion.dataHash.match", "assertion.bmffHash.match")
 # A time-stamping service that does not answer within this is skipped for TSA_RETRY_S, not waited on per file.
 TSA_PROBE_S = 2.0
 TSA_RETRY_S = 600.0
@@ -395,16 +401,22 @@ def manifest_store(path: Path | str) -> bytes | None:
         return None
 
 
+def holds(got: dict) -> bool:
+    """Whether what read_file returned is a signature over the file as it is: the SDK says so, or its one objection
+    is the signer certificate's date."""
+    return got.get("state") in SIGNED_STATES or bool(got.get("expired"))
+
+
 def is_signed(path: Path | str) -> bool:
     """True when the file carries Content Credentials whose signature still holds."""
-    return read_file(path).get("state") in SIGNED_STATES
+    return holds(read_file(path))
 
 
 def read_file(path: Path | str) -> dict:
-    """What a file's Content Credentials say: {present, state, ai_generated, khaos, signer, timestamped, trusted,
-    checked}. `state` is the SDK's verdict (Valid, Invalid, Trusted); `checked` is False when the file could not be
-    searched for credentials at all, and `error` is set when the search failed unexpectedly."""
-    out = {"present": False, "state": None, "ai_generated": False, "khaos": None, "signer": None,
+    """What a file's Content Credentials say: {present, state, expired, ai_generated, khaos, signer, timestamped,
+    trusted, checked}. `state` is the SDK's verdict (Valid, Invalid, Trusted) and `expired` says it is Invalid only for
+    the signer certificate's date; `checked` is False when the file could not be searched, `error` set if it failed."""
+    out = {"present": False, "state": None, "expired": False, "ai_generated": False, "khaos": None, "signer": None,
            "timestamped": False, "trusted": False, "checked": True}
     if not available():
         out.update(checked=False, reason="the credentials extra is not installed")
@@ -422,7 +434,8 @@ def read_file(path: Path | str) -> dict:
         out.update(error=str(exc)[:200], reason=str(exc)[:200])
         return out
     try:
-        return _summarise(reader, out)
+        # Summarised into a copy: what a summary read before it raised is never returned.
+        return _summarise(reader, dict(out))
     except Exception as exc:  # noqa: BLE001 — a manifest the SDK cannot summarise reads as present but not intact
         out.update(present=True, state="Invalid", error=str(exc)[:200], reason=str(exc)[:200])
         return out
@@ -430,11 +443,23 @@ def read_file(path: Path | str) -> dict:
         reader.close()
 
 
+def _expired_only(validation: dict) -> bool:
+    """True when the SDK's one objection, beside an issuer in no trust list, is the signer certificate's date, and it
+    confirmed the claim's signature and the content hash: the file is as it was signed."""
+    active = validation.get("activeManifest") or {}
+    failed = {r.get("code") for r in active.get("failure", [])}
+    passed = {r.get("code") for r in active.get("success", [])}
+    return (EXPIRED in failed and failed <= {EXPIRED, UNTRUSTED} and not validation.get("ingredientDeltas")
+            and SIGNATURE_VALIDATED in passed and any(code in passed for code in CONTENT_MATCHES))
+
+
 def _summarise(reader, out: dict) -> dict:
     active = reader.get_active_manifest() or {}
-    results = (reader.get_validation_results() or {}).get("activeManifest") or {}
+    validation = reader.get_validation_results() or {}
+    results = validation.get("activeManifest") or {}
     codes = {r.get("code") for kind in ("success", "informational", "failure") for r in results.get(kind, [])}
     out.update(present=bool(active), state=reader.get_validation_state())
+    out["expired"] = bool(active) and out["state"] not in SIGNED_STATES and _expired_only(validation)
     found = {}
     for a in active.get("assertions", []):
         data = a.get("data") or {}
@@ -452,14 +477,15 @@ def _summarise(reader, out: dict) -> dict:
 
 
 def condition(path: Path | str) -> str:
-    """What signing may do with a file: leave it ("intact"), sign it ("absent"), refuse it ("broken": credentials
-    whose signature no longer holds, never re-signed silently) or nothing ("unsupported")."""
+    """What signing may do with a file: leave it ("intact", which an unchanged file stays after its signer
+    certificate expires), sign it ("absent"), refuse it ("broken": credentials whose signature no longer holds, never
+    re-signed silently) or nothing ("unsupported")."""
     if not available():
         raise CredentialsUnavailable("Content Credentials need the credentials extra (c2pa-python)")
     if Path(path).suffix.lower() not in MIME_TYPES:
         return "unsupported"
     got = read_file(path)
-    if got["state"] in SIGNED_STATES:
+    if holds(got):
         return "intact"
     if got["present"] or got.get("error"):
         return "broken"
@@ -470,7 +496,7 @@ def agrees(path: Path | str, record: dict) -> bool:
     """True when the file's signature holds and its Khaos assertion says what `record` says, field by field."""
     got = read_file(path)
     khaos = got.get("khaos")
-    if got["state"] not in SIGNED_STATES or not khaos:
+    if not holds(got) or not khaos:
         return False
     if any(khaos.get(k) is None for k in AGREEMENT_REQUIRED):
         return False

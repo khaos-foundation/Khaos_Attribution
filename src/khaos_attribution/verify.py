@@ -18,7 +18,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-VERIFY_VERSION = 2
+VERIFY_VERSION = 3
 FORMATS = (".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".mp4")
 WATERMARK_THRESHOLD = 0.5
 REGISTER_TIMEOUT_S = 20.0
@@ -31,6 +31,8 @@ VERDICTS = {
     "confirmed": "Khaos origin confirmed: the audio matches a released Khaos output.",
     "signed": ("Carries an intact signed record that claims to come from Khaos. The signing machine is not yet "
                "certified, so this alone does not prove Khaos made it."),
+    "expired": ("Carries an intact signed record that claims to come from Khaos. Its signing certificate is past its "
+                "date, so this alone does not prove Khaos made it."),
     "tampered": "Carries a Khaos record whose signature no longer holds: the file was changed after it was signed.",
     "marked": "A Khaos watermark is present. A watermark alone does not prove Khaos made it.",
     "none": "No Khaos mark found. That is not proof a person made it: marks can be removed or never added.",
@@ -101,7 +103,8 @@ def read_credentials(path: Path | str) -> dict:
     from khaos_attribution import credentials as C  # noqa: PLC0415
     got = C.read_file(Path(path))
     khaos = got.get("khaos") or {}
-    return {"present": got["present"], "state": got["state"], "intact": got["state"] in C.SIGNED_STATES,
+    return {"present": got["present"], "state": got["state"], "intact": C.holds(got),
+            "expired": bool(got.get("expired")),
             "ai_generated": got["ai_generated"], "khaos": bool(khaos), "record": khaos or None,
             "signer": got["signer"], "timestamped": got["timestamped"], "trusted": got["trusted"],
             "checked": got.get("checked", True),
@@ -149,7 +152,7 @@ def verdict(credentials: dict, watermark: dict, register: dict | None) -> str:
     if register and register.get("grade") == "output":
         return "confirmed"
     if credentials.get("khaos") and credentials.get("intact"):
-        return "signed"
+        return "expired" if credentials.get("expired") else "signed"
     if credentials.get("khaos") and credentials.get("present"):
         return "tampered"
     if watermark.get("detected"):
@@ -163,7 +166,7 @@ def status(kind: str, credentials: dict, watermark: dict, register: dict | None)
         return "DETECTED"
     if credentials.get("error"):
         return "ERROR"
-    if kind == "signed":
+    if kind in ("signed", "expired"):
         # A signature anyone can make is DETECTED only when the watermark it names is heard as well.
         return "DETECTED" if watermark.get("detected") and watermark.get("matches_record") is True else "INCONCLUSIVE"
     if kind in ("tampered", "marked"):
@@ -176,10 +179,13 @@ def status(kind: str, credentials: dict, watermark: dict, register: dict | None)
 
 
 def message(kind: str, credentials: dict) -> str:
-    """The verdict in words; a signed record's AI-generated statement is said only when the record makes it."""
+    """The verdict in words; a signed record's AI-generated statement is said only when the record makes it, and
+    an expired one's missing timestamp only when it carries none."""
     text = VERDICTS[kind]
-    if kind == "signed" and credentials.get("ai_generated"):
+    if kind in ("signed", "expired") and credentials.get("ai_generated"):
         text = text.replace("claims to come from Khaos.", "claims to come from Khaos and says the audio is AI-generated.")
+    if kind == "expired" and not credentials.get("timestamped"):
+        text = text.replace("is past its date,", "is past its date and the file carries no timestamp,")
     return text
 
 
@@ -210,6 +216,7 @@ def _line(result: dict) -> str:
         rec = creds.get("record") or {}
         who = rec.get("artist_name") or rec.get("artist_id")
         parts.append(f"  Content Credentials: {'intact' if creds['intact'] else 'BROKEN'}"
+                     f"{', signing certificate expired' if creds.get('expired') else ''}"
                      f"{', AI-generated' if creds['ai_generated'] else ''}"
                      f"{', time-stamped' if creds['timestamped'] else ''}"
                      f"{f', artist {who}' if who else ''}"

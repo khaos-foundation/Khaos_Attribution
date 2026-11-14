@@ -291,6 +291,35 @@ def test_a_manifest_that_cannot_be_summarised_is_an_error_not_an_absence(tmp_pat
     assert got["present"] and got["error"] == "garbled" and C.condition(wav) == "broken"
 
 
+def test_a_summary_that_fails_half_way_returns_nothing_it_had_read(tmp_path, monkeypatch):
+    """Guards the error path: an expiry or a statement read before the summary raised must not make the file hold."""
+    import c2pa
+
+    class Reader:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_active_manifest(self):
+            made = {"label": "c2pa.actions.v2", "data": {"actions": [{"digitalSourceType": C.DIGITAL_SOURCE_TYPE}]}}
+            return {"assertions": [made, {"label": C.KHAOS_ASSERTION, "data": RECORD}, {"label": None}]}
+
+        def get_validation_results(self):
+            passed = (C.SIGNATURE_VALIDATED, C.CONTENT_MATCHES[0])
+            return {"activeManifest": {"failure": [{"code": C.EXPIRED}], "success": [{"code": c} for c in passed]}}
+
+        def get_validation_state(self):
+            return "Invalid"
+
+        def close(self):
+            pass
+    monkeypatch.setattr(c2pa, "Reader", Reader)
+    wav = _wav(tmp_path / "a.wav")
+    got = C.read_file(wav)
+    assert got["present"] and got["error"] and got["state"] == "Invalid"
+    assert got["expired"] is False and got["ai_generated"] is False and got["khaos"] is None
+    assert C.condition(wav) == "broken" and not C.is_signed(wav) and not C.agrees(wav, RECORD)
+
+
 @pytest.mark.parametrize("suffix", [".opus", ".aac", ".ogg"])
 def test_formats_that_cannot_carry_credentials_are_not_searched(tmp_path, suffix):
     path = tmp_path / f"x{suffix}"

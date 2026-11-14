@@ -60,9 +60,11 @@ khaos-verify song.wav                      # WAV, FLAC, MP3, OGG; M4A and AAC ne
 khaos-verify song.mp3 --register https://register.example --json
 ```
 
-The answer is one of five verdicts. **confirmed**: the audio matches a released Khaos output in the Register's
+The answer is one of six verdicts. **confirmed**: the audio matches a released Khaos output in the Register's
 index. **signed**: an intact signed record claims Khaos made it; the signing machine is not yet certified, so this
-alone is not proof. **tampered**: the file was changed after it was signed. **marked**: a watermark alone, which
+alone is not proof. **expired**: an intact signed record whose signing certificate is past its date; the file is
+as it was signed, and `status` is worked out as for **signed**. **tampered**: the file was changed after it was signed.
+**marked**: a watermark alone, which
 is not proof either. **none**: no Khaos mark was found, which never proves a person made the audio. Beside the
 verdict, `status` says it in one of five words: **DETECTED** (a Register match, or an intact record whose watermark
 is heard too; a mark was found, which is not proof of origin), **INCONCLUSIVE** (a broken record, an intact record

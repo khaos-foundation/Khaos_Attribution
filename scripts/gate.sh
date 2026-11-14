@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs this repository's gates: those a change touches (--changed), named ones or all, or the quick check a Stop runs
-# (--quick, which --hook answers with): only the test files for what changed since its last green run.
+# (--quick, which --hook answers with): only the test files for what changed since its last run that was not red.
 
 ALL_GATES="pytest"
 
@@ -25,8 +25,11 @@ VENV=.venv/bin
 GITDIR=$(git rev-parse --git-common-dir) || exit 2
 LOCK="$GITDIR/khaos-gate.lock"
 GREEN="$GITDIR/khaos-gate.green"
-# Per worktree: each checkout remembers its own last green quick run.
+# Per worktree: each checkout remembers its own last quick run, and the test files a quick run had to skip.
 QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
+OWED="$QUICK.owed"
+# The gate that runs every test file: only a green run of it, or of --changed, settles what is owed.
+SUITE_GATE=pytest
 # A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
 QUICK_SECONDS=90
 QUICK_MAX_FILES=25
@@ -86,6 +89,34 @@ take_lock() {
   fi
   echo $$ > "$LOCK/pid"
   trap 'rm -rf "$LOCK"' EXIT
+}
+
+# The test files a quick run had to skip, those that still exist.
+owed_tests() {
+  local t
+  [ -s "$OWED" ] && while IFS= read -r t; do [ -f "$t" ] && printf '%s\n' "$t"; done < "$OWED"
+}
+
+# Runs them in one pytest call: only their own green run takes them off the list.
+run_owed() {
+  local tests log rc start
+  tests=$(owed_tests | tr '\n' ' ')
+  echo "== owed: $QUICK_PYTEST $tests"
+  log=$(mktemp)
+  start=$(date +%s)
+  bash -c "$QUICK_PYTEST $tests" > "$log" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; then
+    echo "PASS owed ($(( $(date +%s) - start ))s): $(grep -E '[0-9]+ passed' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')"
+    rm -f "$OWED"
+    rc=0
+  else
+    echo "FAIL owed ($(( $(date +%s) - start ))s, exit $rc)"
+    tail -60 "$log"
+    rc=1
+  fi
+  rm -f "$log"
+  return "$rc"
 }
 
 # macOS has no timeout(1); perl runs the gate in its own process group so the whole group can be stopped.
@@ -183,19 +214,31 @@ case "$MODE" in
     rm -f "$out"
     exit 0 ;;
   quick)
+    # The test files a quick run had to skip are owed: every later run counts them until they have run green.
+    owe() { { cat "$OWED" 2> /dev/null; printf '%s\n' "$tests"; } | sort -u > "$OWED.tmp" && mv "$OWED.tmp" "$OWED"; }
+    finish() {
+      if [ -s "$OWED" ]; then
+        owed_tests > "$OWED.tmp"
+        mv "$OWED.tmp" "$OWED"
+        owed=$(wc -l < "$OWED" | tr -d ' ')
+        [ "$owed" -gt 0 ] && echo "SKIP quick: $owed test files were never run; scripts/gate.sh --changed runs them"
+      fi
+      exit "$1"
+    }
     now=$(branch_files)
     fresh=$(comm -23 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
-    [ -z "$fresh" ] && exit 0
+    [ -z "$fresh" ] && finish 0
     remember() { printf '%s\n' "$now" > "$QUICK.tmp" && mv "$QUICK.tmp" "$QUICK"; }
     tests=$(printf '%s\n' "$fresh" | quick_tests)
-    [ -z "$tests" ] && { remember; exit 0; }
+    [ -z "$tests" ] && { remember; finish 0; }
     count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
     if [ "$count" -gt "$QUICK_MAX_FILES" ]; then
       echo "SKIP quick: $count test files name the change; gate.sh --changed checks it before the PR"
       remember
-      exit 0
+      owe
+      finish 0
     fi
-    take_lock || { echo "SKIP quick: another gate run holds this repository's lock"; exit 0; }
+    take_lock || { echo "SKIP quick: another gate run holds this repository's lock"; finish 0; }
     secs=$QUICK_SECONDS
     [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
     log=$(mktemp)
@@ -206,23 +249,40 @@ case "$MODE" in
     summary=$(grep -E '[0-9]+ (passed|failed)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
     case "$rc" in
       0|5) echo "PASS quick (${took}s, $count test files)${summary:+: $summary}"; remember; rc=0 ;;
-      124) echo "SKIP quick: over ${secs}s ($count test files); gate.sh --changed checks it before the PR"; remember; rc=0 ;;
+      124)
+        echo "SKIP quick: over ${secs}s ($count test files); gate.sh --changed checks it before the PR"
+        remember
+        owe
+        rc=0 ;;
       *) echo "FAIL quick (${took}s, exit $rc): $(printf '%s' "$tests" | tr '\n' ' ')"; tail -60 "$log"; rc=1 ;;
     esac
     rm -f "$log"
-    exit "$rc" ;;
+    finish "$rc" ;;
   changed)
     gates=$(changed_paths | gates_for | tr '\n' ' ')
     gates=${gates% }
-    [ -z "$gates" ] && exit 0
+    owed=$(owed_tests)
+    [ -z "$gates" ] && [ -z "$owed" ] && exit 0
     key=$(state_key "$gates")
-    if [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then echo "PASS $gates: unchanged since its last green run"; exit 0; fi
-    take_lock || { echo "SKIP $gates: another gate run holds this repository's lock"; exit 3; }
-    # shellcheck disable=SC2086
-    run_gates $gates
-    rc=$?
-    if [ "$rc" -eq 0 ]; then
-      { tail -49 "$GREEN" 2> /dev/null; echo "$key"; } > "$GREEN.tmp" && mv "$GREEN.tmp" "$GREEN"
+    green=0
+    if [ -n "$gates" ] && [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then
+      echo "PASS $gates: unchanged since its last green run"
+      green=1
+      [ -z "$owed" ] && exit 0
+    fi
+    take_lock || { echo "SKIP ${gates:-owed}: another gate run holds this repository's lock"; exit 3; }
+    rc=0
+    if [ -n "$gates" ] && [ "$green" -eq 0 ]; then
+      # shellcheck disable=SC2086
+      run_gates $gates
+      rc=$?
+      if [ "$rc" -eq 0 ]; then
+        { tail -49 "$GREEN" 2> /dev/null; echo "$key"; } > "$GREEN.tmp" && mv "$GREEN.tmp" "$GREEN"
+      fi
+    fi
+    # What the quick check skipped is run itself, unless the suite gate covered it: another gate may not hold it.
+    if [ "$rc" -eq 0 ] && [ -n "$owed" ]; then
+      case " $gates " in *" $SUITE_GATE "*) rm -f "$OWED" ;; *) run_owed; rc=$? ;; esac
     fi
     exit "$rc" ;;
   names)
@@ -235,5 +295,7 @@ case "$MODE" in
     for g in "${NAMES[@]}"; do gate_cmd "$g" > /dev/null || { echo "no gate named $g"; usage; exit 2; }; done
     take_lock || { echo "another gate run holds this repository's lock"; exit 3; }
     run_gates "${NAMES[@]}"
-    exit $? ;;
+    rc=$?
+    [ "$rc" -eq 0 ] && case " ${NAMES[*]} " in *" $SUITE_GATE "*) rm -f "$OWED" ;; esac
+    exit "$rc" ;;
 esac
