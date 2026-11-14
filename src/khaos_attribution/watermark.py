@@ -216,6 +216,10 @@ def _framed(audio):
     return audio
 
 
+class WatermarkUnreadable(RuntimeError):
+    """The id read back at no strength, and the caller asked for a mark that does."""
+
+
 class Watermarker:
     """Embed/detect on in-memory audio arrays.
 
@@ -239,15 +243,15 @@ class Watermarker:
     STRENGTHS = (1.0, 1.5, 2.0)
 
     @staticmethod
-    def embed_array(audio, sample_rate: int, watermark_id: int):
+    def embed_array(audio, sample_rate: int, watermark_id: int, *, require_readback: bool = False):
         """Return a watermarked copy of (frames, channels) float32 audio whose id reads back."""
-        return Watermarker.embed_verified(audio, sample_rate, watermark_id)[0]
+        return Watermarker.embed_verified(audio, sample_rate, watermark_id, require_readback=require_readback)[0]
 
     @staticmethod
-    def embed_verified(audio, sample_rate: int, watermark_id: int):
+    def embed_verified(audio, sample_rate: int, watermark_id: int, *, require_readback: bool = False):
         """(marked audio, strength): the first strength whose id reads back clean, else the strongest whose id reads
         back corrected, else the strongest with a warning, since a present mark whose id cannot be read is still a
-        mark."""
+        mark; with require_readback that last case raises WatermarkUnreadable instead."""
         audio = _framed(audio)
         import torch
         import torchaudio
@@ -270,6 +274,9 @@ class Watermarker:
                 corrected_read = (marked, strength)
         if corrected_read:
             return corrected_read
+        if require_readback:
+            raise WatermarkUnreadable(f"watermark {watermark_id} does not read back at any strength up to "
+                                      f"{Watermarker.STRENGTHS[-1]}")
         log.warning("watermark %d does not read back at strength %s; the strongest mark is kept",
                     watermark_id, Watermarker.STRENGTHS[-1])
         return marked, Watermarker.STRENGTHS[-1]
