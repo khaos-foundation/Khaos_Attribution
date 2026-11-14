@@ -104,14 +104,43 @@ owed_tests() {
   [ -s "$OWED" ] && while IFS= read -r t; do [ -f "$t" ] && printf '%s\n' "$t"; done < "$OWED"
 }
 
-# Runs them in one pytest call: only their own green run takes them off the list.
+# Runs test files with $QUICK_PYTEST, one pytest process per top-level test folder: two folders' conftest.py share
+# one module name, so in one process the second folder's `from conftest import` reads the first's. The last line
+# sums the folders' counts; the exit is the worst folder's (5, nothing collected, only when every folder has none).
+pytest_by_folder() {
+  local folder files log one worst=0 ran=0
+  log=$(mktemp)
+  : > "$log.counts"
+  for folder in $(printf '%s\n' "$@" | awk -F/ '{ print (NF > 2 ? $1 "/" $2 : $1) }' | awk '!seen[$0]++'); do
+    files=$(printf '%s\n' "$@" | awk -F/ -v f="$folder" '(NF > 2 ? $1 "/" $2 : $1) == f' | tr '\n' ' ')
+    bash -c "$QUICK_PYTEST $files" > "$log" 2>&1
+    one=$?
+    cat "$log"
+    grep -E '[0-9]+ (passed|failed|error)' "$log" | tail -1 >> "$log.counts"
+    case "$one" in 0) ran=1 ;; 5) ;; *) worst=$one ;; esac
+  done
+  printf '%s passed, %s failed, %s skipped, %s errors (one pytest per folder)\n' \
+    "$(grep -oE '[0-9]+ passed' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(grep -oE '[0-9]+ failed' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(grep -oE '[0-9]+ skipped' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(grep -oE '[0-9]+ errors?' "$log.counts" | awk '{ n += $1 } END { print n + 0 }')"
+  rm -f "$log" "$log.counts"
+  [ "$worst" -ne 0 ] && return "$worst"
+  [ "$ran" -eq 1 ] && return 0
+  return 5
+}
+export -f pytest_by_folder
+export QUICK_PYTEST
+
+# Runs them, a pytest per folder: only their own green run takes them off the list.
 run_owed() {
   local tests log rc start
   tests=$(owed_tests | tr '\n' ' ')
   echo "== owed: $QUICK_PYTEST $tests"
   log=$(mktemp)
   start=$(date +%s)
-  bash -c "$QUICK_PYTEST $tests" > "$log" 2>&1
+  # shellcheck disable=SC2086
+  pytest_by_folder $tests > "$log" 2>&1
   rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; then
     echo "PASS owed ($(( $(date +%s) - start ))s): $(grep -E '[0-9]+ passed' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')"
@@ -250,7 +279,7 @@ case "$MODE" in
     [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
     log=$(mktemp)
     start=$(date +%s)
-    with_timeout "$secs" bash -c "$QUICK_PYTEST $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
+    with_timeout "$secs" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
     rc=$?
     took=$(( $(date +%s) - start ))
     summary=$(grep -E '[0-9]+ (passed|failed)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
