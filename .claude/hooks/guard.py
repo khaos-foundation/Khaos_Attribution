@@ -47,6 +47,8 @@ HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![
 CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)/")
 # The removing word of the floor rule: a line that holds one the guard cannot place, and a protected path, is refused.
 REMOVING_WORD = re.compile(r"(?<![A-Za-z0-9_-])rm(?:dir|tree|Sync|dirSync)?(?![A-Za-z0-9_])")
+# The most folders a removal's glob may expand to for the guard to judge each one.
+GLOB_FOLDERS = 256
 # Where a loop or a group ends: what it printed may be piped on from there.
 CLOSERS = ("done", "fi", "esac", "}")
 
@@ -378,19 +380,21 @@ def find_narrowed(args):
 
 
 def find_leaves_out(args, start, held):
-    """True when a find prunes the protected folder `held` under start. A negated test spares only the folder's own
-    entry, not what is under it, so it does not count; nor does a prune under depth-first order."""
+    """True when a find prunes the protected folder `held` under start. Only a prune whose pattern matches the path
+    find prints for that folder counts; a negation is not credited, since the guard cannot verify what it spares,
+    and a prune does nothing under depth-first order."""
     import fnmatch
     if find_depth_first(args):
         return False
-    start = start.rstrip("/") or "/"
+    # The path as find prints it: the start as written, so a trailing slash gives a double one.
+    printed = "/" + held if start == "/" else start + "/" + held
     for j in range(len(args) - 1):
         test, pattern = args[j], args[j + 1]
         if test not in FIND_PATTERNS or test == "-regex" or args[j + 2:j + 3] != ["-prune"]:
             continue
         fold = str.lower if test.startswith("-i") else str
-        names = [held] if test in ("-name", "-iname") else [start + "/" + held, held]
-        if any(fnmatch.fnmatchcase(fold(name), fold(pattern)) for name in names):
+        name = held if test in ("-name", "-iname") else printed
+        if fnmatch.fnmatchcase(fold(name), fold(pattern)):
             return True
     return False
 
@@ -437,9 +441,14 @@ def too_wide(what, targets, state, leaves_out=None, root_ok=False):
             if "$" in path or (state["cwd"] is None and not os.path.isabs(path)):
                 continue
             full = os.path.normpath(os.path.join(state["cwd"] or "/", path))
-            # A glob is judged by every folder it expands to now.
+            # A glob is judged by every folder it expands to now; more than the guard reads is refused unread.
             pattern = path if os.path.isabs(path) else os.path.join(glob.escape(state["cwd"]), path)
-            for each in glob.glob(pattern)[:256] if GLOB.search(path) else [full]:
+            folders = [full]
+            if GLOB.search(path):
+                folders = sorted(each for each in glob.glob(pattern) if os.path.isdir(each))
+            if len(folders) > GLOB_FOLDERS:
+                raise Refuse(what + " takes " + text + ", which expands to more folders than the guard reads")
+            for each in folders:
                 if not os.path.isdir(each):
                     continue
                 for held in PROTECTED:
@@ -581,7 +590,8 @@ def command(words, state, fed, feed, depth, quiet=True, bodies=0):
         too_wide(name, [arg for arg in args if not arg.startswith("-")], state)
         finds = [i for i, word in enumerate(feed) if os.path.basename(word) in FINDERS]
         if fed and finds:
-            # Names piped in from a find: the find's start is the target, and its prunes do not hold for a pipe.
+            # Names piped in from a find: its start is the target. Its prunes are not credited: the guard cannot see
+            # what the find prints into the pipe.
             upstream = list(feed[finds[-1] + 1:])
             too_wide("find | " + name, find_starts(upstream), state, None, find_narrowed(upstream))
         tally["placed"] += own
