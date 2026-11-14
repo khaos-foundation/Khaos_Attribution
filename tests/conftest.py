@@ -1,5 +1,6 @@
 """Every test runs with the weights mirror unreachable and no public log witness, so no test reaches the network.
 A test that does not run to a verdict, skipped or expected to fail, fails the run unless its reason is named here."""
+import os
 import re
 
 import pytest
@@ -11,6 +12,11 @@ ALLOWED_MISSING = ("torch", "torchaudio", "librosa", "huggingface_hub", "hugging
 # Every other reason, word for word: a tool or a file a machine may lack, and the tests of another platform.
 ALLOWED_REASONS = ("torchaudio aligner not installed", "ffmpeg unavailable", "FFmpeg is not installed", "no ffmpeg",
                    "the base model's config is not in this machine's cache", POSIX_ONLY, LINUX_ONLY)
+# gate.sh torch needs these all; only the register's own package may be missing, as the pytest gate runs its test.
+TORCH_RUN_NEEDS = ("torch", "torchaudio", "librosa", "huggingface_hub", "huggingface_hub.constants", "soundfile")
+if os.environ.get("KHAOS_TORCH_RUN") == "1":
+    ALLOWED_MISSING = tuple(m for m in ALLOWED_MISSING if m not in TORCH_RUN_NEEDS) + ("opentimestamps",)
+    ALLOWED_REASONS = tuple(r for r in ALLOWED_REASONS if r != "torchaudio aligner not installed")
 
 _unexpected: list = []
 
