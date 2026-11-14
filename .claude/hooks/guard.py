@@ -47,6 +47,8 @@ HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![
 CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)/")
 # The removing word of the floor rule: a line that holds one the guard cannot place, and a protected path, is refused.
 REMOVING_WORD = re.compile(r"(?<![A-Za-z0-9_-])rm(?:dir|tree|Sync|dirSync)?(?![A-Za-z0-9_])")
+# The most folders a removal's glob may expand to for the guard to judge each one.
+GLOB_FOLDERS = 256
 # Where a loop or a group ends: what it printed may be piped on from there.
 CLOSERS = ("done", "fi", "esac", "}")
 
@@ -355,6 +357,107 @@ def find_targets(args):
     return targets
 
 
+def find_starts(args):
+    """The folders a find starts from: its words before the first test or option, else the folder it runs in."""
+    starts = []
+    for arg in args:
+        if arg in ("(", "!") or re.match(r"-..", arg):
+            break
+        if not arg.startswith("-"):
+            starts.append(arg)
+    return starts or ["."]
+
+
+def find_depth_first(args):
+    """True when a find works depth first (-delete implies it), where -prune does nothing."""
+    return any(arg in ("-delete", "-depth", "-d") for arg in args)
+
+
+def find_narrowed(args):
+    """True when a find picks what it acts on by name or path: a test neither negated nor a prune's own."""
+    return any(arg in FIND_PATTERNS and not (j > 0 and args[j - 1] in ("-not", "!"))
+               and args[j + 2:j + 3] != ["-prune"] for j, arg in enumerate(args))
+
+
+def find_leaves_out(args, start, held):
+    """True when a find prunes the protected folder `held` under start. Only a prune whose pattern matches the path
+    find prints for that folder counts; a negation is not credited, since the guard cannot verify what it spares,
+    and a prune does nothing under depth-first order."""
+    import fnmatch
+    if find_depth_first(args):
+        return False
+    # The path as find prints it: the start as written, so a trailing slash gives a double one.
+    printed = "/" + held if start == "/" else start + "/" + held
+    for j in range(len(args) - 1):
+        test, pattern = args[j], args[j + 1]
+        if test not in FIND_PATTERNS or test == "-regex" or args[j + 2:j + 3] != ["-prune"]:
+            continue
+        fold = str.lower if test.startswith("-i") else str
+        name = held if test in ("-name", "-iname") else printed
+        if fnmatch.fnmatchcase(fold(name), fold(pattern)):
+            return True
+    return False
+
+
+def runs_remover(words):
+    """True when a command line, through any wrappers before it, is a removing command."""
+    cmd = bare(words)
+    while cmd and os.path.basename(cmd[0]) in WRAPPERS:
+        i = recognised(cmd[1:])
+        if i is None:
+            return False
+        cmd = cmd[1 + i:]
+    return bool(cmd) and os.path.basename(cmd[0]) in REMOVERS
+
+
+def rsync_leaves_out(args, held):
+    """True when an rsync excludes the protected folder `held` at the top of what it copies into. With
+    --delete-excluded what is excluded is removed, so nothing is left out."""
+    import fnmatch
+    if any(arg.startswith("--delete-excluded") for arg in args):
+        return False
+    for i, arg in enumerate(args):
+        pattern = None
+        if arg.startswith("--exclude="):
+            pattern = arg.split("=", 1)[1]
+        elif arg == "--exclude" and i + 1 < len(args):
+            pattern = args[i + 1]
+        elif arg in ("-f", "--filter") and i + 1 < len(args) and args[i + 1][:2] in ("- ", "-/"):
+            pattern = args[i + 1][2:]
+        if pattern is not None and fnmatch.fnmatchcase(held, re.sub(r"/\**$", "", pattern.strip()).lstrip("/")):
+            return True
+    return False
+
+
+def too_wide(what, targets, state, leaves_out=None, root_ok=False):
+    """Refuse a removal whose target is a repository's root, or a folder that directly holds a protected folder that
+    exists, unless `leaves_out(target, name)` says the command leaves that folder out (and `root_ok` the root)."""
+    import glob
+    for target in targets:
+        for text in expand(target, state["vars"]):
+            path = os.path.expanduser(text)
+            if state["cwd"] is not None:
+                path = re.sub(r"\$\{?PWD\}?(?![\w])", lambda found: state["cwd"], path)
+            if "$" in path or (state["cwd"] is None and not os.path.isabs(path)):
+                continue
+            full = os.path.normpath(os.path.join(state["cwd"] or "/", path))
+            # A glob is judged by every folder it expands to now; more than the guard reads is refused unread.
+            pattern = path if os.path.isabs(path) else os.path.join(glob.escape(state["cwd"]), path)
+            folders = [full]
+            if GLOB.search(path):
+                folders = sorted(each for each in glob.glob(pattern) if os.path.isdir(each))
+            if len(folders) > GLOB_FOLDERS:
+                raise Refuse(what + " takes " + text + ", which expands to more folders than the guard reads")
+            for each in folders:
+                if not os.path.isdir(each):
+                    continue
+                for held in PROTECTED:
+                    if os.path.isdir(os.path.join(each, held)) and not (leaves_out and leaves_out(text, held)):
+                        raise Refuse(what + " reaches " + text + ", which holds a " + held + "/ folder not left out")
+                if os.path.exists(os.path.join(each, ".git")) and not root_ok:
+                    raise Refuse(what + " would remove from " + text + ", a repository's root")
+
+
 def positional(args, value_options):
     """The words of a command that are neither options nor the values of the options named."""
     return [arg for i, arg in enumerate(args)
@@ -484,21 +587,35 @@ def command(words, state, fed, feed, depth, quiet=True, bodies=0):
         tally["placed"] += own + bodies
     elif name in REMOVERS:
         removing(name, args, state, fed, feed)
+        too_wide(name, [arg for arg in args if not arg.startswith("-")], state)
+        finds = [i for i, word in enumerate(feed) if os.path.basename(word) in FINDERS]
+        if fed and finds:
+            # Names piped in from a find: its start is the target. Its prunes are not credited: the guard cannot see
+            # what the find prints into the pipe.
+            upstream = list(feed[finds[-1] + 1:])
+            too_wide("find | " + name, find_starts(upstream), state, None, find_narrowed(upstream))
         tally["placed"] += own
     elif name in FINDERS:
-        if "-delete" in args:
+        removes = "-delete" in args
+        if removes:
             removing("find -delete", find_targets(args), state, fed, feed, globs=False)
         for i, arg in enumerate(args):
             if arg in ("-exec", "-execdir", "-ok", "-okdir"):
                 run = args[i + 1:]
                 end = min([run.index(stop) for stop in (";", "+") if stop in run] or [len(run)])
+                removes = removes or runs_remover(run[:end])
                 # The command find runs is fed its paths by find, and places its own words.
                 own -= occurrences(" ".join(run[:end]))
                 command(run[:end], state, True, find_targets(args[:i]), depth)
+        if removes:
+            too_wide("find", find_starts(args), state, lambda start, held: find_leaves_out(args, start, held),
+                     find_narrowed(args))
         tally["placed"] += own
     elif name == "rsync":
         if any(arg.startswith("--del") for arg in args):
             removing("rsync --delete", positional(args, RSYNC_VALUE_OPTIONS), state, fed, feed)
+            ends = positional(args, RSYNC_VALUE_OPTIONS)[1:][-1:]
+            too_wide("rsync --delete", ends, state, lambda end, held: rsync_leaves_out(args, held))
         tally["placed"] += own
     elif name not in HARMLESS:
         unmodelled(name, cmd, state, fed, feed, depth, quiet)

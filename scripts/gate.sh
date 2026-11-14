@@ -13,7 +13,14 @@ gate_cmd() {
 
 # Changed paths on stdin, the gates they need on stdout.
 gates_for() {
-  grep -qE '^(src/|tests/|pyproject\.toml$|uv\.lock$)' && echo pytest
+  local paths named
+  paths=$(cat)
+  # A path some test file names is that test's to check, as --quick checks it.
+  named=$(printf '%s\n' "$paths" | quick_tests)
+  if [ -n "$named" ] || printf '%s\n' "$paths" | grep -qE '^(src/|tests/|pyproject\.toml$|uv\.lock$)'; then
+    echo pytest
+  fi
+  return 0
 }
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -262,7 +269,10 @@ case "$MODE" in
     gates=$(changed_paths | gates_for | tr '\n' ' ')
     gates=${gates% }
     owed=$(owed_tests)
-    [ -z "$gates" ] && [ -z "$owed" ] && exit 0
+    if [ -z "$gates" ] && [ -z "$owed" ]; then
+      echo "SKIP changed: no changed path maps to a gate or is named by a test; nothing to run"
+      exit 0
+    fi
     key=$(state_key "$gates")
     green=0
     if [ -n "$gates" ] && [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then
