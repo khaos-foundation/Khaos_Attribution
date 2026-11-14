@@ -51,6 +51,8 @@ CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)/")
 REMOVING_WORD = re.compile(r"(?<![A-Za-z0-9_-])rm(?:dir|tree|Sync|dirSync)?(?![A-Za-z0-9_])")
 # The most folders a removal's glob may expand to for the guard to judge each one.
 GLOB_FOLDERS = 256
+# The most values a removal's target may expand to (variables and brace lists) for the guard to judge each one.
+EXPANSIONS = 256
 # Where a loop or a group ends: what it printed may be piped on from there.
 CLOSERS = ("done", "fi", "esac", "}")
 
@@ -276,37 +278,45 @@ def reaches(word, cwd):
     return False
 
 
-def expand(word, variables):
-    """The word with each variable the line itself sets replaced by its values, and its brace lists expanded; any
-    other variable is left as written."""
+def expand(word, variables, strict=False):
+    """The word with each variable the line itself sets replaced by its values, and its brace lists expanded, the
+    word as written kept beside its expansions; any other variable is left as written. With `strict` (a removal's
+    target), more values than the guard reads is refused unread."""
     out = [word]
     for found in VARIABLE.finditer(word):
         values = variables.get(found.group(1) or found.group(2))
         if values:
-            out = [text.replace(found.group(0), value) for text in out for value in values][:64]
-    return [each for text in out for each in braces(text)][:64]
+            out = [text.replace(found.group(0), value) for text in out for value in values][:EXPANSIONS + 1]
+    expanded = []
+    for text in out[:EXPANSIONS + 1]:
+        expanded += [text] + [each for each in braces(text) if each != text] if BRACE.search(text) else [text]
+    if strict and len(expanded) > EXPANSIONS:
+        raise Refuse(word + " expands to more paths than the guard reads")
+    return expanded[:EXPANSIONS]
 
 
 def braces(word, depth=0):
-    """A word's brace lists ({a,b}) and simple ranges ({1..3}, {a..c}) expanded as the shell would. One the guard
+    """A word's brace lists ({a,b}) and ranges ({1..3}, {a..c}, {1..9..2}) expanded as the shell would. One the guard
     cannot expand comes back with a $ in it, so it reads as a path not written out."""
     found = BRACE.search(word)
     if not found or depth > 8:
         return [word]
     head, body, tail = word[:found.start()], found.group(1), word[found.end():]
-    span = re.fullmatch(r"(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])", body)
+    span = re.fullmatch(r"(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?", body)
     if span:
-        first, last = span.groups()
-        if first.lstrip("-").isdigit() != last.lstrip("-").isdigit():
+        first, last, by = span.groups()
+        numbers = first.lstrip("-").isdigit()
+        if numbers != last.lstrip("-").isdigit() or by == "0":
             return [word.replace("{", "${", 1)]
-        low, high = (int(first), int(last)) if first.lstrip("-").isdigit() else (ord(first), ord(last))
-        step = 1 if high >= low else -1
-        items = [str(n) if first.lstrip("-").isdigit() else chr(n) for n in range(low, high + step, step)][:64]
+        low, high = (int(first), int(last)) if numbers else (ord(first), ord(last))
+        step = abs(int(by or 1)) * (1 if high >= low else -1)
+        items = [str(n) if numbers else chr(n) for n in range(low, high + step, step)[:EXPANSIONS + 1]]
     elif "," in body and "{" not in body:
         items = body.split(",")
     else:
         return [word.replace("{", "${", 1)] if "," in body or ".." in body else [word]
-    return [each for item in items for each in braces(head + item + tail, depth + 1)][:64]
+    # One more than the guard reads is enough for a caller to know it stopped short.
+    return [each for item in items for each in braces(head + item + tail, depth + 1)][:EXPANSIONS + 1]
 
 
 def removing(what, args, state, fed, feed, globs=True):
@@ -315,7 +325,7 @@ def removing(what, args, state, fed, feed, globs=True):
         raise Refuse(what + " would run inside a data, artists or outputs folder")
     unread = False
     for arg in args:
-        for text in expand(arg, state["vars"]):
+        for text in expand(arg, state["vars"], strict=True):
             if reaches(text, state["cwd"]) if globs else named(text):
                 raise Refuse(what + " names " + text)
             unread = unread or "$" in text
@@ -331,16 +341,24 @@ def removing(what, args, state, fed, feed, globs=True):
         raise Refuse(what + " takes a path that is not written out, and the line holds a data/, artists/ or "
                      "outputs/ path")
     # Here only a path counts (a word with a slash), its names as the folders are written (not DATA, nor the system's
-    # /System/Volumes/Data): the evidence is weaker than a removal's own words.
+    # /System/Volumes/Data), and never a web address: the evidence is weaker than a removal's own words.
     for word in state.get("words", ()):
         for text in expand(word, state["vars"]):
-            if "/" in text and (named(text, fold=False) or GLOB.search(text) and reaches(text, state["cwd"])):
+            if "/" in text and "://" not in text and (named(text, fold=False) or GLOB.search(text) and reaches(text, state["cwd"])):
                 raise Refuse(what + " takes a path that is not written out, and the line names " + word)
-    for args in state.get("finds", ()):
+    for args, folders, line in state.get("finds", ()):
         for start in find_starts(args):
             if named(start):
                 raise Refuse(what + " takes a path that is not written out, and a find on the line starts at " + start)
-        too_wide("find feeding " + what, find_starts(args), state, None, find_narrowed(args))
+        # The find runs in a folder its own line's cd may have taken it to; where that cannot be followed, the old
+        # rule for that line.
+        if folders is None:
+            if CRUDE_VERB.search(line) and CRUDE_PATH.search(line):
+                raise Refuse(what + " takes a path that is not written out, from a find in a folder the guard cannot "
+                             "follow, on a line that holds a data/, artists/ or outputs/ path")
+            continue
+        for where in folders:
+            too_wide("find feeding " + what, find_starts(args), dict(state, cwd=where), None, find_narrowed(args))
 
 
 def change_folder(args, state):
@@ -473,7 +491,7 @@ def too_wide(what, targets, state, leaves_out=None, root_ok=False):
     exists, unless `leaves_out(target, name)` says the command leaves that folder out (and `root_ok` the root)."""
     import glob
     for target in targets:
-        for text in expand(target, state["vars"]):
+        for text in expand(target, state["vars"], strict=True):
             path = os.path.expanduser(text)
             if state["cwd"] is not None:
                 path = re.sub(r"\$\{?PWD\}?(?![\w])", lambda found: state["cwd"], path)
@@ -668,6 +686,23 @@ def judge(cmd, state, depth, fed=False, feed=()):
         raise Refuse("the command is nested too deep to read")
     pieces, nested, _ = scan(cmd)
     lines = [(shlex.split(text), piped, comments, bodies) for text, piped, comments, bodies in pieces]
+    # The words and finds of this line, nested ones included, are where a removal's unwritten path may come from.
+    words, finds = line_parts(cmd, depth, ["."])
+    # A find's folders are relative to where this line starts, before any cd on it moves the guard's own.
+    start = state["cwd"]
+    finds = [(args, None if folders is None or not start else
+              [os.path.normpath(os.path.join(start, folder)) for folder in folders], line)
+             for args, folders, line in finds]
+    saved = state.get("words", []), state.get("finds", [])
+    state["words"], state["finds"] = list(saved[0]) + words, list(saved[1]) + finds
+    try:
+        judge_pieces(lines, nested, state, depth, fed, feed)
+    finally:
+        state["words"], state["finds"] = saved
+
+
+def judge_pieces(lines, nested, state, depth, fed, feed):
+    """Judge a command line's simple commands in order, then the command lines nested in it."""
     for i, (words, piped, _, _) in enumerate(lines):
         # What a loop or a group printed is piped into something that may run it: nothing said in it is placed.
         if piped and not only_text(words) and (not lines[i - 1][0] or lines[i - 1][0][0] in CLOSERS):
@@ -687,8 +722,22 @@ def judge(cmd, state, depth, fed=False, feed=()):
         judge(inner, dict(state), depth + 1)
 
 
-def line_parts(cmd, depth):
-    """Every word of a command line, nested command lines included, and the arguments of each find in it."""
+def moved(folders, args):
+    """The folders a line may be in after a cd: those it may have been in (a cd can fail, sit in a subshell or a
+    branch not taken) and each moved to the cd's target; None when a target cannot be followed."""
+    targets = [arg for arg in args if arg == "-" or not arg.startswith("-") and not REDIRECT.fullmatch(arg)]
+    target = os.path.expanduser(targets[0]) if targets else os.path.expanduser("~")
+    if folders is None or "$" in target or target.startswith(("-", "~")):
+        return None
+    more = folders + [os.path.normpath(os.path.join(folder, target)) for folder in folders]
+    more = list(dict.fromkeys(more))
+    return more if len(more) <= 16 else None
+
+
+def line_parts(cmd, depth, folders):
+    """Every word of a command line, nested command lines included, and each find in it as (its arguments, the
+    folders it may run in, relative to where the line starts, or None, the line it is on). A nested line that cannot
+    be read is left out, never the whole line."""
     if depth > 8:
         raise Refuse("the command is nested too deep to read")
     pieces, nested, _ = scan(cmd)
@@ -700,10 +749,18 @@ def line_parts(cmd, depth):
         while run and os.path.basename(run[0]) in WRAPPERS:
             i = recognised(run[1:])
             run = run[1 + i:] if i is not None else []
-        if run and os.path.basename(run[0]) in FINDERS:
-            finds.append(run[1:])
+        if run and os.path.basename(run[0]) in ("cd", "pushd"):
+            folders = moved(folders, run[1:])
+        elif run and os.path.basename(run[0]) == "popd":
+            folders = None
+        elif run and os.path.basename(run[0]) in FINDERS:
+            finds.append((run[1:], folders, cmd))
+    # Every folder this line may have been in at any point, since a cd only adds to them.
     for inner in nested:
-        more_words, more_finds = line_parts(inner, depth + 1)
+        try:
+            more_words, more_finds = line_parts(inner, depth + 1, folders)
+        except (ValueError, IndexError):
+            continue
         words += more_words
         finds += more_finds
     return words, finds
@@ -713,9 +770,8 @@ def judge_bash(cmd, cwd, bases):
     try:
         inside = any(protected_under(os.path.join(full, "x"), bases) for full in {cwd, os.path.realpath(cwd)})
         tally = {"placed": 0, "void": False}
-        words, finds = line_parts(cmd, 0)
-        judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd, "tally": tally, "words": words,
-                    "finds": finds}, 0)
+        judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd, "tally": tally, "words": [],
+                    "finds": []}, 0)
         # The floor: a removing word the guard could not place, on a line that holds a protected path.
         if CODE_PATH.search(cmd) and occurrences(cmd) > (0 if tally["void"] else tally["placed"]):
             raise Refuse("the line holds a removing word the guard cannot place, and a data/, artists/ or outputs/ "
