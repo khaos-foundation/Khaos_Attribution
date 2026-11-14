@@ -28,6 +28,8 @@ FIND_PATTERNS = ("-path", "-ipath", "-wholename", "-name", "-iname", "-regex")
 SSH_VALUE_OPTIONS = "bcDEeFIiJLlmOopQRSWw"
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=")
 VARIABLE = re.compile(r"\$(\w+)|\$\{(\w+)\}")
+# A brace list or range, not a ${...} variable: the innermost first.
+BRACE = re.compile(r"(?<!\$)\{([^{}]*)\}")
 REDIRECT = re.compile(r"\d*(?:<|>>?|&>>?)(.*)")
 GLOB = re.compile(r"[*?\[]")
 HEREDOC = re.compile(r"<<(-?)[ \t]*((?:\\.|'[^']*'|\"[^\"]*\"|[^\s;&|()<>'\"\\])+)")
@@ -247,11 +249,11 @@ def scan(cmd, i=0, bracketed=False):
     return pieces + [["".join(buf), piped, comments, 0]], nested, i
 
 
-def named(word):
-    """True when a word holds a protected folder name as a path segment."""
+def named(word, fold=True):
+    """True when a word holds a protected folder name as a path segment (in any case, unless `fold` is false)."""
     # A word with a space in it may be a sentence, so only its slashes divide it.
     dividers = r"/" if re.search(r"\s", word) else r"[/:={},]"
-    return any(part.lower() in PROTECTED for part in re.split(dividers, word))
+    return any((part.lower() if fold else part) in PROTECTED for part in re.split(dividers, word))
 
 
 def reaches(word, cwd):
@@ -275,13 +277,36 @@ def reaches(word, cwd):
 
 
 def expand(word, variables):
-    """The word with each variable the line itself sets replaced by its values; any other is left as written."""
+    """The word with each variable the line itself sets replaced by its values, and its brace lists expanded; any
+    other variable is left as written."""
     out = [word]
     for found in VARIABLE.finditer(word):
         values = variables.get(found.group(1) or found.group(2))
         if values:
             out = [text.replace(found.group(0), value) for text in out for value in values][:64]
-    return out
+    return [each for text in out for each in braces(text)][:64]
+
+
+def braces(word, depth=0):
+    """A word's brace lists ({a,b}) and simple ranges ({1..3}, {a..c}) expanded as the shell would. One the guard
+    cannot expand comes back with a $ in it, so it reads as a path not written out."""
+    found = BRACE.search(word)
+    if not found or depth > 8:
+        return [word]
+    head, body, tail = word[:found.start()], found.group(1), word[found.end():]
+    span = re.fullmatch(r"(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])", body)
+    if span:
+        first, last = span.groups()
+        if first.lstrip("-").isdigit() != last.lstrip("-").isdigit():
+            return [word.replace("{", "${", 1)]
+        low, high = (int(first), int(last)) if first.lstrip("-").isdigit() else (ord(first), ord(last))
+        step = 1 if high >= low else -1
+        items = [str(n) if first.lstrip("-").isdigit() else chr(n) for n in range(low, high + step, step)][:64]
+    elif "," in body and "{" not in body:
+        items = body.split(",")
+    else:
+        return [word.replace("{", "${", 1)] if "," in body or ".." in body else [word]
+    return [each for item in items for each in braces(head + item + tail, depth + 1)][:64]
 
 
 def removing(what, args, state, fed, feed, globs=True):
@@ -298,10 +323,24 @@ def removing(what, args, state, fed, feed, globs=True):
         for text in expand(word, state["vars"]):
             if named(text):
                 raise Refuse(what + " is fed its paths by a command that names " + text)
-    # A path in a variable or substitution the guard cannot follow: the crude rule, a protected path anywhere.
-    if unread and CRUDE_PATH.search(state["text"]):
+    if not unread:
+        return
+    # A path in a variable, a substitution or a loop the guard cannot follow: the crude rule, a protected path
+    # anywhere on the line, and any find on the line is taken as where the path comes from.
+    if CRUDE_PATH.search(state["text"]):
         raise Refuse(what + " takes a path that is not written out, and the line holds a data/, artists/ or "
                      "outputs/ path")
+    # Here only a path counts (a word with a slash), its names as the folders are written (not DATA, nor the system's
+    # /System/Volumes/Data): the evidence is weaker than a removal's own words.
+    for word in state.get("words", ()):
+        for text in expand(word, state["vars"]):
+            if "/" in text and (named(text, fold=False) or GLOB.search(text) and reaches(text, state["cwd"])):
+                raise Refuse(what + " takes a path that is not written out, and the line names " + word)
+    for args in state.get("finds", ()):
+        for start in find_starts(args):
+            if named(start):
+                raise Refuse(what + " takes a path that is not written out, and a find on the line starts at " + start)
+        too_wide("find feeding " + what, find_starts(args), state, None, find_narrowed(args))
 
 
 def change_folder(args, state):
@@ -648,11 +687,35 @@ def judge(cmd, state, depth, fed=False, feed=()):
         judge(inner, dict(state), depth + 1)
 
 
+def line_parts(cmd, depth):
+    """Every word of a command line, nested command lines included, and the arguments of each find in it."""
+    if depth > 8:
+        raise Refuse("the command is nested too deep to read")
+    pieces, nested, _ = scan(cmd)
+    words, finds = [], []
+    for text, _, _, _ in pieces:
+        split = shlex.split(text)
+        words += split
+        run = bare(split)
+        while run and os.path.basename(run[0]) in WRAPPERS:
+            i = recognised(run[1:])
+            run = run[1 + i:] if i is not None else []
+        if run and os.path.basename(run[0]) in FINDERS:
+            finds.append(run[1:])
+    for inner in nested:
+        more_words, more_finds = line_parts(inner, depth + 1)
+        words += more_words
+        finds += more_finds
+    return words, finds
+
+
 def judge_bash(cmd, cwd, bases):
     try:
         inside = any(protected_under(os.path.join(full, "x"), bases) for full in {cwd, os.path.realpath(cwd)})
         tally = {"placed": 0, "void": False}
-        judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd, "tally": tally}, 0)
+        words, finds = line_parts(cmd, 0)
+        judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd, "tally": tally, "words": words,
+                    "finds": finds}, 0)
         # The floor: a removing word the guard could not place, on a line that holds a protected path.
         if CODE_PATH.search(cmd) and occurrences(cmd) > (0 if tally["void"] else tally["placed"]):
             raise Refuse("the line holds a removing word the guard cannot place, and a data/, artists/ or outputs/ "
