@@ -51,8 +51,8 @@ The raw schema files are bundled with the package and can be loaded with
 
 ## Verify a file
 
-Every Khaos output carries two marks: an inaudible watermark and a signed, time-stamped record (C2PA Content
-Credentials) saying it is AI-generated. To check a file:
+Every Khaos output carries two marks: an inaudible watermark and a signed record (C2PA Content Credentials) saying
+it is AI-generated, time-stamped when the time-stamping service answered at signing. To check a file:
 
 ```bash
 pip install "khaos-attribution[verify,detector] @ git+https://github.com/khaos-foundation/Khaos_Attribution.git"
