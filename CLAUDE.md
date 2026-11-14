@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-The contract package the other three repos pin by tag: rights schemas, the estimator, the watermark codec, the seal. Every change is a version; the Space pins the tag in pyproject and the Workshop reads the sibling checkout in place.
+The contract package the other three repos pin by tag: rights schemas, the estimator, the watermark codec, the seal. Every change is a version; the Space pins the tag in pyproject and the Workshop installs a copy of the sibling checkout, never an editable one, and pins its version in `src/common/contract.py`.
 
 ## Comments and docstrings (house rule)
 
