@@ -415,7 +415,7 @@ def is_signed(path: Path | str) -> bool:
 def read_file(path: Path | str) -> dict:
     """What a file's Content Credentials say: {present, state, expired, ai_generated, khaos, signer, timestamped,
     trusted, checked}. `state` is the SDK's verdict (Valid, Invalid, Trusted) and `expired` says it is Invalid only for
-    the signer certificate's date; `checked` is False when the file could not be searched, `error` set if that failed."""
+    the signer certificate's date; `checked` is False when the file could not be searched, `error` set if it failed."""
     out = {"present": False, "state": None, "expired": False, "ai_generated": False, "khaos": None, "signer": None,
            "timestamped": False, "trusted": False, "checked": True}
     if not available():
@@ -434,7 +434,8 @@ def read_file(path: Path | str) -> dict:
         out.update(error=str(exc)[:200], reason=str(exc)[:200])
         return out
     try:
-        return _summarise(reader, out)
+        # Summarised into a copy: what a summary read before it raised is never returned.
+        return _summarise(reader, dict(out))
     except Exception as exc:  # noqa: BLE001 — a manifest the SDK cannot summarise reads as present but not intact
         out.update(present=True, state="Invalid", error=str(exc)[:200], reason=str(exc)[:200])
         return out

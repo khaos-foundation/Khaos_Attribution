@@ -128,7 +128,7 @@ def test_the_verifier_says_the_certificate_expired_never_that_the_file_changed(l
     kept, _ = lapsed
     r = V.verify_file(kept)
     assert r["verdict"] == "expired" and r["status"] == "INCONCLUSIVE"
-    assert "certificate has since expired and the file carries no timestamp" in r["message"]
+    assert "certificate is past its date and the file carries no timestamp" in r["message"]
     assert "changed after it was signed" not in r["message"] and "says the audio is AI-generated" in r["message"]
     creds = r["content_credentials"]
     assert creds["intact"] and creds["expired"] and creds["state"] == "Invalid"
@@ -151,7 +151,7 @@ def test_a_changed_file_reads_as_tampered_after_the_certificate_expires(lapsed, 
 
 def test_a_time_stamped_file_is_not_told_it_carries_no_timestamp():
     said = V.message("expired", {"timestamped": True})
-    assert "certificate has since expired" in said and "no timestamp" not in said
+    assert "certificate is past its date" in said and "no timestamp" not in said and "since" not in said
     assert V.VERDICTS["expired"] == said
 
 

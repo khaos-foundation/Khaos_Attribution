@@ -31,8 +31,8 @@ VERDICTS = {
     "confirmed": "Khaos origin confirmed: the audio matches a released Khaos output.",
     "signed": ("Carries an intact signed record that claims to come from Khaos. The signing machine is not yet "
                "certified, so this alone does not prove Khaos made it."),
-    "expired": ("Carries an intact signed record that claims to come from Khaos. Its signing certificate has since "
-                "expired, so this alone does not prove Khaos made it."),
+    "expired": ("Carries an intact signed record that claims to come from Khaos. Its signing certificate is past its "
+                "date, so this alone does not prove Khaos made it."),
     "tampered": "Carries a Khaos record whose signature no longer holds: the file was changed after it was signed.",
     "marked": "A Khaos watermark is present. A watermark alone does not prove Khaos made it.",
     "none": "No Khaos mark found. That is not proof a person made it: marks can be removed or never added.",
@@ -185,7 +185,7 @@ def message(kind: str, credentials: dict) -> str:
     if kind in ("signed", "expired") and credentials.get("ai_generated"):
         text = text.replace("claims to come from Khaos.", "claims to come from Khaos and says the audio is AI-generated.")
     if kind == "expired" and not credentials.get("timestamped"):
-        text = text.replace("has since expired,", "has since expired and the file carries no timestamp,")
+        text = text.replace("is past its date,", "is past its date and the file carries no timestamp,")
     return text
 
 

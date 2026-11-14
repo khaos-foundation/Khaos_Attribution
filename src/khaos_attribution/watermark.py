@@ -244,7 +244,7 @@ class Watermarker:
 
     @staticmethod
     def embed_array(audio, sample_rate: int, watermark_id: int, *, require_readback: bool = False):
-        """Return a watermarked copy of (frames, channels) float32 audio whose id reads back."""
+        """The marked copy embed_verified returns for (frames, channels) float32 audio, without its strength."""
         return Watermarker.embed_verified(audio, sample_rate, watermark_id, require_readback=require_readback)[0]
 
     @staticmethod
