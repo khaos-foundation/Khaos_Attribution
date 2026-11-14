@@ -21,7 +21,7 @@ A whole-codebase pass on 2026-09-14 removed about 20,000 lines of such commentar
 
 `bash scripts/gate.sh pytest` runs the suite (`.venv/bin/python -m pytest -q`); `--changed` runs what a change touches, once per branch before its PR; the Stop hook in `.claude/settings.json` runs only `--quick` (the test files for what changed since its last run that was not red, within 90 seconds; any it had to skip are counted at every stop until `--changed` or the suite has run them green). The `release` skill makes a version.
 
-Sweeps search with `rg` or `git ls-files`, never a bare `find`; any `find` prunes `data/`.
+Sweeps search with `rg` or `git ls-files`, never a bare `find`; any `find` prunes `data/`, and a `find` that removes never uses `-delete` or `-depth` from a folder that holds `data/`, `artists/` or `outputs/` (both work depth first, where a prune does nothing): remove with `-exec rm` after the prune.
 
 ## Engine descriptors (house rule)
 
