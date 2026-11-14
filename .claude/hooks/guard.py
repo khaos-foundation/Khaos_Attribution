@@ -26,6 +26,8 @@ RSYNC_VALUE_OPTIONS = ("--exclude", "--include", "--filter", "-f", "-e", "--rsh"
                        "--include-from")
 FIND_PATTERNS = ("-path", "-ipath", "-wholename", "-name", "-iname", "-regex")
 SSH_VALUE_OPTIONS = "bcDEeFIiJLlmOopQRSWw"
+# A path's divider: Windows takes a backslash too.
+SLASH = r"[/\\]" if os.name == "nt" else "/"
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=")
 VARIABLE = re.compile(r"\$(\w+)|\$\{(\w+)\}")
 # A brace list or range, not a ${...} variable: the innermost first.
@@ -40,13 +42,13 @@ INTERPRETER_WORD = re.compile(r"(?<![\w.-])" + INTERPRETER + r"(?![\w.-])")
 # Code cannot be read as shell: a call that removes, and a protected folder written as a file path (not a URL).
 CODE_REMOVE = re.compile(r"rmtree|removedirs|os\.(?:remove|unlink|rmdir)|\.(?:unlink|rmdir)\(|(?:rm|unlink|rmdir)Sync"
                          r"|[\"']rm[\"']|(?<![\w.-])rm\s+-|(?<![\w.])unlink\b")
-CODE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?<!api/)(?<!operator/)(?:data|artists|outputs)/")
+CODE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?<!api/)(?<!operator/)(?:data|artists|outputs)" + SLASH)
 CODE_REMOVE_NAMED = re.compile(r"(?:rmtree|removedirs|remove|unlink|rmdir|rmSync|unlinkSync|rmdirSync)\(\s*[rfb]?[\"']"
                                r"[^\"']*(?<![A-Za-z0-9_])(?:data|artists|outputs)[\"']")
 CRUDE_VERB = re.compile(r"(?<![A-Za-z0-9_])(?:rm|remove|unlink|shred|truncate)|-delete|--del")
 # In the words of a command the guard does not model, a removing word is not an option (--rm) or part of a path.
 HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![\w-])-delete|--del")
-CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)/")
+CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)" + SLASH)
 # The removing word of the floor rule: a line that holds one the guard cannot place, and a protected path, is refused.
 REMOVING_WORD = re.compile(r"(?<![A-Za-z0-9_-])rm(?:dir|tree|Sync|dirSync)?(?![A-Za-z0-9_])")
 # The most folders a removal's glob may expand to for the guard to judge each one.
@@ -61,10 +63,25 @@ class Refuse(Exception):
     pass
 
 
+def native(path):
+    """A path as the system opens it: on Windows a backslash divides it and Git Bash's /c/x is C:/x; anywhere else
+    the path as written. Only a word judged as a path is read this way, never a line about to be read again."""
+    if os.name != "nt":
+        return path
+    path = path.replace("\\", "/")
+    drive = re.fullmatch(r"/([A-Za-z])(/.*)?", path, re.S)
+    return drive.group(1).upper() + ":" + (drive.group(2) or "/") if drive else path
+
+
+def under(full, base):
+    """True when a path sits below a folder; Windows compares paths in any case."""
+    return os.path.normcase(full).startswith(os.path.normcase(base) + os.sep)
+
+
 def protected_under(full, bases, notes=()):
     """The protected folder a path sits under inside one of the repositories, or None."""
     for base in bases:
-        if not full.startswith(base + os.sep):
+        if not under(full, base):
             continue
         parts = os.path.relpath(full, base).replace(os.sep, "/").split("/")
         for i, part in enumerate(parts[:-1]):
@@ -78,7 +95,7 @@ def protected_under(full, bases, notes=()):
 # --- Edit, Write, NotebookEdit ---
 
 def judge_edit(path, cwd, bases):
-    given = os.path.abspath(os.path.join(cwd, path))
+    given = os.path.abspath(os.path.join(native(cwd), native(path)))
     # A protected folder may be a link to another disk, so the path is judged as written and as resolved.
     for full in {given, os.path.realpath(given)}:
         name = protected_under(full, bases, TRACKED_NOTES)
@@ -88,11 +105,12 @@ def judge_edit(path, cwd, bases):
 
 def judge_sibling(path, cwd, root):
     """Refuse a write into another repository: a folder beside this one, or beside its main checkout, holding .git."""
-    given = os.path.abspath(os.path.join(cwd, path))
+    given = os.path.abspath(os.path.join(native(cwd), native(path)))
     parents, own = set(), {os.path.basename(root)}
     gitfile = os.path.join(root, ".git")
     if os.path.isfile(gitfile):
-        gitdir = open(gitfile, encoding="utf-8").read().split("gitdir:", 1)[-1].strip()
+        # git writes the link with forward slashes on Windows too.
+        gitdir = os.path.normpath(native(open(gitfile, encoding="utf-8").read().split("gitdir:", 1)[-1].strip()))
         main_checkout = gitdir.split(os.sep + ".git" + os.sep + "worktrees")[0]
         if main_checkout != gitdir:
             parents.add(os.path.dirname(main_checkout))
@@ -100,9 +118,10 @@ def judge_sibling(path, cwd, root):
     parents.add(os.path.dirname(root))
     for full in {given, os.path.realpath(given)}:
         for parent in parents | {os.path.realpath(p) for p in parents}:
-            if full.startswith(parent + os.sep):
+            if under(full, parent):
                 first = os.path.relpath(full, parent).split(os.sep)[0]
-                if first not in own and os.path.exists(os.path.join(parent, first, ".git")):
+                if os.path.normcase(first) not in {os.path.normcase(name) for name in own} \
+                        and os.path.exists(os.path.join(parent, first, ".git")):
                     raise Refuse(path + " is inside the " + first + " repository; this one never writes to another")
 
 
@@ -254,7 +273,10 @@ def scan(cmd, i=0, bracketed=False):
 def named(word, fold=True):
     """True when a word holds a protected folder name as a path segment (in any case, unless `fold` is false)."""
     # A word with a space in it may be a sentence, so only its slashes divide it.
-    dividers = r"/" if re.search(r"\s", word) else r"[/:={},]"
+    if re.search(r"\s", word):
+        dividers = SLASH
+    else:
+        dividers = r"[/\\:={},]" if os.name == "nt" else r"[/:={},]"
     return any((part.lower() if fold else part) in PROTECTED for part in re.split(dividers, word))
 
 
@@ -266,7 +288,7 @@ def reaches(word, cwd):
         return False
     import fnmatch
     import glob
-    parts = word.split("/")
+    parts = native(word).split("/")
     for i, part in enumerate(parts):
         for name in PROTECTED:
             if GLOB.search(part) and fnmatch.fnmatch(name, part.lower()):
@@ -344,7 +366,7 @@ def removing(what, args, state, fed, feed, globs=True):
     # /System/Volumes/Data), and never a web address: the evidence is weaker than a removal's own words.
     for word in state.get("words", ()):
         for text in expand(word, state["vars"]):
-            if "/" in text and "://" not in text and (named(text, fold=False) or GLOB.search(text) and reaches(text, state["cwd"])):
+            if "/" in native(text) and "://" not in text and (named(text, fold=False) or GLOB.search(text) and reaches(text, state["cwd"])):
                 raise Refuse(what + " takes a path that is not written out, and the line names " + word)
     for args, folders, line in state.get("finds", ()):
         for start in find_starts(args):
@@ -378,7 +400,7 @@ def change_folder(args, state):
     if "$" in target or target == "-" or len(reached) > 1:
         state["cwd"] = None
         return
-    target = os.path.expanduser(target)
+    target = native(os.path.expanduser(target))
     if os.path.isabs(target) and not named(target):
         state["inside"] = False
     if os.path.isabs(target) or state["cwd"] is not None:
@@ -492,7 +514,7 @@ def too_wide(what, targets, state, leaves_out=None, root_ok=False):
     import glob
     for target in targets:
         for text in expand(target, state["vars"], strict=True):
-            path = os.path.expanduser(text)
+            path = native(os.path.expanduser(text))
             if state["cwd"] is not None:
                 path = re.sub(r"\$\{?PWD\}?(?![\w])", lambda found: state["cwd"], path)
             if "$" in path or (state["cwd"] is None and not os.path.isabs(path)):
@@ -726,7 +748,7 @@ def moved(folders, args):
     """The folders a line may be in after a cd: those it may have been in (a cd can fail, sit in a subshell or a
     branch not taken) and each moved to the cd's target; None when a target cannot be followed."""
     targets = [arg for arg in args if arg == "-" or not arg.startswith("-") and not REDIRECT.fullmatch(arg)]
-    target = os.path.expanduser(targets[0]) if targets else os.path.expanduser("~")
+    target = native(os.path.expanduser(targets[0])) if targets else os.path.expanduser("~")
     if folders is None or "$" in target or target.startswith(("-", "~")):
         return None
     more = folders + [os.path.normpath(os.path.join(folder, target)) for folder in folders]
@@ -767,6 +789,7 @@ def line_parts(cmd, depth, folders):
 
 
 def judge_bash(cmd, cwd, bases):
+    cwd = native(cwd)
     try:
         inside = any(protected_under(os.path.join(full, "x"), bases) for full in {cwd, os.path.realpath(cwd)})
         tally = {"placed": 0, "void": False}
@@ -789,7 +812,7 @@ def judge_bash(cmd, cwd, bases):
 
 def verdict(call, root, repos=(), siblings_read_only=False):
     """Why a tool call (the hook's JSON, parsed) is refused, or None. No `repos`: the root is the repository."""
-    root = os.path.abspath(root)
+    root = os.path.abspath(native(root))
     homes = [os.path.join(root, repo) for repo in repos] or [root]
     bases = sorted(set(homes) | {os.path.realpath(home) for home in homes})
     try:
