@@ -3,12 +3,41 @@
 # (--quick, which --hook answers with): only the test files for what changed since its last run that was not red.
 
 ALL_GATES="pytest"
+# Named only, never in all, --changed or --quick: the release needs it, and a machine without torch must not go red.
+NAMED_GATES="torch"
 
 gate_cmd() {
+  local py
   case "$1" in
     pytest) echo "$VENV/python -m pytest -q -p no:cacheprovider" ;;
+    torch)
+      # Without torch the suite skips the torch tests, so a missing interpreter is a FAIL, never a SKIP.
+      if py=$(torch_python); then
+        printf 'KHAOS_TORCH_RUN=1 %q -m pytest -q -p no:cacheprovider\n' "$py"
+      elif [ -n "$KHAOS_TORCH_PYTHON" ]; then
+        echo "echo 'KHAOS_TORCH_PYTHON names no interpreter with torch and pytest'; exit 1"
+      else
+        echo "echo 'no interpreter with torch and pytest in the checkout venv or on PATH; set KHAOS_TORCH_PYTHON to one'; exit 1"
+      fi ;;
     *) return 1 ;;
   esac
+}
+
+has_torch() {
+  [ -x "$1" ] && "$1" -c 'import importlib.util as u, sys; sys.exit(not (u.find_spec("torch") and u.find_spec("pytest")))' 2> /dev/null
+}
+
+# KHAOS_TORCH_PYTHON when set, else the first of this checkout's venv, python3 and python on PATH that has torch.
+torch_python() {
+  local py
+  if [ -n "$KHAOS_TORCH_PYTHON" ]; then
+    has_torch "$KHAOS_TORCH_PYTHON" && echo "$KHAOS_TORCH_PYTHON"
+    return
+  fi
+  for py in "$VENV/python" "$(command -v python3)" "$(command -v python)"; do
+    [ -n "$py" ] && has_torch "$py" && { echo "$py"; return 0; }
+  done
+  return 1
 }
 
 # Changed paths on stdin, the gates they need on stdout.
@@ -44,7 +73,7 @@ QUICK_PYTEST="$VENV/python -m pytest -q -p no:cacheprovider"
 
 usage() {
   echo "usage: scripts/gate.sh [all | <gate>... | --changed | --quick | --hook] [--budget SECONDS]"
-  echo "gates: $ALL_GATES"
+  echo "gates: $ALL_GATES; by name only: $NAMED_GATES"
 }
 
 changed_paths() {

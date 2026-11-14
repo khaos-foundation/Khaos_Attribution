@@ -1,5 +1,6 @@
 """Every test runs with the weights mirror unreachable and no public log witness, so no test reaches the network.
 A test that does not run to a verdict, skipped or expected to fail, fails the run unless its reason is named here."""
+import os
 import re
 
 import pytest
@@ -8,6 +9,10 @@ from khaos_attribution.engines.worker_process import LINUX_ONLY, POSIX_ONLY
 
 # Packages only a room's or an engine's environment holds: a test that cannot import one of these, by this name, may skip.
 ALLOWED_MISSING = ("torch", "torchaudio", "librosa", "huggingface_hub", "huggingface_hub.constants")
+# The torch gate's run (scripts/gate.sh torch) uses a room's venv: torch must be there, the register's own packages
+# need not be, since the pytest gate runs their tests on this checkout's venv.
+if os.environ.get("KHAOS_TORCH_RUN"):
+    ALLOWED_MISSING = tuple(m for m in ALLOWED_MISSING if m != "torch") + ("opentimestamps",)
 # Every other reason, word for word: a tool or a file a machine may lack, and the tests of another platform.
 ALLOWED_REASONS = ("torchaudio aligner not installed", "ffmpeg unavailable", "FFmpeg is not installed", "no ffmpeg",
                    "the base model's config is not in this machine's cache", POSIX_ONLY, LINUX_ONLY)

@@ -1,4 +1,5 @@
 """A skip the suite does not expect fails the run: a test that silently stops running is a guarantee nobody checks."""
+import os
 import shutil
 import subprocess
 import sys
@@ -9,11 +10,18 @@ import pytest
 CONFTEST = Path(__file__).with_name("conftest.py")
 
 
-def _run(tmp_path, body: str) -> subprocess.CompletedProcess:
+def _run(tmp_path, body: str, torch_run: bool = False) -> subprocess.CompletedProcess:
     shutil.copy(CONFTEST, tmp_path / "conftest.py")
     (tmp_path / "test_it.py").write_text("import pytest\n" + body, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "KHAOS_TORCH_RUN"}
+    if torch_run:
+        env["KHAOS_TORCH_RUN"] = "1"
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
-                          capture_output=True, text=True, cwd=tmp_path)
+                          capture_output=True, text=True, cwd=tmp_path, env=env)
+
+
+def _missing(name: str) -> str:
+    return f"def test_x():\n    pytest.skip(\"could not import '{name}': No module named '{name}'\")\n"
 
 
 def test_a_skip_for_a_missing_register_package_fails_the_run(tmp_path):
@@ -50,6 +58,21 @@ def test_a_reason_must_be_one_the_suite_names_exactly_and_an_expected_failure_is
     done = _run(tmp_path, body)
     assert done.returncode == 1, done.stdout
     assert "unexpected skip" in done.stdout and said in done.stdout
+
+
+def test_the_torch_run_fails_when_torch_is_missing(tmp_path):
+    """The torch gate's run exists to run the torch tests: a skip for torch there is a red run."""
+    assert _run(tmp_path, _missing("torch")).returncode == 0
+    done = _run(tmp_path, _missing("torch"), torch_run=True)
+    assert done.returncode == 1 and "unexpected skip" in done.stdout, done.stdout
+
+
+def test_the_torch_run_lets_only_the_register_machines_packages_be_missing(tmp_path):
+    """A room's venv, which has torch, lacks the register's own packages; the strict pytest gate runs those tests."""
+    assert _run(tmp_path, _missing("opentimestamps")).returncode == 1
+    assert _run(tmp_path, _missing("opentimestamps"), torch_run=True).returncode == 0
+    done = _run(tmp_path, _missing("a_package_the_register_needs"), torch_run=True)
+    assert done.returncode == 1 and "a_package_the_register_needs" in done.stdout, done.stdout
 
 
 def test_every_skip_reason_the_suite_uses_on_another_platform_is_named(tmp_path):
