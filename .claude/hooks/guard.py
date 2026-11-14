@@ -14,7 +14,10 @@ REMOVERS = ("rm", "rmdir", "unlink", "shred", "truncate", "grm", "grmdir", "gunl
 FINDERS = ("find", "gfind")
 SHELLS = ("bash", "sh", "zsh", "dash", "ksh")
 WRAPPERS = ("sudo", "env", "command", "exec", "nice", "nohup", "time", "timeout", "caffeinate", "xargs")
-KNOWN = REMOVERS + FINDERS + SHELLS + WRAPPERS + ("rsync", "git", "eval", "ssh")
+KNOWN = REMOVERS + FINDERS + SHELLS + WRAPPERS + ("rsync", "git", "eval", "trap", "ssh")
+# Commands whose words are only text, or are only read, copied or moved: what they are handed is never judged.
+HARMLESS = ("echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "ls", "gh", "head", "tail", "wc", "diff",
+            "cp", "mv", "mkdir", "test", "[", "[[")
 KEYWORDS = ("if", "then", "elif", "else", "do", "while", "until", "!", "{", "export", "local", "declare", "readonly")
 GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env")
 RSYNC_VALUE_OPTIONS = ("--exclude", "--include", "--filter", "-f", "-e", "--rsh", "--files-from", "--exclude-from",
@@ -32,9 +35,13 @@ INTERPRETER = r"(?:python[\d.]*|perl|ruby|node|osascript)"
 INTERPRETER_WORD = re.compile(r"(?<![\w.-])" + INTERPRETER + r"(?![\w.-])")
 # Code cannot be read as shell: a call that removes, and a protected folder written as a file path (not a URL).
 CODE_REMOVE = re.compile(r"rmtree|removedirs|os\.(?:remove|unlink|rmdir)|\.(?:unlink|rmdir)\(|(?:rm|unlink|rmdir)Sync"
-                         r"|[\"']rm[\"']|(?<![\w.])rm\s+-|(?<![\w.])unlink\b")
+                         r"|[\"']rm[\"']|(?<![\w.-])rm\s+-|(?<![\w.])unlink\b")
 CODE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?<!api/)(?<!operator/)(?:data|artists|outputs)/")
+CODE_REMOVE_NAMED = re.compile(r"(?:rmtree|removedirs|remove|unlink|rmdir|rmSync|unlinkSync|rmdirSync)\(\s*[rfb]?[\"']"
+                               r"[^\"']*(?<![A-Za-z0-9_])(?:data|artists|outputs)[\"']")
 CRUDE_VERB = re.compile(r"(?<![A-Za-z0-9_])(?:rm|remove|unlink|shred|truncate)|-delete|--del")
+# In the words of a command the guard does not model, a removing word is not an option (--rm) or part of a path.
+HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![\w-])-delete|--del")
 CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)/")
 
 
@@ -132,7 +139,7 @@ def double_quoted(text, i, nested):
 
 
 def code_removes(code):
-    return bool(CODE_REMOVE.search(code) and CODE_PATH.search(code))
+    return bool(CODE_REMOVE.search(code) and CODE_PATH.search(code) or CODE_REMOVE_NAMED.search(code))
 
 
 def heredoc_bodies(cmd, i, pending, nested):
@@ -278,14 +285,23 @@ def removing(what, args, state, fed, feed, globs=True):
 
 
 def change_folder(args, state):
-    target = expand(args[-1], state["vars"])[0] if args else "~"
+    """Follow a cd: its target is its first word that is neither an option nor a redirect."""
+    targets, skip = [], False
+    for arg in args:
+        redirect = REDIRECT.fullmatch(arg)
+        if redirect or skip:
+            skip = bool(redirect) and not redirect.group(1)
+        elif arg == "-" or not arg.startswith("-"):
+            targets.append(arg)
+    target = expand(targets[0], state["vars"])[0] if targets else "~"
+    # A protected name in the target counts even where the rest of it cannot be followed.
+    if named(target):
+        state["inside"] = True
     if "$" in target or target == "-":
         state["cwd"] = None
         return
     target = os.path.expanduser(target)
-    if named(target):
-        state["inside"] = True
-    elif os.path.isabs(target):
+    if os.path.isabs(target) and not named(target):
         state["inside"] = False
     if os.path.isabs(target) or state["cwd"] is not None:
         state["cwd"] = os.path.normpath(os.path.join(state["cwd"] or "/", target))
@@ -374,15 +390,13 @@ def command(words, state, fed, feed, depth):
     elif name in WRAPPERS:
         if name == "command" and args[:1] in (["-v"], ["-V"]):
             return
-        # A wrapper's own options are not modelled: its command is the first later word the guard knows.
-        for i, arg in enumerate(args):
-            if os.path.basename(arg) in KNOWN:
-                command(args[i:], state, fed or name == "xargs", feed, depth)
-                return
+        wrapped(args, state, fed or name == "xargs", feed, depth)
     elif name in SHELLS:
         shell(args, state, fed, feed, depth)
     elif name == "eval":
         judge(" ".join(args), state, depth + 1, fed, feed)
+    elif name == "trap":
+        judge(" ".join([arg for arg in args if not arg.startswith("-")][:1]), dict(state), depth + 1)
     elif name == "ssh":
         judge(remote_command(args), dict(state, cwd=None, inside=False), depth + 1)
     elif re.fullmatch(INTERPRETER, name):
@@ -401,8 +415,24 @@ def command(words, state, fed, feed, depth):
                 end = min([run.index(stop) for stop in (";", "+") if stop in run] or [len(run)])
                 # The command find runs is fed its paths by find.
                 command(run[:end], state, True, find_targets(args[:i]), depth)
-    elif name == "rsync" and any(arg.startswith("--del") for arg in args):
-        removing("rsync --delete", positional(args, RSYNC_VALUE_OPTIONS), state, fed, feed)
+    elif name == "rsync":
+        if any(arg.startswith("--del") for arg in args):
+            removing("rsync --delete", positional(args, RSYNC_VALUE_OPTIONS), state, fed, feed)
+    elif name not in HARMLESS:
+        # A command the guard does not model may run what it is handed: the crude rule for its own words.
+        handed = " ".join(cmd)
+        if CRUDE_PATH.search(handed) and (HANDED_VERB.search(handed) or CODE_REMOVE.search(handed)):
+            raise Refuse(name + " is not a command the guard reads, and its words hold a removing command and a "
+                         "data/, artists/ or outputs/ path")
+        wrapped(args, state, fed, feed, depth)
+
+
+def wrapped(args, state, fed, feed, depth):
+    """Judge what a wrapper runs. Its own options are not modelled: its command is its first word the guard knows."""
+    for i, arg in enumerate(args):
+        if os.path.basename(arg) in KNOWN or re.fullmatch(INTERPRETER, os.path.basename(arg)):
+            command(args[i:], state, fed, feed, depth)
+            return
 
 
 def judge(cmd, state, depth, fed=False, feed=()):
