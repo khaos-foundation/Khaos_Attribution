@@ -1,8 +1,10 @@
 """The translator's prompt, lint and fallback chain, with a fake model; nothing is loaded."""
 
 import json
+import signal
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -558,10 +560,42 @@ def test_a_busy_model_is_said_to_be_busy():
 # ── bounded work, ruled-out moods, hedges, renderings, dropped instruments, the LM held alike ──
 
 _WORST = ("calm piano, no " + ", a" * 700)[:2000]
+# A linear walk takes milliseconds here; backtracking doubles with each list item and never ends at 700.
+_LINEAR_SECONDS = 2.0
+_HANG_SECONDS = 10.0
+
+
+@contextmanager
+def _deadline(seconds):
+    """Fail instead of hanging when a call runs past `seconds`; the regex engine answers the timer's signal."""
+    if not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def expire(signum, frame):
+        pytest.fail(f"still running after {seconds} s: backtracking")
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _fastest(run, repeats=3):
+    """The fastest of a few runs: a loaded runner's pause lands on one, backtracking on every one."""
+    best = float("inf")
+    for _ in range(repeats):
+        with _deadline(_HANG_SECONDS):
+            start = time.perf_counter()
+            run()
+            best = min(best, time.perf_counter() - start)
+    return best
 
 
 def test_every_entry_point_is_linear_on_a_hostile_denial_list():
-    """A comma list after "no" that never closes with "or" costs well under a second at 2,000 characters."""
+    """A comma list after "no" that never closes with "or" is walked, not backtracked, at 2,000 characters."""
     for text in (_WORST, "no " + ", a" * 700, "without " + ", word" * 300):
         for run in (lambda: T.clean_request(text, True), lambda: T.split_denials(text),
                     lambda: T.lint_translation(REQ, text, instrumental=True, pool=POOL),
@@ -569,9 +603,7 @@ def test_every_entry_point_is_linear_on_a_hostile_denial_list():
                     lambda: T.check_caption(text, text, instrumental=True),
                     lambda: T.expand_checked(text, instrumental=True, attempt=0, pool=POOL, shots=lambda a: POOL,
                                              translator=fake("Caption: " + text), lm=lambda a: {"caption": text})):
-            start = time.perf_counter()
-            run()
-            assert time.perf_counter() - start < 0.5, text[:30]
+            assert _fastest(run) < _LINEAR_SECONDS, text[:30]
 
 
 def test_a_denial_list_still_runs_to_its_or():

@@ -104,14 +104,52 @@ owed_tests() {
   [ -s "$OWED" ] && while IFS= read -r t; do [ -f "$t" ] && printf '%s\n' "$t"; done < "$OWED"
 }
 
-# Runs them in one pytest call: only their own green run takes them off the list.
+# Runs test files with $QUICK_PYTEST, one pytest process per top-level test folder: in one process a module name is
+# imported once, so two folders' modules of the same name (a conftest.py, a helper imported by name) collide. Each
+# red folder's FAILED and ERROR lines come again at the end, then the folders' counts summed; the exit is the worst
+# folder's (5, nothing collected, only when every folder has none). Output is held in variables: no temp file to leak.
+pytest_by_folder() {
+  local folder files out one worst=0 ran=0 counts="" failures=""
+  for folder in $(printf '%s\n' "$@" | awk -F/ '{ print (NF > 2 ? $1 "/" $2 : $1) }' | awk '!seen[$0]++'); do
+    files=$(printf '%s\n' "$@" | awk -F/ -v f="$folder" '(NF > 2 ? $1 "/" $2 : $1) == f' | tr '\n' ' ')
+    out=$(bash -c "$QUICK_PYTEST $files" 2>&1)
+    one=$?
+    printf '%s\n' "$out"
+    counts="$counts$(printf '%s\n' "$out" | grep -E '[0-9]+ (passed|failed|errors?|skipped)' | tail -1)
+"
+    case "$one" in
+      0) ran=1 ;;
+      5) ;;
+      *)
+        worst=$one
+        failures="$failures$folder (exit $one)
+$(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) ' | head -20)
+"
+        ;;
+    esac
+  done
+  [ -n "$failures" ] && printf 'red folders:\n%s' "$failures"
+  printf '%s passed, %s failed, %s skipped, %s errors (one pytest per folder)\n' \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ passed' | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ failed' | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ skipped' | awk '{ n += $1 } END { print n + 0 }')" \
+    "$(printf '%s' "$counts" | grep -oE '[0-9]+ errors?' | awk '{ n += $1 } END { print n + 0 }')"
+  [ "$worst" -ne 0 ] && return "$worst"
+  [ "$ran" -eq 1 ] && return 0
+  return 5
+}
+export -f pytest_by_folder
+export QUICK_PYTEST
+
+# Runs them, a pytest per folder: only their own green run takes them off the list.
 run_owed() {
   local tests log rc start
   tests=$(owed_tests | tr '\n' ' ')
   echo "== owed: $QUICK_PYTEST $tests"
   log=$(mktemp)
   start=$(date +%s)
-  bash -c "$QUICK_PYTEST $tests" > "$log" 2>&1
+  # shellcheck disable=SC2086
+  pytest_by_folder $tests > "$log" 2>&1
   rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; then
     echo "PASS owed ($(( $(date +%s) - start ))s): $(grep -E '[0-9]+ passed' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')"
@@ -250,7 +288,7 @@ case "$MODE" in
     [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
     log=$(mktemp)
     start=$(date +%s)
-    with_timeout "$secs" bash -c "$QUICK_PYTEST $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
+    with_timeout "$secs" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
     rc=$?
     took=$(( $(date +%s) - start ))
     summary=$(grep -E '[0-9]+ (passed|failed)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
