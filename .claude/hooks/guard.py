@@ -17,7 +17,9 @@ WRAPPERS = ("sudo", "env", "command", "exec", "nice", "nohup", "time", "timeout"
 KNOWN = REMOVERS + FINDERS + SHELLS + WRAPPERS + ("rsync", "git", "eval", "trap", "ssh")
 # Commands whose words are only text, or are only read, copied or moved: what they are handed is never judged.
 HARMLESS = ("echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "ls", "gh", "head", "tail", "wc", "diff",
-            "cp", "mv", "mkdir", "test", "[", "[[")
+            "sort", "uniq", "cut", "tr", "cp", "mv", "mkdir", "test", "[", "[[")
+# Commands that never run what a pipe hands them, though their own words may not be harmless.
+READERS = HARMLESS + ("git", "awk", "tee", "jq")
 KEYWORDS = ("if", "then", "elif", "else", "do", "while", "until", "!", "{", "export", "local", "declare", "readonly")
 GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env")
 RSYNC_VALUE_OPTIONS = ("--exclude", "--include", "--filter", "-f", "-e", "--rsh", "--files-from", "--exclude-from",
@@ -43,6 +45,10 @@ CRUDE_VERB = re.compile(r"(?<![A-Za-z0-9_])(?:rm|remove|unlink|shred|truncate)|-
 # In the words of a command the guard does not model, a removing word is not an option (--rm) or part of a path.
 HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![\w-])-delete|--del")
 CRUDE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?:data|artists|outputs)/")
+# The removing word of the floor rule: a line that holds one the guard cannot place, and a protected path, is refused.
+REMOVING_WORD = re.compile(r"(?<![A-Za-z0-9_-])rm(?:dir|tree|Sync|dirSync)?(?![A-Za-z0-9_])")
+# Where a loop or a group ends: what it printed may be piped on from there.
+CLOSERS = ("done", "fi", "esac", "}")
 
 
 class Refuse(Exception):
@@ -116,8 +122,9 @@ def substitution(text, i, nested):
         nested.append(text[i + 1:j].replace("\\`", "`"))
         return j + 1
     if text.startswith("$(", i):
-        j = scan(text, i + 2, True)[2]
-        nested.append(text[i + 2:j])
+        _, inside, j = scan(text, i + 2, True)
+        # $(( )) is arithmetic, not a command: only the substitutions inside it are commands.
+        nested.extend(inside if text.startswith("$((", i) else [text[i + 2:j]])
         return j + 1
     return None
 
@@ -142,9 +149,14 @@ def code_removes(code):
     return bool(CODE_REMOVE.search(code) and CODE_PATH.search(code) or CODE_REMOVE_NAMED.search(code))
 
 
-def heredoc_bodies(cmd, i, pending, nested):
-    """Skip the heredoc bodies starting at cmd[i]. A body that is only text is not read; one that is run is."""
-    for delimiter, strip_tabs, quoted, pipeline in pending:
+def occurrences(text):
+    return len(REMOVING_WORD.findall(text))
+
+
+def heredoc_bodies(cmd, i, pending, nested, pieces):
+    """Skip the heredoc bodies starting at cmd[i]. One that is run is queued; one that is only text is not read,
+    and the removing words in it are counted for the command it is handed to."""
+    for delimiter, strip_tabs, quoted, pipeline, owner in pending:
         line, body, ended = cmd[pipeline:i], [], False
         while i < len(cmd) and not ended:
             j = cmd.find("\n", i)
@@ -157,17 +169,21 @@ def heredoc_bodies(cmd, i, pending, nested):
         # A body with no end may not be a heredoc at all (a << inside arithmetic), so it is read as commands too.
         if SHELL_WORD.search(line) or not ended:
             nested.append(body)
-        elif INTERPRETER_WORD.search(line) and code_removes(body):
-            raise Refuse("the code in the heredoc holds a removing call and a data/, artists/ or outputs/ path")
-        elif not quoted:
-            double_quoted('"' + body.replace('"', " ") + '"', 0, nested)
+        elif INTERPRETER_WORD.search(line):
+            if code_removes(body):
+                raise Refuse("the code in the heredoc holds a removing call and a data/, artists/ or outputs/ path")
+        elif quoted:
+            pieces[owner][3] += occurrences(body)
+        else:
+            pieces[owner][3] += occurrences(double_quoted('"' + body.replace('"', " ") + '"', 0, nested)[0])
     return min(i, len(cmd))
 
 
 def scan(cmd, i=0, bracketed=False):
-    """Split a command line into simple commands, each with whether a pipe feeds it; also the command lines
-    nested in it, and where it ended. With `bracketed`, the line is the inside of a $( ) and ends at its bracket."""
-    pieces, nested, buf, pending, pipeline, depth, piped = [], [], [], [], i, 0, False
+    """Split a command line into simple commands: [text, a pipe feeds it, removing words in its comments, and in the
+    heredoc text it is handed]; also the command lines nested in it, and where it ended. With `bracketed`, the line
+    is the inside of a $( ) and ends at its bracket."""
+    pieces, nested, buf, pending, pipeline, depth, piped, comments = [], [], [], [], i, 0, False, 0
     while i < len(cmd):
         c, after = cmd[i], cmd[i + 1:i + 2]
         last = buf[-1][-1] if buf else " "
@@ -190,13 +206,15 @@ def scan(cmd, i=0, bracketed=False):
             i += 1
         elif c == "#" and last.isspace():
             j = cmd.find("\n", i)
-            i = len(cmd) if j < 0 else j
+            j = len(cmd) if j < 0 else j
+            comments += occurrences(cmd[i:j])
+            i = j
         elif cmd.startswith("<<", i) and cmd[i + 2:i + 3] != "<" and last != "<":
             found = HEREDOC.match(cmd, i)
             if not found:
                 raise ValueError("heredoc without a delimiter")
             word = re.sub(r"[\\'\"]", "", found.group(2))
-            pending.append((word, bool(found.group(1)), word != found.group(2), pipeline))
+            pending.append((word, bool(found.group(1)), word != found.group(2), pipeline, len(pieces)))
             buf.append(" ")
             i = found.end()
         elif c == "&" and (after == ">" or last in "<>"):
@@ -206,15 +224,15 @@ def scan(cmd, i=0, bracketed=False):
             buf.append(c)
             i += 1
         elif c in ";&|()\n":
-            pieces.append(("".join(buf), piped))
+            pieces.append(["".join(buf), piped, comments, 0])
             if c == ")" and bracketed and depth == 0:
                 return pieces, nested, i
             depth += (c == "(") - (c == ")")
             operator = cmd[i:i + 2] if cmd[i:i + 2] in ("&&", "||", "|&", ";;") else c
-            buf, piped = [], operator in ("|", "|&")
+            buf, piped, comments = [], operator in ("|", "|&"), 0
             i += len(operator)
             if c == "\n" and pending:
-                i = heredoc_bodies(cmd, i, pending, nested)
+                i = heredoc_bodies(cmd, i, pending, nested, pieces)
                 pending = []
             if not piped:
                 pipeline = i
@@ -224,7 +242,7 @@ def scan(cmd, i=0, bracketed=False):
             i = i + 1 if k is None else k
     if bracketed:
         raise ValueError("no closing bracket")
-    return pieces + [("".join(buf), piped)], nested, i
+    return pieces + [["".join(buf), piped, comments, 0]], nested, i
 
 
 def named(word):
@@ -293,11 +311,12 @@ def change_folder(args, state):
             skip = bool(redirect) and not redirect.group(1)
         elif arg == "-" or not arg.startswith("-"):
             targets.append(arg)
-    target = expand(targets[0], state["vars"])[0] if targets else "~"
-    # A protected name in the target counts even where the rest of it cannot be followed.
-    if named(target):
+    reached = expand(targets[0], state["vars"]) if targets else ["~"]
+    target = reached[0]
+    # A protected name counts in any value the target may take, even where the rest of it cannot be followed.
+    if any(named(text) for text in reached):
         state["inside"] = True
-    if "$" in target or target == "-":
+    if "$" in target or target == "-" or len(reached) > 1:
         state["cwd"] = None
         return
     target = os.path.expanduser(target)
@@ -363,8 +382,8 @@ def shell(args, state, fed, feed, depth):
                 judge(word, dict(state), depth + 1)
 
 
-def command(words, state, fed, feed, depth):
-    """Judge one simple command, given as its words; `feed` is the words of the commands piped into it."""
+def bare(words, variables=None):
+    """A simple command without its leading redirects, keywords and assignments; the assignments are recorded."""
     cmd = list(words)
     while cmd:
         redirect = REDIRECT.fullmatch(cmd[0])
@@ -373,24 +392,80 @@ def command(words, state, fed, feed, depth):
         elif cmd[0] == "function":
             cmd = cmd[2:]
         elif ASSIGNMENT.match(cmd[0]):
-            name, value = cmd[0].split("=", 1)
-            state["vars"][name.rstrip("+")] = expand(value, state["vars"])
+            if variables is not None:
+                name, value = cmd[0].split("=", 1)
+                variables[name.rstrip("+")] = expand(value, variables)
             cmd = cmd[1:]
         elif cmd[0] in KEYWORDS:
             cmd = cmd[1:]
         else:
             break
+    return cmd
+
+
+def recognised(args):
+    """Index of the first word a wrapper's command can be: one the guard parses or takes as harmless. Else None."""
+    for i, arg in enumerate(args):
+        if os.path.basename(arg) in KNOWN + HARMLESS or re.fullmatch(INTERPRETER, os.path.basename(arg)):
+            return i
+    return None
+
+
+def only_text(words):
+    """True when a command never runs what a pipe hands it."""
+    cmd = bare(words)
+    if cmd and os.path.basename(cmd[0]) in WRAPPERS:
+        i = recognised(cmd[1:])
+        return i is not None and only_text(cmd[1 + i:])
+    return not cmd or os.path.basename(cmd[0]) in READERS
+
+
+def unmodelled(name, words, state, fed, feed, depth, quiet):
+    """A command the guard does not model may run what it is handed: the crude rule for its own words, then its
+    first word the guard knows is judged as its command. Its own options are not modelled."""
+    handed = " ".join(words)
+    if CRUDE_PATH.search(handed) and (HANDED_VERB.search(handed) or CODE_REMOVE.search(handed)):
+        raise Refuse(name + " is not a command the guard reads, and its words hold a removing command and a "
+                     "data/, artists/ or outputs/ path")
+    i = recognised(words[1:])
+    if i is not None:
+        command(words[1 + i:], state, fed, feed, depth, quiet)
+
+
+def command(words, state, fed, feed, depth, quiet=True, bodies=0):
+    """Judge one simple command, given as its words; `feed` is the words of the commands piped into it. The removing
+    words it cannot run are placed: its own when it only reads them, and with `quiet` (nothing downstream runs
+    what it prints) the ones in the text it is handed (`bodies`)."""
+    cmd, tally = bare(words, state["vars"]), state["tally"]
     if not cmd:
         return
-    name, args = os.path.basename(cmd[0]), cmd[1:]
-    if name == "for" and args[1:2] == ["in"]:
+    name, args, own = os.path.basename(cmd[0]), cmd[1:], occurrences(" ".join(cmd))
+    if "$" in name:
+        # A command held in a variable: each value the line gives it is judged as the command line it makes. One
+        # the guard cannot follow may be anything, text printed on this line included, so nothing said is placed.
+        runs = [text for text in expand(cmd[0], state["vars"]) if text != cmd[0]]
+        for text in runs:
+            aside = dict(state, tally={"placed": 0, "void": False})
+            judge(" ".join([text] + [shlex.quote(arg) for arg in args]), aside, depth + 1, fed, feed)
+            tally["void"] = tally["void"] or aside["tally"]["void"]
+        if not runs or any("$" in os.path.basename((text.split() or ["$"])[0]) for text in runs):
+            tally["void"] = True
+        unmodelled(name, cmd, state, fed, feed, depth, quiet)
+    elif name == "for" and args[1:2] == ["in"]:
         state["vars"][args[0]] = [text for word in args[2:] for text in expand(word, state["vars"])][:64]
+        tally["placed"] += own
     elif name in ("cd", "pushd"):
         change_folder(args, state)
+        tally["placed"] += own
     elif name in WRAPPERS:
+        i = recognised(args)
         if name == "command" and args[:1] in (["-v"], ["-V"]):
-            return
-        wrapped(args, state, fed or name == "xargs", feed, depth)
+            tally["placed"] += own
+        elif i is None:
+            unmodelled(name, cmd, state, fed, feed, depth, quiet)
+        else:
+            tally["placed"] += occurrences(" ".join(cmd[:1 + i]))
+            command(args[i:], state, fed or name == "xargs", feed, depth, quiet, bodies)
     elif name in SHELLS:
         shell(args, state, fed, feed, depth)
     elif name == "eval":
@@ -400,12 +475,16 @@ def command(words, state, fed, feed, depth):
     elif name == "ssh":
         judge(remote_command(args), dict(state, cwd=None, inside=False), depth + 1)
     elif re.fullmatch(INTERPRETER, name):
-        if any(code_removes(arg) for arg in args):
+        # With no script named, the interpreter reads its code from the pipe.
+        code = args + (list(feed) if all(arg.startswith("-") for arg in args) else [])
+        if any(code_removes(text) for text in code):
             raise Refuse("the code given to " + name + " holds a removing call and a data/, artists/ or outputs/ path")
     elif name == "git":
         git(args, state, fed, feed)
+        tally["placed"] += own + bodies
     elif name in REMOVERS:
         removing(name, args, state, fed, feed)
+        tally["placed"] += own
     elif name in FINDERS:
         if "-delete" in args:
             removing("find -delete", find_targets(args), state, fed, feed, globs=False)
@@ -413,26 +492,18 @@ def command(words, state, fed, feed, depth):
             if arg in ("-exec", "-execdir", "-ok", "-okdir"):
                 run = args[i + 1:]
                 end = min([run.index(stop) for stop in (";", "+") if stop in run] or [len(run)])
-                # The command find runs is fed its paths by find.
+                # The command find runs is fed its paths by find, and places its own words.
+                own -= occurrences(" ".join(run[:end]))
                 command(run[:end], state, True, find_targets(args[:i]), depth)
+        tally["placed"] += own
     elif name == "rsync":
         if any(arg.startswith("--del") for arg in args):
             removing("rsync --delete", positional(args, RSYNC_VALUE_OPTIONS), state, fed, feed)
+        tally["placed"] += own
     elif name not in HARMLESS:
-        # A command the guard does not model may run what it is handed: the crude rule for its own words.
-        handed = " ".join(cmd)
-        if CRUDE_PATH.search(handed) and (HANDED_VERB.search(handed) or CODE_REMOVE.search(handed)):
-            raise Refuse(name + " is not a command the guard reads, and its words hold a removing command and a "
-                         "data/, artists/ or outputs/ path")
-        wrapped(args, state, fed, feed, depth)
-
-
-def wrapped(args, state, fed, feed, depth):
-    """Judge what a wrapper runs. Its own options are not modelled: its command is its first word the guard knows."""
-    for i, arg in enumerate(args):
-        if os.path.basename(arg) in KNOWN or re.fullmatch(INTERPRETER, os.path.basename(arg)):
-            command(args[i:], state, fed, feed, depth)
-            return
+        unmodelled(name, cmd, state, fed, feed, depth, quiet)
+    elif quiet:
+        tally["placed"] += own + bodies
 
 
 def judge(cmd, state, depth, fed=False, feed=()):
@@ -440,12 +511,21 @@ def judge(cmd, state, depth, fed=False, feed=()):
     if depth > 8:
         raise Refuse("the command is nested too deep to read")
     pieces, nested, _ = scan(cmd)
+    lines = [(shlex.split(text), piped, comments, bodies) for text, piped, comments, bodies in pieces]
+    for i, (words, piped, _, _) in enumerate(lines):
+        # What a loop or a group printed is piped into something that may run it: nothing said in it is placed.
+        if piped and not only_text(words) and (not lines[i - 1][0] or lines[i - 1][0][0] in CLOSERS):
+            state["tally"]["void"] = True
     upstream = list(feed)
-    for text, piped in pieces:
+    for i, (words, piped, comments, bodies) in enumerate(lines):
         if not piped:
             upstream = list(feed)
-        words = shlex.split(text)
-        command(words, state, fed, upstream, depth)
+        state["tally"]["placed"] += comments
+        rest = i + 1
+        while rest < len(lines) and lines[rest][1] and only_text(lines[rest][0]):
+            rest += 1
+        quiet = rest == len(lines) or not lines[rest][1]
+        command(words, state, fed, upstream, depth, quiet, bodies)
         upstream += words
     for inner in nested:
         judge(inner, dict(state), depth + 1)
@@ -454,7 +534,12 @@ def judge(cmd, state, depth, fed=False, feed=()):
 def judge_bash(cmd, cwd, bases):
     try:
         inside = any(protected_under(os.path.join(full, "x"), bases) for full in {cwd, os.path.realpath(cwd)})
-        judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd}, 0)
+        tally = {"placed": 0, "void": False}
+        judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd, "tally": tally}, 0)
+        # The floor: a removing word the guard could not place, on a line that holds a protected path.
+        if CODE_PATH.search(cmd) and occurrences(cmd) > (0 if tally["void"] else tally["placed"]):
+            raise Refuse("the line holds a removing word the guard cannot place, and a data/, artists/ or outputs/ "
+                         "path")
     except RecursionError:
         raise Refuse("the command is nested too deep to read")
     except Refuse as refusal:
