@@ -60,13 +60,21 @@ a.stage-tr:hover { background: var(--field); }
 .stage-td { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stage-td.wrap { white-space: normal; overflow-wrap: anywhere; }
 .stage-td.muted, .muted { color: var(--muted); }
-.stage-td.num { color: var(--muted); font-weight: var(--fw-strong); }
+.stage-td.num { color: transparent; -webkit-text-stroke: 1px var(--text); font-size: var(--fs-lead); font-weight: var(--fw-medium);
+  letter-spacing: -.02em; }   /* the register's numbers in outline, as the rooms number their takes */
+.stage-title.artist-name { font-size: clamp(48px, 9vw, 120px); line-height: .86; letter-spacing: -.05em; padding-bottom: .08em; }
 .stage-kv-label { font-size: var(--fs-note); color: var(--muted); }
 .mono { font-size: var(--fs-note); color: var(--muted); overflow-wrap: anywhere; }   /* ids in the text face, tabular */
 .stage-chip { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--field);
   font-size: var(--fs-note); font-weight: var(--fw-medium); color: var(--muted); white-space: nowrap; }
 .stage-chip.good { color: var(--text); }
 .stage-chip.failed { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, var(--panel)); }
+/* Stamps, as in the rooms: a status is struck, not printed. Square, a double rule in its own colour, no fill, a degree
+   off true; the text keeps its own case. */
+.stage-chip { border: 3px double currentColor; border-radius: 0; background: none; font-weight: var(--fw-black);
+  letter-spacing: .02em; transform: rotate(-1deg); }
+.stage-chip:nth-child(even) { transform: rotate(1deg); }
+.stage-chip.failed { background: none; }
 .empty { padding: 24px; background: var(--panel); border-radius: var(--radius); color: var(--muted); font-size: var(--fs-ui); }
 .foot { margin-top: 48px; padding: 18px 20px; background: var(--panel); border-radius: var(--radius); color: var(--muted);
   font-size: var(--fs-note); display: flex; gap: 18px; flex-wrap: wrap; }
@@ -158,12 +166,13 @@ def sitemap_xml(base: str, models: list, home: bool = True) -> str:
             + "".join(urls) + "</urlset>\n")
 
 
-def hero(eyebrow: str, title: str, para: str, facts: list, seal_svg: str = "") -> str:
+def hero(eyebrow: str, title: str, para: str, facts: list, seal_svg: str = "", *, artist: bool = False) -> str:
+    """The page header; `artist` sets the title as an artist's name, at the display size the rooms give it."""
     seal = f'<div class="stage-hero-seal">{seal_svg}</div>' if seal_svg else ""
     facts_html = " · ".join(facts)
     brow = f'<div class="stage-eyebrow">{esc(eyebrow)}</div>' if eyebrow else ""
     return (f'<header class="stage-hero">{seal}<div class="stage-hero-grid"><div class="stage-hero-text">'
-            f'{brow}<h1 class="stage-title">{esc(title)}</h1>'
+            f'{brow}<h1 class="stage-title{" artist-name" if artist else ""}">{esc(title)}</h1>'
             f'<p class="stage-para">{esc(para)}</p><div class="stage-facts">{facts_html}</div></div></div></header>')
 
 

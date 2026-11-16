@@ -670,7 +670,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if unresolved:
             note = ("Under review: an entry after this model's admission was lost when the register was recovered, and the wardens "
                     "have not yet answered it. Until they confirm it or strike it, whether it was struck is unknown. ") + note
-        body = P.hero(f"Register No. {serial}", r["artist_name"], note, facts, P.seal_for(serial, rec["signed"]["record"]))
+        body = P.hero(f"Register No. {serial}", r["artist_name"], note, facts, P.seal_for(serial, rec["signed"]["record"]), artist=True)
         engine_id = f" <span class=\"mono\">{P.esc(m['base_model_id'])}</span>" if m.get("base_model_id") else ""
         kv = [("Base model", f"{P.esc(m['base_model'])}{engine_id} <span class=\"muted\">· {P.esc(m['base_model_licence'])} licence</span>"),
               ("Adapter", f'<span class="mono">{P.esc(m["adapter_sha256"])}</span>'),
