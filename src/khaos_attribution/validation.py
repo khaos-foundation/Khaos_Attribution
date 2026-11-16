@@ -175,6 +175,9 @@ def validate_attribution_estimate(record):
     """
     _validate(record, "attribution_estimate.schema.json", "attribution estimate")
     if (record.get("method") or {}).get("kind") == "group_removal":
+        ids = [g["group_id"] for g in record["groups"]]
+        if len(ids) != len(set(ids)):
+            raise AttributionValidationError("Invalid attribution estimate: a group appears twice")
         group_total = sum(g["share_pct"] for g in record["groups"])
         if abs(group_total - 100.0) > _SHARE_TOLERANCE:
             raise AttributionValidationError(

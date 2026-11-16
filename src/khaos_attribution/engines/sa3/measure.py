@@ -309,8 +309,16 @@ def output_losses(api: Any, clips_dir, adapters: dict, *, seed: int, n_buckets: 
                   checkpoint_root=None) -> dict:
     """``{name: mean loss}`` of the clips under ``clips_dir`` (one piece) scored under each named adapter, by the
     held-out worker its trainer uses, at one noise seed so every adapter sees the same draws."""
+    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
     from khaos_attribution.engines.sa3 import train as T  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    contract_guard.require(api.python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=GradientUnavailable)
     timesteps = T.bucket_timesteps(n_buckets or T.DEFAULT_BUCKETS)
-    return {name: float(T.heldout_summary(api, clips_dir, weights, seed=seed, timesteps=timesteps,
-                                          checkpoint_root=checkpoint_root)["mean"])
-            for name, weights in adapters.items()}
+    out = {}
+    for name, weights in adapters.items():
+        try:
+            out[name] = float(T.heldout_summary(api, clips_dir, weights, seed=seed, timesteps=timesteps,
+                                                checkpoint_root=checkpoint_root)["mean"])
+        except (RuntimeError, ValueError) as exc:
+            raise GradientUnavailable(str(exc)) from exc
+    return out

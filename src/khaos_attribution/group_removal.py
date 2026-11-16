@@ -107,15 +107,41 @@ def read_record(record: Mapping) -> list[list[str]]:
     if record.get("schema") != SCHEMA:
         raise RecordRefused(f"schema {record.get('schema')!r}, not {SCHEMA}")
     groups_by_id = record.get("groups") or {}
-    ids = sorted(groups_by_id, key=lambda i: int(str(i)[1:]))
-    if not ids or ids != group_ids(ids):
+    ids = [f"g{i + 1}" for i in range(len(groups_by_id))]
+    if not ids or sorted(groups_by_id) != sorted(ids):
         raise RecordRefused("the record's groups are not g1..gN")
     groups = [list(groups_by_id[i]) for i in ids]
+    tracks = [t for g in groups for t in g]
+    if not all(groups) or len(tracks) != len(set(tracks)):
+        raise RecordRefused("the record's groups are empty or share a track")
     if partition_sha256(groups) != record.get("partition_sha256"):
         raise RecordRefused("the record's partition hash is not its groups'")
     if sorted(record.get("adapters_sha256") or {}) != ids:
         raise RecordRefused("the record does not pin one adapter per group")
     return groups
+
+
+def adapter_refusal(record: Mapping, weights_sha256: Mapping[str, str]) -> str | None:
+    """Why the adapter files at hand are not the ones the record pins (``{group id: sha256 of its weights}``)."""
+    pinned = record.get("adapters_sha256") or {}
+    for gid in group_ids(read_record(record)):
+        if weights_sha256.get(gid) != pinned.get(gid):
+            return f"group adapter {gid} is not the one its record pins"
+    return None
+
+
+def split(record: Mapping, losses: Mapping[str, float], rights_by_track: Mapping[str, Mapping],
+          training_share: Mapping[str, float] | None = None) -> dict:
+    """A piece's split from its losses keyed ``served`` and by the record's group ids; groups come from the record,
+    never re-derived from the rights, so a renamed writer cannot move money between groups."""
+    groups = read_record(record)
+    ids = group_ids(groups)
+    missing = [k for k in ("served", *ids) if k not in losses]
+    if missing:
+        raise RecordRefused(f"no loss for {', '.join(missing)}")
+    shares = group_shares(losses["served"], [losses[i] for i in ids])
+    return {"groups": [{"group_id": i, "track_ids": g, "share": s} for i, g, s in zip(ids, groups, shares, strict=True)],
+            "money": money(shares, groups, rights_by_track, training_share)}
 
 
 def stale_because(record: Mapping, *, served_sha256: str, rights_by_track: Mapping[str, Mapping]) -> str | None:

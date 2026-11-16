@@ -316,7 +316,12 @@
       "else": {
         "required": [
           "influence"
-        ]
+        ],
+        "not": {
+          "required": [
+            "groups"
+          ]
+        }
       }
     }
   ]
