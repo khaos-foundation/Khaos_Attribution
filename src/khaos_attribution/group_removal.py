@@ -116,7 +116,7 @@ def read_record(record: Mapping) -> list[list[str]]:
         raise RecordRefused("the record's groups are empty or share a track")
     if partition_sha256(groups) != record.get("partition_sha256"):
         raise RecordRefused("the record's partition hash is not its groups'")
-    if sorted(record.get("adapters_sha256") or {}) != ids:
+    if sorted(record.get("adapters_sha256") or {}) != sorted(ids):
         raise RecordRefused("the record does not pin one adapter per group")
     return groups
 

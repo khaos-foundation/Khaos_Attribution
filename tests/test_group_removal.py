@@ -198,10 +198,12 @@ def test_group_rows_belong_to_group_removal_alone_and_once_each():
     """Another kind may not carry group rows; a group id twice is refused."""
     doc = _estimate(schema_version="1.1.0")
     doc["method"] = {**doc["method"], "kind": "dtrak"}
-    doc["influence"] = [{"track_id": "a", "exposure_share_pct": 100.0, "blended_share_pct": 100.0,
-                         "influence_share_pct": 100.0, "share_range_pct": [100.0, 100.0]}]
+    doc["influence"] = [{"track_id": "a", "exposure_share_pct": 100.0, "similarity_share_pct": None,
+                         "blended_share_pct": 100.0, "influence_share_pct": 100.0, "share_range_pct": [100.0, 100.0]}]
     with pytest.raises(AttributionValidationError):
         validate_attribution_estimate(doc)
+    doc.pop("groups")
+    validate_attribution_estimate(doc)
     twice = _estimate(groups=[{"group_id": "g1", "track_ids": ["a"], "share_pct": 50.0},
                               {"group_id": "g1", "track_ids": ["d"], "share_pct": 50.0}])
     with pytest.raises(AttributionValidationError, match="twice"):
@@ -228,3 +230,13 @@ def test_scoring_refuses_an_engine_environment_on_another_contract(monkeypatch):
     monkeypatch.setattr(T, "heldout_summary", boom)
     with pytest.raises(GradientUnavailable, match="oom"):
         M.output_losses(api, "clips", {"full": "f"}, seed=42)
+
+
+def test_a_record_of_ten_or_more_groups_reads_back():
+    """Group ids sort as text (g1, g10, g2), so the pins are compared as sets, not in order."""
+    groups = [[f"t{i:02d}"] for i in range(12)]
+    rec = _record(groups)
+    assert G.read_record(rec) == groups
+    out = G.split(rec, {"served": 1.0, **{f"g{i + 1}": 1.0 + (0.1 if i == 9 else 0.0) for i in range(12)}},
+                  {t: _r(("W" + t, 100)) for g in groups for t in g})
+    assert [g["share"] for g in out["groups"]][9] == pytest.approx(1.0)
