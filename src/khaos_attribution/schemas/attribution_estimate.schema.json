@@ -10,7 +10,8 @@
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
       "enum": [
         "1.0.0",
-        "1.1.0"
+        "1.1.0",
+        "1.2.0"
       ]
     },
     "generation_id": {
@@ -68,9 +69,10 @@
           "type": "string",
           "enum": [
             "clap_blend",
-            "dtrak"
+            "dtrak",
+            "group_removal"
           ],
-          "description": "clap_blend: exposure prior corrected by CLAP resemblance (the default). dtrak: measured influence from the D-TRAK kernel over the adapter's gradient index; then blended_share_pct is the influence share and similarity_informative describes the resemblance block, if any."
+          "description": "clap_blend: exposure prior corrected by CLAP resemblance (the default). dtrak: measured influence from the D-TRAK kernel over the adapter's gradient index; then blended_share_pct is the influence share and similarity_informative describes the resemblance block, if any. group_removal: the piece's loss under the served adapter and under one adapter per writer split pattern trained without that pattern's tracks; its rows are groups, and influence is not required."
         }
       },
       "required": [
@@ -195,6 +197,48 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9.-]*@[a-z0-9][a-z0-9._-]*$",
       "description": "The base model the measured index belongs to, <engine>@<variant>."
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 1,
+      "description": "group_removal only: each writer split group's share of the piece, in percent, summing to 100.",
+      "items": {
+        "type": "object",
+        "required": [
+          "group_id",
+          "track_ids",
+          "share_pct"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "pattern": "^g[1-9][0-9]*$"
+          },
+          "track_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "titles": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "share_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      }
     }
   },
   "required": [
@@ -204,7 +248,6 @@
     "adapter_version",
     "created_at",
     "method",
-    "influence",
     "splits",
     "caveats"
   ],
@@ -240,5 +283,46 @@
       ],
       "additionalProperties": false
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "properties": {
+              "kind": {
+                "const": "group_removal"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "required": [
+          "groups"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "1.2.0"
+          }
+        }
+      },
+      "else": {
+        "required": [
+          "influence"
+        ],
+        "not": {
+          "required": [
+            "groups"
+          ]
+        }
+      }
+    }
+  ]
 }

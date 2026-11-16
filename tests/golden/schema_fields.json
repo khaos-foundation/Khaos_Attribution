@@ -36,6 +36,48 @@
     "splits.writers"
    ],
    "version": "1.1.0"
+  },
+  {
+   "fields": [
+    "#party_split.name",
+    "#party_split.share_pct",
+    "#party_split.share_range_pct",
+    "adapter_version",
+    "artist_id",
+    "base_model_id",
+    "caveats",
+    "created_at",
+    "generation_id",
+    "groups",
+    "groups[].group_id",
+    "groups[].share_pct",
+    "groups[].titles",
+    "groups[].track_ids",
+    "influence",
+    "influence[].blended_share_pct",
+    "influence[].exposure_share_pct",
+    "influence[].influence_share_pct",
+    "influence[].share_range_pct",
+    "influence[].similarity_share_pct",
+    "influence[].title",
+    "influence[].track_id",
+    "method",
+    "method.embedding_model",
+    "method.embedding_version",
+    "method.estimator_version",
+    "method.exposure_basis",
+    "method.kind",
+    "method.similarity_informative",
+    "method.temperature",
+    "resemblance",
+    "schema_version",
+    "splits",
+    "splits.masters",
+    "splits.publishers",
+    "splits.unattributed_pct",
+    "splits.writers"
+   ],
+   "version": "1.2.0"
   }
  ],
  "model_card": [

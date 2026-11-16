@@ -11,7 +11,7 @@ SYSTEM_RESERVE_GB = 6.0
 LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
 
 __all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
-           "index_rows", "latent_stats", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb",
+           "index_rows", "latent_stats", "memory_plan", "output_feature", "output_loss", "output_losses", "paired_loss", "parameter_count", "scorer_need_gb",
            "tid_factors", "tid_invert", "tid_kernels"]
 
 
@@ -301,3 +301,24 @@ def tid_kernels(handle: Handle, train_files, query_files, query_groups, *, grid,
                            factors_dir=str(Path(factors_dir).resolve()), out=str(Path(out).resolve()),
                            train_chunk=int(train_chunk), keep_layer_kernels=bool(keep_layer_kernels), resume=bool(resume))
     return _tid_dtype(handle, _ask(handle, request, on_progress=on_row))
+
+
+# ── group removal: one piece's loss under several adapters ───────────────────────────────────────────────────────
+
+def output_losses(api: Any, clips_dir, adapters: dict, *, seed: int, n_buckets: int | None = None,
+                  checkpoint_root=None) -> dict:
+    """``{name: mean loss}`` of the clips under ``clips_dir`` (one piece) scored under each named adapter, by the
+    held-out worker its trainer uses, at one noise seed so every adapter sees the same draws."""
+    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
+    from khaos_attribution.engines.sa3 import train as T  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    contract_guard.require(api.python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=GradientUnavailable)
+    timesteps = T.bucket_timesteps(n_buckets or T.DEFAULT_BUCKETS)
+    out = {}
+    for name, weights in adapters.items():
+        try:
+            out[name] = float(T.heldout_summary(api, clips_dir, weights, seed=seed, timesteps=timesteps,
+                                                checkpoint_root=checkpoint_root)["mean"])
+        except (RuntimeError, ValueError) as exc:
+            raise GradientUnavailable(str(exc)) from exc
+    return out
