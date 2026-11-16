@@ -1,6 +1,7 @@
 """The verifier: origin is confirmed only by an index match, a signature only says the record is intact, a
 watermark alone is never proof, and a negative is never proof a person made it."""
 
+import hashlib
 import json
 import math
 import shutil
@@ -122,6 +123,7 @@ def test_only_an_index_match_confirms_origin(tmp_path, register, detector):
     assert r["verdict"] == "confirmed" and r["register"]["model"]["artist_name"] == "Art"
     path, key, body = _Register.seen[-1]
     assert path == "/api/verify" and key == "press-key" and body["watermark_id"] == 59368 and body["phases"]
+    assert body["sha256"] == hashlib.sha256((tmp_path / "plain.wav").read_bytes()).hexdigest()
     _Register.answer = {"grade": "bucket", "payload": 1}
     assert V.verify_file(_wav(tmp_path / "plain.wav"), register_url=register)["verdict"] == "marked"
 

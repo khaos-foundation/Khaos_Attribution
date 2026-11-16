@@ -6,6 +6,7 @@ landmark hashes, never audio.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -36,8 +37,18 @@ CREATE TABLE IF NOT EXISTS claim_shares (claim_id INTEGER NOT NULL, other_claim 
 MAX_LANDMARKS = 200_000
 MAX_PHASES = 8
 # Columns a first-version index file gains in place.
-_ADDED = (("outputs", "withdrawn", "INTEGER NOT NULL DEFAULT 0"), ("outputs", "removed_at", "TEXT"))
+_ADDED = (("outputs", "withdrawn", "INTEGER NOT NULL DEFAULT 0"), ("outputs", "removed_at", "TEXT"), ("outputs", "sha256", "TEXT"))
 CANDIDATES = 50
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def sha256_of(value) -> str | None:
+    """A file's sha256 as the index keeps it: 64 lowercase hex, or None for none. ValueError for anything else."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise ValueError("sha256 is 64 lowercase hex characters")
+    return value
 
 
 class Index:
@@ -64,18 +75,21 @@ class Index:
         return conn
 
     def release(self, generation_id: str, serial: int, payload: int, artist_id: str, fingerprint: list,
-                released_by: str, kind: str) -> dict:
-        """One released output under its model's bucket; the same id again is the first release, unchanged."""
+                released_by: str, kind: str, sha256: str | None = None) -> dict:
+        """One released output under its model's bucket, with its file's sha256 when sent (it breaks a near-copy tie
+        and is never answered); the same id again is the first release, unchanged."""
         rows = [(h, generation_id, o) for h, o in _landmarks(fingerprint)]
+        sha256 = sha256_of(sha256)
         with self._lock:
-            have = self.db.execute("SELECT * FROM outputs WHERE generation_id = ?", (generation_id,)).fetchone()
+            have = self.output(generation_id)
             if have:
-                return {**dict(have), "already": True}
+                return {**have, "already": True}
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 at = now_utc()
-                self.db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks)"
-                                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (generation_id, serial, payload, artist_id, at, released_by, kind, len(rows)))
+                self.db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks, sha256)"
+                                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (generation_id, serial, payload, artist_id, at, released_by, kind, len(rows), sha256))
                 self.db.executemany("INSERT INTO fingerprints (hash, generation_id, offset_ms) VALUES (?, ?, ?)", rows)
                 self.db.execute("COMMIT")
             except BaseException:
@@ -124,8 +138,20 @@ class Index:
         return bool(row) and not row["withdrawn"] and row["removed_at"] is None
 
     def output(self, generation_id: str) -> dict | None:
+        """A released piece as any answer may show it: never its file's hash, which an asker could otherwise repeat."""
         row = self.db.execute("SELECT * FROM outputs WHERE generation_id = ?", (generation_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        out = dict(row)
+        out.pop("sha256", None)
+        return out
+
+    def _by_bytes(self, generation_ids: list, sha256: str) -> str | None:
+        """The one candidate released with this file hash, or None when none or several were."""
+        marks = ",".join("?" * len(generation_ids))
+        found = [r["generation_id"] for r in self.db.execute(
+            f"SELECT generation_id FROM outputs WHERE sha256 = ? AND generation_id IN ({marks})", [sha256, *generation_ids])]
+        return found[0] if len(found) == 1 else None
 
     def count(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM outputs").fetchone()[0])
@@ -161,8 +187,9 @@ class Index:
             db.execute("COMMIT")
         return rows
 
-    def verify(self, phases: list, payload: int | None) -> dict:
-        """The three grades: a named output; a watermark alone narrowing to a bucket; nothing."""
+    def verify(self, phases: list, payload: int | None, sha256: str | None = None) -> dict:
+        """The three grades: a named output; a watermark alone narrowing to a bucket; nothing. Among near-copies that
+        deny each other dominance, the one released with the query file's sha256 is named."""
         query_len = len(phases[0]) if phases else 0
         scored = []
         for g, fps in self._candidates(phases, payload).items():
@@ -172,9 +199,22 @@ class Index:
         if scored:
             votes, distinct, offset_runner, g = scored[0]
             runner = scored[1][0] if len(scored) > 1 else 0
-            if is_confident(votes, query_len, distinct, offset_runner) and dominant(votes, runner):
+            near_copies = 0
+            if is_confident(votes, query_len, distinct, offset_runner) and not dominant(votes, runner):
+                contenders = [s for s in scored if 2 * s[0] > votes]
+                picked = self._by_bytes([s[3] for s in contenders], sha256) if sha256 else None
+                if picked is None:
+                    g = None
+                else:
+                    votes, g = next((s[0], s[3]) for s in contenders if s[3] == picked)
+                    runner = max(s[0] for s in contenders if s[3] != picked)
+                    near_copies = len(contenders) - 1
+            elif not is_confident(votes, query_len, distinct, offset_runner):
+                g = None
+            if g is not None:
                 out = self.output(g) or {}
-                return {"grade": "output", "output": out, "votes": votes, "runner_up": runner, "searched": "bucket" if payload is not None else "all"}
+                return {"grade": "output", "output": out, "votes": votes, "runner_up": runner, "near_copies": near_copies,
+                        "searched": "bucket" if payload is not None else "all"}
         if payload is not None:
             return {"grade": "bucket", "payload": payload, "searched": "bucket"}
         return {"grade": "none", "searched": "all"}

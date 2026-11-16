@@ -237,3 +237,105 @@ def test_a_claim_sent_as_phases_alone_stores_the_first_phase_and_a_twelve_minute
     assert app.state.index.db.execute("SELECT landmarks FROM claims").fetchone()[0] == len(_fp(audio, sr))
     per_second = len(R.canonical_bytes({"phases": _ph(audio, sr)})) / 20.0
     assert per_second * 720 * 2 < CLAIM_MAX_BODY, "denser music than this test piece still fits a twelve-minute track"
+
+
+def _near_copies(tmp_path, a_sha, b_sha, shared=120):
+    """An index holding gen-a and gen-b of one model, near-copies sharing `shared` of a's 200 landmarks."""
+    from register_service.index import Index
+    ix = Index(tmp_path / "i.sqlite3")
+    a = [[1000 + i, 100 * i] for i in range(200)]
+    b = a[:shared] + [[5000 + i, 100 * i] for i in range(shared, 200)]
+    ix.release("gen-a", 7, 1, "artist", a, "k", "space", sha256=a_sha)
+    ix.release("gen-b", 7, 1, "artist", b, "k", "space", sha256=b_sha)
+    return ix, [a]
+
+
+def test_near_copies_are_told_apart_by_the_file_hash_they_were_released_with(tmp_path):
+    """Two releases too alike for dominance: the query's file hash names its own piece, with a count of the other."""
+    ix, phases = _near_copies(tmp_path, "a" * 64, "b" * 64)
+    answer = ix.verify(phases, None, "a" * 64)
+    assert answer["grade"] == "output" and answer["output"]["generation_id"] == "gen-a" and answer["near_copies"] == 1
+    trailing = ix.verify(phases, None, "b" * 64)
+    assert trailing["output"]["generation_id"] == "gen-b" and trailing["votes"] == 120 and trailing["runner_up"] == 200
+    assert "sha256" not in answer["output"] and "sha256" not in ix.output("gen-a")
+
+
+def test_near_copies_stay_unnamed_without_a_unique_hash(tmp_path):
+    """No hash, a hash of neither, releases without hashes, or two releases with one hash: refused as before."""
+    ix, phases = _near_copies(tmp_path, "a" * 64, "b" * 64)
+    assert ix.verify(phases, None)["grade"] == "none"
+    assert ix.verify(phases, None, "c" * 64)["grade"] == "none"
+    ix, phases = _near_copies(tmp_path / "unhashed", None, None)
+    assert ix.verify(phases, None, "a" * 64)["grade"] == "none"
+    ix, phases = _near_copies(tmp_path / "same", "a" * 64, "a" * 64)
+    assert ix.verify(phases, None, "a" * 64)["grade"] == "none"
+    assert ix.verify(phases, 1, "a" * 64) == {"grade": "bucket", "payload": 1, "searched": "bucket"}
+
+
+def test_a_dominant_match_is_unchanged_by_a_hash(tmp_path):
+    """When the winner doubles the runner-up the hash is not read and the answer is today's."""
+    ix, phases = _near_copies(tmp_path, "a" * 64, "b" * 64, shared=40)
+    answer = ix.verify(phases, None, "b" * 64)
+    assert answer["output"]["generation_id"] == "gen-a" and answer["near_copies"] == 0
+
+
+def test_a_release_hash_is_64_lowercase_hex(tmp_path):
+    """A malformed hash is refused at release, never stored."""
+    from register_service.index import Index
+    ix = Index(tmp_path / "i.sqlite3")
+    for bad in ("A" * 64, "a" * 63, 7):
+        with pytest.raises(ValueError, match="sha256"):
+            ix.release("gen-x", 7, 1, "artist", [[1, 0]], "k", "space", sha256=bad)
+    assert ix.output("gen-x") is None
+
+
+def test_the_register_names_the_near_copy_whose_file_was_released_and_never_answers_a_hash(register):
+    """Through the client: two near-copy pieces one sample apart, each file's hash names its own release."""
+    import hashlib
+    _, _, http = register
+    key, client = _machine(register, "artist-one")
+    serial = client.publish(_signed(key))["serial"]
+    audio, sr = _music(1)
+    twin = audio.copy()
+    twin[-1] += 1e-4
+    files = {}
+    for gid, a in (("gen-a", audio), ("gen-b", twin)):
+        files[gid] = hashlib.sha256(a.tobytes()).hexdigest()
+        client.release(gid, serial, fingerprint_array(a, sr), sha256=files[gid])
+    phases = query_phases(audio, sr)
+    assert client.verify(phases, None)["grade"] == "none"
+    for gid, sha in files.items():
+        answer = client.verify(phases, None, sha256=sha)
+        assert answer["grade"] == "output" and answer["output"]["generation_id"] == gid and answer["near_copies"] == 1
+        assert sha not in json.dumps(answer)
+    r = http.post("/api/verify", json={"phases": phases, "sha256": "not-a-hash"})
+    assert r.status_code == 422 and "sha256" in r.text
+
+
+def test_an_index_file_from_before_the_hash_gains_its_column_in_place(tmp_path):
+    """An index written before release hashes opens with the column added, its pieces kept and unhashed."""
+    import sqlite3
+    from register_service.index import Index
+    path = tmp_path / "i.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE outputs (generation_id TEXT PRIMARY KEY, serial INTEGER NOT NULL, payload INTEGER NOT NULL,"
+               " artist_id TEXT NOT NULL, released_at TEXT NOT NULL, released_by TEXT NOT NULL, kind TEXT NOT NULL,"
+               " landmarks INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, removed_at TEXT)")
+    db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks)"
+               " VALUES ('old', 7, 1, 'artist', 'then', 'k', 'space', 1)")
+    db.commit()
+    db.close()
+    ix = Index(path)
+    assert ix.output("old")["generation_id"] == "old"
+    assert ix.db.execute("SELECT sha256 FROM outputs WHERE generation_id = 'old'").fetchone()[0] is None
+    ix.release("new", 7, 1, "artist", [[1, 0]], "k", "space", sha256="a" * 64)
+    assert ix.db.execute("SELECT sha256 FROM outputs WHERE generation_id = 'new'").fetchone()[0] == "a" * 64
+
+
+def test_a_malformed_hash_at_release_is_dropped_and_the_release_stands(register):
+    """A bad hash from a machine costs the piece its tie-break, never its place in the index."""
+    key, client = _machine(register, "artist-one")
+    serial = client.publish(_signed(key))["serial"]
+    audio, sr = _music(1)
+    assert client.release("gen-x", serial, fingerprint_array(audio, sr), sha256="NOT-HEX")["already"] is False
+    assert client.verify(query_phases(audio, sr), None)["output"]["generation_id"] == "gen-x"

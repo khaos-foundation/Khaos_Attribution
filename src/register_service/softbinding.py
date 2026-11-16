@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import shutil
 import subprocess
@@ -116,9 +117,9 @@ def _max_results(n: int | None) -> int:
 def add_routes(app: FastAPI, index, public_url: str) -> None:
     endpoint = public_url.rstrip("/") + PREFIX
 
-    def matches(phases: list, payload: int | None, max_results: int) -> dict:
+    def matches(phases: list, payload: int | None, max_results: int, sha256: str | None = None) -> dict:
         """The released piece the fingerprint names, when its manifest is held; never a guess."""
-        answer = index.verify(phases, payload)
+        answer = index.verify(phases, payload, sha256)
         if answer["grade"] != "output" or max_results < 1:
             return {"matches": []}
         gid = answer["output"]["generation_id"]
@@ -182,7 +183,7 @@ def add_routes(app: FastAPI, index, public_url: str) -> None:
                 path.write_bytes(raw)
                 audio, sr = decode(path)
                 phases = query_phases(audio, sr)
-            return matches(phases, payload, n)
+            return matches(phases, payload, n, hashlib.sha256(raw).hexdigest())
 
         return await run_in_threadpool(work)
 

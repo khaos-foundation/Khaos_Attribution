@@ -174,3 +174,23 @@ def test_a_query_is_bounded_in_phases_and_landmarks(register, tmp_path):
     assert http.post("/api/verify", json={"phases": too_many}).status_code == 422
     value = base64.b64encode(json.dumps(too_many).encode()).decode()
     assert http.post(f"{SB.PREFIX}/matches/byBinding", json={"alg": SB.FINGERPRINT_ALG, "value": value}).status_code == 400
+
+
+def test_a_content_lookup_names_the_near_copy_whose_file_was_released(register, tmp_path):
+    """The lookup hashes the uploaded file: of two near-copy pieces, the one released with those bytes is offered."""
+    import hashlib
+    _, _, http = register
+    key, client = _machine(register, "artist-one")
+    serial = client.publish(_signed(key))["serial"]
+    audio, sr = _music(1)
+    twin = audio.copy()
+    twin[-1] += 1e-3
+    files = {}
+    for gid, a in (("gen-a", audio), ("gen-b", twin)):
+        (tmp_path / gid).mkdir()
+        files[gid] = _wav_bytes(a, sr)
+        client.release(gid, serial, fingerprint_array(a, sr), manifest=_signed_wav(tmp_path / gid, a, sr),
+                       sha256=hashlib.sha256(files[gid]).hexdigest())
+    for gid, data in files.items():
+        got = http.post(f"{SB.PREFIX}/matches/byContent", content=data, headers={"Content-Type": "audio/wav"}).json()
+        assert [m["manifestId"] for m in got["matches"]] == [gid]
