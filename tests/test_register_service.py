@@ -501,4 +501,7 @@ def test_the_register_pages_wear_the_record_sleeve_canon():
         rest = rest.replace(rule, "")
     for banned in ("radial-gradient", "box-shadow", "text-transform", "letter-spacing: .1", "border-bottom: 1px", "border-top: 1px", "ui-monospace"):
         assert banned not in rest, banned
+    assert "border: 3px double currentColor" in css and "transform: rotate(-1deg)" in css, "a status is a stamp"
+    assert ".stage-title.artist-name {" in css and 'class="stage-title artist-name"' in P.hero("No. 1", "Bingo", "p", [], artist=True)
+    assert "-webkit-text-stroke: 1px var(--text)" in css, "the register's numbers in outline"
     assert P.hero("", "T", "p", []).count("stage-eyebrow") == 0 and "stage-eyebrow" in P.hero("Register No. 1", "T", "p", [])
