@@ -24,7 +24,7 @@ from khaos_attribution import registry as R
 from khaos_attribution import translog as T
 from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
-from register_service.index import Index, phases_of
+from register_service.index import Index, phases_of, sha256_of
 from register_service.store import Store, now_utc
 from register_service.translog import EntryRefused, LogBlocked, export as export_log, export_lock, write_whole
 
@@ -462,7 +462,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             manifest = manifest_bytes(body.get("manifest"))    # a bad one is not kept; the release still stands
             try:
                 out = index.release(gid, rec["serial"], int(rec["signed"]["record"]["model"]["watermark_payload"]),
-                                    rec["signed"]["record"]["artist_id"], body.get("fingerprint"), key_id, machine["role"])
+                                    rec["signed"]["record"]["artist_id"], body.get("fingerprint"), key_id, machine["role"],
+                                    sha256=_sha256_or_none(body.get("sha256")))
             except ValueError as e:
                 raise HTTPException(422, str(e)) from None
             kept = manifest is not None and index.keep_manifest(gid, manifest, key_id)
@@ -499,6 +500,13 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         except (binascii.Error, ValueError):
             return None
         return data if len(data) <= MANIFEST_MAX_BYTES and data[4:8] == b"jumb" else None
+
+    def _sha256_or_none(value) -> str | None:
+        """A release's file hash, or None for a malformed one: the release still stands, like a bad manifest."""
+        try:
+            return sha256_of(value)
+        except ValueError:
+            return None
 
     def workshop_only(machine: dict) -> None:
         if machine["role"] != "workshop":
@@ -584,7 +592,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if decoded is None:
                 raise HTTPException(422, "watermark_id is not a codeword")
             payload = decoded[0]
-        answer = await run_in_threadpool(index.verify, phases, payload)
+        try:
+            sha256 = sha256_of(body.get("sha256"))
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        answer = await run_in_threadpool(index.verify, phases, payload, sha256)
         if answer["grade"] == "output":
             rec = store.record(int(answer["output"]["serial"]))
             answer["model"] = _model_summary(rec) if rec else None

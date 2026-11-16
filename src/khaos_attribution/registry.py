@@ -444,11 +444,13 @@ class RegisterClient:
         return self._post("/api/withdraw", {"serial": serial, "reason": reason, "nonce": nonce or secrets.token_hex(8)})
 
     def release(self, generation_id: str, serial: int, fingerprint: list, nonce: str | None = None,
-                manifest: bytes | str | None = None) -> dict:
+                manifest: bytes | str | None = None, sha256: str | None = None) -> dict:
         """A released output's fingerprint into the index under its model's bucket, with its Content Credentials
-        manifest store when the file carries one, so a stripped copy can be led back to it."""
+        manifest store when the file carries one, so a stripped copy can be led back to it, and its file's sha256."""
         body = {"generation_id": generation_id, "serial": serial, "fingerprint": fingerprint,
                 "nonce": nonce or secrets.token_hex(8)}
+        if sha256:
+            body["sha256"] = sha256
         if manifest:
             # An outbox entry already holds it as base64 text.
             body["manifest"] = manifest if isinstance(manifest, str) else base64.b64encode(manifest).decode()
@@ -474,9 +476,12 @@ class RegisterClient:
         released output it is, if any."""
         return self._post("/api/claims/check", {"phases": phases, "nonce": secrets.token_hex(8)})
 
-    def verify(self, phases: list, watermark_id: int | None = None) -> dict:
-        """Anyone's question: the four-phase fingerprint and the codeword when it read. No key."""
-        return self._post_public("/api/verify", {"phases": phases, "watermark_id": watermark_id})
+    def verify(self, phases: list, watermark_id: int | None = None, sha256: str | None = None) -> dict:
+        """Anyone's question: the four-phase fingerprint, the codeword when it read, and the file's sha256. No key."""
+        body = {"phases": phases, "watermark_id": watermark_id}
+        if sha256:
+            body["sha256"] = sha256
+        return self._post_public("/api/verify", body)
 
     def _post_public(self, path: str, body: dict) -> dict:
         import urllib.error  # noqa: PLC0415

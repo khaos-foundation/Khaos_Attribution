@@ -9,6 +9,7 @@ made the audio.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -126,13 +127,17 @@ def _watermark(audio, sample_rate: int) -> dict:
             "payload": decoded[0] if decoded else None}
 
 
-def ask_register(url: str, audio, sample_rate: int, codeword: int | None, *, key: str | None = None) -> dict:
+def ask_register(url: str, audio, sample_rate: int, codeword: int | None, *, key: str | None = None,
+                 sha256: str | None = None) -> dict:
     """The Register's fingerprint index asked; an answer it could not give is an error in the answer."""
     from khaos_attribution.fingerprint import query_phases  # noqa: PLC0415
     phases = query_phases(audio, sample_rate)
     if not any(phases):
         return {"grade": None, "url": url, "error": "too short or too quiet to fingerprint"}
-    body = json.dumps({"phases": [[list(p) for p in ph] for ph in phases], "watermark_id": codeword}).encode()
+    query = {"phases": [[list(p) for p in ph] for ph in phases], "watermark_id": codeword}
+    if sha256:
+        query["sha256"] = sha256
+    body = json.dumps(query).encode()
     headers = {"Content-Type": "application/json"}
     if key:
         headers["X-Khaos-Verify-Key"] = key
@@ -189,6 +194,14 @@ def message(kind: str, credentials: dict) -> str:
     return text
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def verify_file(path: Path | str, *, register_url: str | None = None, register_key: str | None = None,
                 watermark: bool = True) -> dict:
     """Every check this machine can make on one file, and the verdict they support."""
@@ -198,8 +211,8 @@ def verify_file(path: Path | str, *, register_url: str | None = None, register_k
     creds = read_credentials(path)
     audio, sample_rate = load_audio(path, max_seconds=MAX_VERIFY_SECONDS)
     mark = _watermark(audio, sample_rate) if watermark else {"checked": False, "reason": "not asked"}
-    register = (ask_register(register_url, audio, sample_rate, mark.get("watermark_id"), key=register_key)
-                if register_url else None)
+    register = (ask_register(register_url, audio, sample_rate, mark.get("watermark_id"), key=register_key,
+                             sha256=_file_sha256(path)) if register_url else None)
     record = creds.get("record") or {}
     if mark.get("detected") and record.get("watermark_id") is not None:
         mark["matches_record"] = mark.get("watermark_id") == record.get("watermark_id")
