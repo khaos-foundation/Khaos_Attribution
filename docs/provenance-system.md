@@ -111,7 +111,7 @@ aligned votes, ≥5% of the query's landmarks, ≥8 distinct hashes,
 runner-up candidate, unless the runners-up are near-copies of it (a
 same-seed re-render) and exactly one of them was stored with the query
 file's sha256: that one is named (the Space's index, Space decision 0007;
-the Register since 0.54.0). Proven against excerpts and 128k MP3. Known
+the Register since 0.53.1). Proven against excerpts and 128k MP3. Known
 limitations, documented in the contract: same-tempo percussive loops are
 near-identical to this whole algorithm class, and dominance is what
 separates the true source; a sustained chord aligns at any offset, and
