@@ -91,10 +91,13 @@ def test_the_measure_runs_at_float32_and_refuses_a_device_never_measured():
     assert M.memory_plan("mps", 16, total_gb=32)["fits"] == "resident"
     small = M.memory_plan("mps", 16, total_gb=16)
     assert small["fits"] is None and "needs about" in small["refusal"]
-    cuda = M.memory_plan("cuda", 16, total_gb=96)
-    assert cuda["fits"] is None and "not been measured on cuda" in cuda["refusal"]
+    assert M.memory_plan("cuda", 16, total_gb=24, env={})["fits"] == "resident"
+    assert "needs about" in M.memory_plan("cuda", 16, total_gb=8, env={})["refusal"]
+    assert M.scorer_need_gb(1, device_type="cuda") == M.scorer_need_gb(16, device_type="cuda") == 4.21
+    never = M.memory_plan("xpu", 16, total_gb=96)
+    assert never["fits"] is None and "not been measured on xpu" in never["refusal"]
     with pytest.raises(NotImplementedError):
-        M.scorer_need_gb(16, device_type="cuda")
+        M.scorer_need_gb(16, device_type="xpu")
 
 
 def test_epochs_become_steps_and_the_command_carries_the_recipe(tmp_path):
