@@ -485,11 +485,20 @@ def test_a_withdrawn_model_leaves_the_sitemap_and_asks_not_to_be_indexed(registe
 
 
 def test_the_register_pages_wear_the_record_sleeve_canon():
-    """The register looks like the rooms: their tokens, no glow, no hairlines, no tracked capitals, no label above the home title."""
+    """The register looks like the rooms: their tokens, no glow, no hairlines, no tracked capitals but the one action's, no
+    label above the home title, and every weight a role token."""
+    import re
     from register_service import pages as P
     css = P.CSS
-    for token in ("--bg: #070a0b", "--panel: #0f1416", "--field: #1c2426", "--muted: #8a9a9c", "--radius: 6px", "--fs-h1: 40px"):
+    for token in ("--bg: #070a0b", "--panel: #0f1416", "--field: #1c2426", "--muted: #9fb3b5", "--radius: 6px", "--fs-h1: 40px",
+                  "--fw-regular: 500", "--fw-strong: 800"):
         assert token in css, token
+    assert re.findall(r"font-weight:(?!\s*var\(--fw-)[^;}]+", css) == []
+    action = re.findall(r"\.log-form button(?::active(?:::after)?)? \{[^}]*\}", css)
+    assert len(action) == 3 and "box-shadow: 5px 5px 0 var(--text)" in action[0] and "border-radius: 0" in action[0]
+    rest = css
+    for rule in action:
+        rest = rest.replace(rule, "")
     for banned in ("radial-gradient", "box-shadow", "text-transform", "letter-spacing: .1", "border-bottom: 1px", "border-top: 1px", "ui-monospace"):
-        assert banned not in css, banned
+        assert banned not in rest, banned
     assert P.hero("", "T", "p", []).count("stage-eyebrow") == 0 and "stage-eyebrow" in P.hero("Register No. 1", "T", "p", [])
