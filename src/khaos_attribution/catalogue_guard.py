@@ -20,7 +20,7 @@ from khaos_attribution.translation import (_CHARACTER, _FAMILIES, _MORE_GENRES, 
 __all__ = ["GUARD_VERSION", "KINDS", "catalogue_claims", "hold"]
 
 # Readings compare only within a version: a change to what is dropped is a new one.
-GUARD_VERSION = "0.1.0"
+GUARD_VERSION = "0.1.1"
 KINDS = ("instrument", "genre", "vocal")
 
 # Named sounds the caption vocabulary does not list; a catalogue's captions never hold them, so they are outside.
@@ -100,6 +100,9 @@ def _pool(captions: tuple[str, ...]) -> tuple[dict[str, frozenset[str]], tuple[s
             counts[kind].update(said.get(kind, set()))
     for _, _, term, kind in _found(" ".join(captions)):
         claims[kind].add(term)
+    # "electronic" describes a character in a caption, so it claims no genre there; it still holds its own genre.
+    if any(re.search(r"\belectronic", c, re.IGNORECASE) for c in captions):
+        claims["genre"].add("electronic")
     common = [t for kind in ("genre", "instrument")
               for t, _ in sorted(counts[kind].items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
     return {k: frozenset(v) for k, v in claims.items()}, tuple(dict.fromkeys(common))
@@ -140,8 +143,8 @@ def _inside(term: str, kind: str, have: frozenset[str]) -> bool:
     words = _words(term)
     held = [_words(h) for h in have]
     # Its head ("guitar" for a held "electric guitar"), or a held head made more exact ("indie rock" for "rock").
-    if any(all(any(_same_word(w, x) for x in h) for w in words)
-           or (_same_word(h[-1], words[-1]) and all(any(_same_word(x, w) for w in words) for x in h)) for h in held):
+    if any(_same_word(h[-1], words[-1]) and (all(any(_same_word(w, x) for x in h) for w in words)
+                                             or all(any(_same_word(x, w) for w in words) for x in h)) for h in held):
         return True
     if kind != "instrument":
         return False
@@ -163,9 +166,10 @@ def _inside(term: str, kind: str, have: frozenset[str]) -> bool:
 _GLUE = r"(?:with|and|or|plus|featuring|feat\.?|ft\.?|on|over|of|by|for|to|from|in|&)"
 _END_ARTICLE = re.compile(r"(?:^|(?<=\s))(?:a|an|the|some)$", re.IGNORECASE)
 _END_GLUE = re.compile(rf"(?:^|(?<=\s)){_GLUE}$", re.IGNORECASE)
+_END_CUE = re.compile(r"(?:^|(?<=\s))(?:no|not|without|never|minus|sans)$", re.IGNORECASE)
 _START_GLUE = re.compile(rf"{_GLUE}(?!\w)", re.IGNORECASE)
 _START_JOIN = re.compile(r"(?:and|or|plus|&)(?!\w)\s*", re.IGNORECASE)
-_END_A = re.compile(r"(?:^|(?<=\s))(an?)$", re.IGNORECASE)
+_END_A = re.compile(r"(?:^|(?<=\s))(an?)$")
 _STOPS = ".,;!?"
 _LETTERS = re.compile(r"[^\W\d_]{3,}")
 _FILLER = frozenset("""the and with for but not any some something anything music musical track tune song piece sound
@@ -182,7 +186,7 @@ def _join(left: str, right: str) -> str:
         if closes or _START_GLUE.match(right):
             left = _END_ARTICLE.sub("", left).rstrip(" \t")
         if closes:
-            left = _END_GLUE.sub("", left).rstrip(" \t")
+            left = _END_CUE.sub("", _END_GLUE.sub("", left).rstrip(" \t")).rstrip(" \t")
             if not right or right[0] in _STOPS:
                 left = left.rstrip(" \t,;")
         opens = not left or left[-1] in _STOPS + "\n"
@@ -195,7 +199,7 @@ def _join(left: str, right: str) -> str:
     article = _END_A.search(left)
     if article and right[:1].isalpha() and right[0].lower() != "u":
         want = "an" if right[0].lower() in "aeio" else "a"
-        left = left[:article.start(1)] + (want.capitalize() if article.group(1)[0].isupper() else want)
+        left = left[:article.start(1)] + want
     gap = " " if left and right and left[-1] != "\n" and right[0] not in _STOPS + "\n" else ""
     return left + gap + right
 
@@ -235,11 +239,16 @@ def hold(prompt: str, pool: Iterable[str]) -> dict:
         dropped.append({"word": " ".join(text[start:end].split()), "kind": kind})
     if not cuts:
         return same
-    served, first = text, len(text)
+    merged: list[list[int]] = []
+    for a, b in sorted(set(cuts)):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    served = text
     # From the end, so each cut's seam is mended before the one to its left is made.
-    for a, b in sorted(set(cuts), reverse=True):
-        if b <= first:
-            served, first = _join(served[:a], served[b:]), a
+    for a, b in reversed(merged):
+        served = _join(served[:a], served[b:])
     served = served.strip(" \t")
     emptied = not [w for w in _LETTERS.findall(served.lower()) if w not in _FILLER]
     if emptied:

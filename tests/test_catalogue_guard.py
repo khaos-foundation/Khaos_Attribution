@@ -108,3 +108,24 @@ def test_two_spellings_of_one_sound_are_one_sound_and_a_longer_word_is_another()
     pool = [*POOL, "A smoky saxophone solo over rapping and a synthesizer drone."]
     assert not held("sax and synths with a rap verse", pool)["changed"]
     assert [d["word"] for d in held("bass and bassoon")["dropped"]] == ["bassoon"]
+
+
+@pytest.mark.parametrize("prompt, served", [
+    ("piano, no banjo or drum and bass", "piano"),
+    ("piano, no drum and bass", "piano"),
+    ("banjo sitar piano", "piano"),
+    ("piano with banjo, sitar and tabla", "piano"),
+])
+def test_cuts_that_touch_or_overlap_leave_none_of_their_words(prompt, served):
+    """A denial clause and a named sound that runs past its end are one cut: nothing listed as dropped is served."""
+    out = held(prompt)
+    assert out["prompt"] == served
+    assert not [d for d in out["dropped"] if d["word"].lower() in out["prompt"].lower()]
+
+
+def test_a_word_inside_a_held_name_is_not_that_name():
+    """A catalogue with folk rock has trained rock of a kind, not folk; and a key of A is not an article."""
+    pool = [*POOL[:4], *POOL[5:], "A stomping folk rock chorus with drums.", "An electronic pulse under piano."]
+    assert [d["word"] for d in held("a folk tune", pool)["dropped"]] == ["folk"]
+    assert not held("edm with a rock chorus", pool)["changed"]
+    assert held("in the key of A banjo opening", pool)["prompt"] == "in the key of A opening"
