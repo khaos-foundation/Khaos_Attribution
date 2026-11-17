@@ -107,6 +107,15 @@ def test_the_adapter_loads_through_stabilitys_loader_with_that_exclude(monkeypat
     monkeypatch.setitem(sys.modules, "stable_audio_3.models.lora.loader", loader)
     monkeypatch.setitem(sys.modules, "stable_audio_3.models.lora.utils", utils)
     wrapped = types.SimpleNamespace(model="dit", model_config={"model_type": "diffusion_cond", "svd_bases_path": "b.pt"})
-    L.load_adapter(wrapped, "/x/adapter_model.safetensors")
+    state, _cfg = L.load_adapter(wrapped, "/x/adapter_model.safetensors")
+    assert state == {"model.blocks.0.lora_A": 0, "model.blocks.0.lora_B": 0}, "the file is read once, for the caller too"
     assert seen == {"model": "dit", "paths": ["/x/adapter_model.safetensors"], "model_type": "diffusion_cond",
                     "svd": "b.pt", "exclude": ["seconds_total"]}
+
+
+def test_the_measure_worker_loads_its_adapter_through_load_adapter():
+    """The torch measure worker never adapts a module the adapter file holds no weights for."""
+    import inspect
+    from khaos_attribution.engines.sa3 import measure_worker as W
+    src = inspect.getsource(W._load)
+    assert "load_adapter(wrapped" in src and "wrapped.load_lora" not in src

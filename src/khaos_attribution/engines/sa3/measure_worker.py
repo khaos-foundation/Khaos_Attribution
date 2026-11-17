@@ -19,19 +19,18 @@ def _load(req: dict):
     from stable_audio_3.models.lora.utils import get_lora_params  # noqa: PLC0415
 
     from khaos_attribution import gradient as G  # noqa: PLC0415
-    from stable_audio_3.models.lora.utils import load_lora_checkpoint, name_is_lora  # noqa: PLC0415
+    from stable_audio_3.models.lora.utils import name_is_lora  # noqa: PLC0415
 
     wrapped = load_measured(req["model"])
     if not req.get("adapter"):
         raise RuntimeError("a feature needs the adapter; none was named")
-    load_adapter(wrapped, req["adapter"])
+    state, _cfg = load_adapter(wrapped, req["adapter"])
     wrapped.set_lora_strength(1.0)
     model = wrapped.model
     model.eval()
     named = [(n, p) for n, p in model.named_parameters() if name_is_lora(n)]
     if not named or len(named) != len(list(get_lora_params(model))):
         raise RuntimeError("the adapter's parameters could not be named")
-    state, _cfg = load_lora_checkpoint(str(req["adapter"]))
     # The adapter file's key order, shared with the MLX worker, so one adapter projects alike on either runtime.
     order = G.checkpoint_order([n for n, _p in named], list(state))
     params = [named[i][1] for i in order]

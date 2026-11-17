@@ -77,14 +77,16 @@ def extra_exclude(checkpoint_keys) -> list | None:
     return None if any(SECONDS_PATTERN in str(k) for k in checkpoint_keys) else [SECONDS_PATTERN]
 
 
-def load_adapter(wrapped, path) -> None:
-    """Stability's LoRA load onto a loaded model, adapting only the modules the adapter file holds weights for."""
+def load_adapter(wrapped, path) -> tuple:
+    """Stability's LoRA load onto a loaded model, adapting only the modules the adapter file holds weights for; the
+    file's state and config, as read."""
     from stable_audio_3.models.lora.loader import load_and_apply_loras  # noqa: PLC0415
     from stable_audio_3.models.lora.utils import load_lora_checkpoint  # noqa: PLC0415
-    state, _cfg = load_lora_checkpoint(str(path))
+    state, ckpt_cfg = load_lora_checkpoint(str(path))
     cfg = wrapped.model_config
     load_and_apply_loras(wrapped.model, [str(path)], cfg["model_type"], svd_bases_path=cfg.get("svd_bases_path"),
                          exclude=extra_exclude(state))
+    return state, ckpt_cfg
 
 
 def load_for_training(model_name: str, device):
