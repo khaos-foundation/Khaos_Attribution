@@ -129,3 +129,16 @@ def test_a_word_inside_a_held_name_is_not_that_name():
     assert [d["word"] for d in held("a folk tune", pool)["dropped"]] == ["folk"]
     assert not held("edm with a rock chorus", pool)["changed"]
     assert held("in the key of A banjo opening", pool)["prompt"] == "in the key of A opening"
+
+
+@pytest.mark.parametrize("prompt, served", [
+    ("no banjo to speak of, sitar, piano", "piano"),
+    ("no banjo and sitar. Piano later", "Piano later"),
+    ("piano, no drum and bass groove", "piano, groove"),
+    ("key of A banjo with piano", "key of A with piano"),
+    ("A banjo intro on piano", "An intro on piano"),
+    ("An accordion tune on piano", "A tune on piano"),
+])
+def test_a_seam_never_eats_a_kept_word_or_leaves_a_bare_no(prompt, served):
+    """Kept text is put back from the prompt as written: no letter of it is lost and no denial is left empty."""
+    assert held(prompt)["prompt"] == served

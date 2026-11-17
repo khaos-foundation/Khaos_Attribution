@@ -20,7 +20,7 @@ from khaos_attribution.translation import (_CHARACTER, _FAMILIES, _MORE_GENRES, 
 __all__ = ["GUARD_VERSION", "KINDS", "catalogue_claims", "hold"]
 
 # Readings compare only within a version: a change to what is dropped is a new one.
-GUARD_VERSION = "0.1.1"
+GUARD_VERSION = "0.1.2"
 KINDS = ("instrument", "genre", "vocal")
 
 # Named sounds the caption vocabulary does not list; a catalogue's captions never hold them, so they are outside.
@@ -101,7 +101,7 @@ def _pool(captions: tuple[str, ...]) -> tuple[dict[str, frozenset[str]], tuple[s
     for _, _, term, kind in _found(" ".join(captions)):
         claims[kind].add(term)
     # "electronic" describes a character in a caption, so it claims no genre there; it still holds its own genre.
-    if any(re.search(r"\belectronic", c, re.IGNORECASE) for c in captions):
+    if any(re.search(r"(?<![\w-])electronic", c, re.IGNORECASE) for c in captions):
         claims["genre"].add("electronic")
     common = [t for kind in ("genre", "instrument")
               for t, _ in sorted(counts[kind].items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
@@ -164,12 +164,12 @@ def _inside(term: str, kind: str, have: frozenset[str]) -> bool:
 
 
 _GLUE = r"(?:with|and|or|plus|featuring|feat\.?|ft\.?|on|over|of|by|for|to|from|in|&)"
-_END_ARTICLE = re.compile(r"(?:^|(?<=\s))(?:a|an|the|some)$", re.IGNORECASE)
+_END_ARTICLE = re.compile(r"(?:^|(?<=\s))(?:a|an|the|some|An|The|Some)$|^A$")
 _END_GLUE = re.compile(rf"(?:^|(?<=\s)){_GLUE}$", re.IGNORECASE)
 _END_CUE = re.compile(r"(?:^|(?<=\s))(?:no|not|without|never|minus|sans)$", re.IGNORECASE)
 _START_GLUE = re.compile(rf"{_GLUE}(?!\w)", re.IGNORECASE)
 _START_JOIN = re.compile(r"(?:and|or|plus|&)(?!\w)\s*", re.IGNORECASE)
-_END_A = re.compile(r"(?:^|(?<=\s))(an?)$")
+_END_A = re.compile(r"(?:^|(?<=\s))(an?)$|^(An?)$")
 _STOPS = ".,;!?"
 _LETTERS = re.compile(r"[^\W\d_]{3,}")
 _FILLER = frozenset("""the and with for but not any some something anything music musical track tune song piece sound
@@ -193,13 +193,13 @@ def _join(left: str, right: str) -> str:
         if opens or _END_GLUE.search(left):
             right = _START_JOIN.sub("", right, count=1) if _START_JOIN.match(right) else right
         if opens:
-            right = right.lstrip(" \t,;")
+            right = right.lstrip(" \t,;" if left else " \t,;.!?")
         if (left, right) == before:
             break
     article = _END_A.search(left)
     if article and right[:1].isalpha() and right[0].lower() != "u":
         want = "an" if right[0].lower() in "aeio" else "a"
-        left = left[:article.start(1)] + want
+        left = left[:article.start()] + (want if article.group(1) else want.capitalize())
     gap = " " if left and right and left[-1] != "\n" and right[0] not in _STOPS + "\n" else ""
     return left + gap + right
 
@@ -230,7 +230,7 @@ def hold(prompt: str, pool: Iterable[str]) -> dict:
     cuts: list[tuple[int, int]] = []
     dropped = []
     for (start, end), (term, kind) in sorted(outside.items()):
-        clause = next(((a, b) for a, b in denials if a <= start and end <= b), None)
+        clause = next(((a, max(b, end)) for a, b in denials if a <= start < b), None)
         # "no vocals" stays as written; a ruled-out instrument or genre goes with its clause, since the engine
         # reads the noun and not the "no".
         if clause and kind == "vocal":
@@ -245,10 +245,11 @@ def hold(prompt: str, pool: Iterable[str]) -> dict:
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
-    served = text
-    # From the end, so each cut's seam is mended before the one to its left is made.
-    for a, b in reversed(merged):
-        served = _join(served[:a], served[b:])
+    # Each kept stretch is the listener's own text; only the seam between two of them is mended.
+    served, last = text[:merged[0][0]], merged[0][1]
+    for a, b in merged[1:]:
+        served, last = _join(served, text[last:a]), b
+    served = _join(served, text[last:])
     served = served.strip(" \t")
     emptied = not [w for w in _LETTERS.findall(served.lower()) if w not in _FILLER]
     if emptied:
