@@ -70,6 +70,23 @@ def measure_autocast(device):
     return torch.autocast(device_type="cuda" if on else "cpu", dtype=torch.bfloat16, enabled=on)
 
 
+def extra_exclude(checkpoint_keys) -> list | None:
+    """What Stability's loader must not adapt beyond the file's own exclude: the seconds conditioner, when the file
+    holds no weights for it (the MLX trainer leaves it out by a flag its saved exclude does not record)."""
+    from khaos_attribution.engines.sa3.train import SECONDS_PATTERN  # noqa: PLC0415
+    return None if any(SECONDS_PATTERN in str(k) for k in checkpoint_keys) else [SECONDS_PATTERN]
+
+
+def load_adapter(wrapped, path) -> None:
+    """Stability's LoRA load onto a loaded model, adapting only the modules the adapter file holds weights for."""
+    from stable_audio_3.models.lora.loader import load_and_apply_loras  # noqa: PLC0415
+    from stable_audio_3.models.lora.utils import load_lora_checkpoint  # noqa: PLC0415
+    state, _cfg = load_lora_checkpoint(str(path))
+    cfg = wrapped.model_config
+    load_and_apply_loras(wrapped.model, [str(path)], cfg["model_type"], svd_bases_path=cfg.get("svd_bases_path"),
+                         exclude=extra_exclude(state))
+
+
 def load_for_training(model_name: str, device):
     """Stability's trainer's load_model, step for step, on the rewritten config."""
     import torch  # noqa: PLC0415

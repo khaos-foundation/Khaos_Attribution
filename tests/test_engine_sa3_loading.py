@@ -85,3 +85,28 @@ def test_the_forward_runs_under_bfloat16_autocast_on_cuda_only(monkeypatch):
     L.measure_autocast("mps")
     assert calls[0] == {"device_type": "cuda", "dtype": "bf16", "enabled": True}
     assert calls[1]["enabled"] is False
+
+
+def test_the_seconds_conditioner_is_left_out_only_when_the_adapter_file_holds_no_weights_for_it():
+    """An MLX adapter trained without the seconds conditioner measures on CUDA with exactly the file's parameters."""
+    dit_only = ["model.transformer.layers.0.attn.to_q.lora_A", "model.transformer.layers.0.attn.to_q.lora_B"]
+    assert L.extra_exclude(dit_only) == ["seconds_total"]
+    with_seconds = dit_only + ["conditioners.seconds_total.embedder.embedding.1.lora_A"]
+    assert L.extra_exclude(with_seconds) is None, "an adapter that trained the conditioner keeps it"
+
+
+def test_the_adapter_loads_through_stabilitys_loader_with_that_exclude(monkeypatch):
+    import sys
+    import types
+    seen = {}
+    loader = types.ModuleType("stable_audio_3.models.lora.loader")
+    loader.load_and_apply_loras = lambda model, paths, model_type, svd_bases_path=None, exclude=None: seen.update(
+        model=model, paths=paths, model_type=model_type, svd=svd_bases_path, exclude=exclude)
+    utils = types.ModuleType("stable_audio_3.models.lora.utils")
+    utils.load_lora_checkpoint = lambda path: ({"model.blocks.0.lora_A": 0, "model.blocks.0.lora_B": 0}, {})
+    monkeypatch.setitem(sys.modules, "stable_audio_3.models.lora.loader", loader)
+    monkeypatch.setitem(sys.modules, "stable_audio_3.models.lora.utils", utils)
+    wrapped = types.SimpleNamespace(model="dit", model_config={"model_type": "diffusion_cond", "svd_bases_path": "b.pt"})
+    L.load_adapter(wrapped, "/x/adapter_model.safetensors")
+    assert seen == {"model": "dit", "paths": ["/x/adapter_model.safetensors"], "model_type": "diffusion_cond",
+                    "svd": "b.pt", "exclude": ["seconds_total"]}

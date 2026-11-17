@@ -15,7 +15,7 @@ from pathlib import Path
 
 def _load(req: dict):
     import torch  # noqa: PLC0415
-    from khaos_attribution.engines.sa3.loading import load_measured  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.loading import load_adapter, load_measured  # noqa: PLC0415
     from stable_audio_3.models.lora.utils import get_lora_params  # noqa: PLC0415
 
     from khaos_attribution import gradient as G  # noqa: PLC0415
@@ -24,7 +24,7 @@ def _load(req: dict):
     wrapped = load_measured(req["model"])
     if not req.get("adapter"):
         raise RuntimeError("a feature needs the adapter; none was named")
-    wrapped.load_lora([str(req["adapter"])])
+    load_adapter(wrapped, req["adapter"])
     wrapped.set_lora_strength(1.0)
     model = wrapped.model
     model.eval()
