@@ -142,3 +142,18 @@ def test_a_word_inside_a_held_name_is_not_that_name():
 def test_a_seam_never_eats_a_kept_word_or_leaves_a_bare_no(prompt, served):
     """Kept text is put back from the prompt as written: no letter of it is lost and no denial is left empty."""
     assert held(prompt)["prompt"] == served
+
+
+@pytest.mark.parametrize("prompt, served, words", [
+    ("classical piano and guitar with strings", "piano and guitar with strings", ["classical"]),
+    ("a cinematic soundtrack on piano", "a cinematic on piano", ["soundtrack"]),
+    ("baroque chamber piece for cello", "piece for cello", ["baroque", "chamber"]),
+])
+def test_a_genre_the_captions_never_name_is_dropped_like_an_instrument(prompt, served, words):
+    """"Classical", "soundtrack", "baroque" are genres: held to the catalogue, never waved through as a feel."""
+    out = held(prompt, [c.replace("classical and intimate", "quiet and intimate") for c in POOL])
+    assert [d["word"] for d in out["dropped"]] == words and out["prompt"] == served
+
+
+def test_a_feel_word_still_passes():
+    assert not held("piano with soul and a gentle swing, whispered vocals")["changed"]
