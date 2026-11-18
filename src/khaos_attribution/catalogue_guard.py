@@ -20,7 +20,7 @@ from khaos_attribution.translation import (_CHARACTER, _FAMILIES, _MORE_GENRES, 
 __all__ = ["GUARD_VERSION", "KINDS", "catalogue_claims", "hold"]
 
 # Readings compare only within a version: a change to what is dropped is a new one.
-GUARD_VERSION = "0.1.2"
+GUARD_VERSION = "0.1.3"
 KINDS = ("instrument", "genre", "vocal")
 
 # Named sounds the caption vocabulary does not list; a catalogue's captions never hold them, so they are outside.
@@ -37,14 +37,12 @@ _MORE_GENRE_WORDS = ("hoedown", "sea shanty", "shanty", "mariachi", "klezmer", "
                      "kuduro", "baile funk", "city pop", "krautrock", "britpop", "surf rock", "yacht rock", "nu-metal",
                      "djent", "grindcore", "crust punk", "horrorcore", "cloud rap", "mumble rap", "g-funk")
 
-# Words that are more often a description than a named sound: never dropped.
-_EVERYDAY = frozenset("""soul world march sample loop lead whisper whispered harmonies harmony acoustic romantic
-experimental holiday noise scratch swing fusion chamber garage spoken voice voices beat keys saw sub bell chime clap
-kick tom pad lounge dub minimalism minimalist electro drone baroque
-children's easy listening string strings choir chorus vocals vocal singer singing sung duet chant chanting humming
-falsetto belting crooning shout shouting ad-lib ad-libs classical orchestral cinematic soundtrack film score""".split()) \
-    | {"spoken word", "easy listening", "film score", "chorus vocals", "new age", "space music", "found sound",
-       "field recording", "vocal harmonies", "harmony vocals", "backing vocal", "backing vocals", "background vocals",
+# Words more often a feel or a part of any track than a named sound: never dropped. No genre is here: a genre the
+# captions never name is dropped like an instrument.
+_EVERYDAY = frozenset("""soul sample loop lead whisper whispered harmonies harmony acoustic romantic noise scratch swing
+spoken voice voices beat drone vocals vocal singer singing sung duet chant chanting humming falsetto belting crooning
+shout shouting ad-lib ad-libs chorus""".split()) \
+    | {"chorus vocals", "vocal harmonies", "harmony vocals", "backing vocal", "backing vocals", "background vocals",
        "lead vocal", "lead vocals"}
 
 # The kinds of voice that are a different singer or source, not a way of singing: held to the catalogue.
@@ -156,7 +154,7 @@ def _inside(term: str, kind: str, have: frozenset[str]) -> bool:
         return True
     names = {_singular(h) for h in have}
     # A family's own name and its members stand for each other; two members do not.
-    if family and (_singular(term) == family or family in names or family + "s" in have):
+    if family and (term == family or _singular(term) == family or family in names or family + "s" in have):
         return family in families
     if _singular(term) == "horn":
         return bool(names & (_REEDS | {_singular(m) for m in _FAMILIES["brass"]}))
