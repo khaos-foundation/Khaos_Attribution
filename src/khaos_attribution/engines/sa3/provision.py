@@ -63,6 +63,17 @@ def _run(cmd: list, cwd: Path | None = None, env: dict | None = None) -> subproc
     return subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
 
 
+def make_venv(uv: str, venv: Path, python: Path, version: str) -> tuple:
+    """A fresh venv at ``venv`` on Python ``version``: (ok, note), with uv's own words when it cannot make one."""
+    # A folder left by an earlier failed try holds no interpreter; uv refuses it unless told to replace it.
+    done = _run([uv, "venv", "-q", "--python", version, venv], env={**host_env(), "UV_VENV_CLEAR": "1"})
+    if done.returncode != 0:
+        return False, f"the engine's Python {version} environment could not be made: {done.stderr.strip()[:400]}"
+    if not python.is_file():
+        return False, f"uv made the environment but left no interpreter at {python}"
+    return True, f"Python {version} environment made"
+
+
 def git_usable() -> bool:
     """Whether git here runs without a dialog: a Mac without the developer tools has a git stub that opens one."""
     if not shutil.which("git"):
@@ -235,7 +246,9 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     work = root / "work"
     work.mkdir(exist_ok=True)
     if not python.is_file():
-        _run([uv, "venv", "-q", "--python", PYTHON_VERSION, root / ".venv"])
+        ok, note = make_venv(uv, root / ".venv", python, PYTHON_VERSION)
+        if not ok:
+            return False, note
     export = _run([uv, "export", "--frozen", "--no-hashes", "--extra", "lora", "--no-emit-project", "--no-dev"], cwd=root)
     if export.returncode != 0 or not export.stdout.strip():
         return False, f"Stability's lock could not be exported: {export.stderr.strip()[-300:]}"
