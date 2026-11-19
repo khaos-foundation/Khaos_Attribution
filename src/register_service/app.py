@@ -605,15 +605,19 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             answer["models"] = [_model_summary(store.record(s)) for s in store.serials_in_bucket(payload)]
         return answer
 
+    def _declarant(d: dict | None) -> str:
+        # A record without "by" was written before rights holders could declare: the artist made it.
+        return "the rights holder" if (d or {}).get("by") == "rights_holder" else "the artist"
+
     def _declared_line(d: dict) -> str:
         layers = {"composition": "the songs", "recording": "the recordings", "performers": "the performers",
                   "voices": "other voices", "society": "the collecting society"}
         named = ", ".join(layers.get(x, x) for x in d.get("layers") or [])
-        return f"{d.get('declared', 0)} of {d.get('of', 0)} tracks, the artist confirming each of: {named}"
+        return f"{d.get('declared', 0)} of {d.get('of', 0)} tracks, {_declarant(d)} confirming each of: {named}"
 
-    def _claims_line(c: dict, total: int) -> str:
+    def _claims_line(c: dict, total: int, d: dict | None = None) -> str:
         from register_service import pages as P  # noqa: PLC0415
-        line = f"{c['claimed']} of {total} claimed on the artist's declaration"
+        line = f"{c['claimed']} of {total} claimed on {_declarant(d)}'s declaration"
         if c["shared"]:
             line += f" · {c['shared']} also train{'s' if c['shared'] == 1 else ''} another account's registered model"
         return P.esc(line)
@@ -678,7 +682,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
               ("Dataset hash", f'<span class="mono">{P.esc(r["provenance"]["dataset_hash"])}</span>'),
               ("Watermark bucket", P.esc(m["watermark_payload"])),
               ("Countersigned by", f'<span class="mono">{P.esc(rec["countersignature"]["register_key_id"])}</span>'),
-              ("Training tracks", _claims_line(index.claims_of(serial), len((rec["signed"]["record"].get("training_set") or {}).get("tracks") or []))),
+              ("Training tracks", _claims_line(index.claims_of(serial), len((rec["signed"]["record"].get("training_set") or {}).get("tracks") or []),
+                                                (rec["signed"]["record"].get("training_set") or {}).get("declaration"))),
               *([("Trained on", P.esc("; ".join(ts["data_kinds"])))] if ts.get("data_kinds") else []),
               *([("Declared", P.esc(_declared_line(ts["declaration"])))] if ts.get("declaration") else []),
               ("Registered", P.esc(rec["published_at"]))]

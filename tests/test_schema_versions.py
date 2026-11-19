@@ -10,7 +10,7 @@ from khaos_attribution import load_schema
 from khaos_attribution.validation import known_versions
 
 PINS = Path(__file__).parent / "golden" / "schema_fields.json"
-SCHEMAS = ("provenance_record", "model_card", "track_rights", "attribution_estimate", "tombstone")
+SCHEMAS = ("provenance_record", "model_card", "track_rights", "attribution_estimate", "tombstone", "catalogue_delivery")
 
 
 def fields(schema, path="") -> list:

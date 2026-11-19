@@ -1,9 +1,11 @@
 # khaos_attribution
 
-JSON schemas and validators for artist attribution. The package bundles five
+JSON schemas and validators for artist attribution. The package bundles six
 schemas — a **provenance record** attached to every generated output, a
 **model card** describing an artist adapter, **track rights**, an
-**attribution estimate**, and an output **tombstone** — plus Python
+**attribution estimate**, an output **tombstone**, and a **catalogue delivery**
+(a rights holder's DDEX batch read into one form; `industry_codes` checks the ISRC, ISWC, UPC/EAN and IPI it
+carries) — plus Python
 functions that validate records against them using
 [jsonschema](https://python-jsonschema.readthedocs.io/), and the shared
 implementation modules the two apps pin: `watermark` (AudioSeal — SECDED

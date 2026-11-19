@@ -352,6 +352,31 @@ def test_the_model_page_states_what_trained_the_model_and_how_it_was_declared(re
     assert any("declaration" in p for p in problems) and any("data_kinds" in p for p in problems)
 
 
+def test_a_rights_holders_declaration_is_said_as_theirs_and_an_unnamed_one_as_the_artists(register):
+    """A record declared by a rights holder never names the artist as the one confirming; a record without `by` does."""
+    import html
+    from khaos_attribution import registry as RG
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    pages = {}
+    for by in ("rights_holder", None):
+        rec = _record()
+        decl = {"version": "khaos.declaration/3", "layers": ["composition", "recording"], "declared": 2, "of": 2}
+        rec["training_set"]["declaration"] = {**decl, "by": by} if by else decl
+        assert RG.record_problems(rec) == []
+        rec["model"]["machine_key_id"] = key.key_id
+        rec["model"]["run_id"] = f"run_{by or 'artist'}"
+        rec["model"]["watermark_payload"] = derive_payload(key.key_id, rec["model"]["run_id"])
+        pages[by] = html.unescape(http.get(f"/models/{client.publish(R.sign_record(rec, key))['serial']}").text)
+    assert "2 of 2 tracks, the rights holder confirming each of: the songs, the recordings" in pages["rights_holder"]
+    assert "claimed on the rights holder's declaration" in pages["rights_holder"]
+    assert "the artist" not in pages["rights_holder"].split("Training tracks")[1].split("Registered")[0]
+    assert "2 of 2 tracks, the artist confirming each of" in pages[None] and "claimed on the artist's declaration" in pages[None]
+    probe = _record()
+    probe["training_set"]["declaration"] = {"layers": ["composition"], "declared": 1, "of": 1, "by": "label"}
+    assert any("declaration.by" in p for p in RG.record_problems(probe))
+
+
 def test_the_register_refuses_a_signed_record_holding_a_number_that_is_not_finite(register):
     """A client that signs without the contract's check is still refused at the door, in the check's own words."""
     app, store, http = register

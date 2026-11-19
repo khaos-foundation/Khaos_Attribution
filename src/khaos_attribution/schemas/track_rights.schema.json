@@ -46,12 +46,13 @@
     },
     "source": {
       "type": "string",
-      "description": "Where this rights data came from \u2014 provenance of the provenance.",
+      "description": "Where this rights data came from \u2014 provenance of the provenance. ddex_ern: read from a label's DDEX ERN delivery and confirmed by a person.",
       "enum": [
         "operator-entered",
         "society-confirmed",
         "distributor",
         "musicbrainz",
+        "ddex_ern",
         "other"
       ]
     },

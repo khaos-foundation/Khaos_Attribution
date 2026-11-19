@@ -80,6 +80,49 @@
    "version": "1.2.0"
   }
  ],
+ "catalogue_delivery": [
+  {
+   "fields": [
+    "delivery_id",
+    "ern_version",
+    "received_at_utc",
+    "releases",
+    "releases[].display_artist",
+    "releases[].icpn",
+    "releases[].message_id",
+    "releases[].release_reference",
+    "releases[].start_date",
+    "releases[].takedown",
+    "releases[].territories",
+    "releases[].title",
+    "releases[].tracks",
+    "releases[].tracks[].c_line",
+    "releases[].tracks[].contains_ai",
+    "releases[].tracks[].contributors",
+    "releases[].tracks[].contributors[].instruments",
+    "releases[].tracks[].contributors[].ipi",
+    "releases[].tracks[].contributors[].isni",
+    "releases[].tracks[].contributors[].name",
+    "releases[].tracks[].contributors[].roles",
+    "releases[].tracks[].display_artist",
+    "releases[].tracks[].duration_s",
+    "releases[].tracks[].file",
+    "releases[].tracks[].file.hash",
+    "releases[].tracks[].file.hash_algorithm",
+    "releases[].tracks[].file.path",
+    "releases[].tracks[].isrc",
+    "releases[].tracks[].iswc",
+    "releases[].tracks[].p_line",
+    "releases[].tracks[].resource_reference",
+    "releases[].tracks[].title",
+    "schema_version",
+    "sender",
+    "sender.ddex_party_id",
+    "sender.name"
+   ],
+   "version": "1.0.0"
+  }
+ ],
  "model_card": [
   {
    "fields": [

@@ -220,6 +220,8 @@ def record_problems(record: dict) -> list:
                 or any(not isinstance(decl.get(k), int) or isinstance(decl.get(k), bool) for k in ("declared", "of"))
                 or not 0 <= decl["declared"] <= decl["of"]):
             out.append("training_set.declaration must name its layers and count declared of the tracks")
+        if isinstance(decl, dict) and decl.get("by") not in (None, "artist", "rights_holder"):
+            out.append("training_set.declaration.by is 'artist' or 'rights_holder'")
     kinds = ts.get("data_kinds")
     if kinds is not None and (not isinstance(kinds, list) or not all(isinstance(k, str) and k for k in kinds)):
         out.append("training_set.data_kinds must be a list of words")

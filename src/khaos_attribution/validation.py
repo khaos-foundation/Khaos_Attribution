@@ -167,6 +167,25 @@ def validate_track_rights(record):
     return record
 
 
+def validate_catalogue_delivery(record):
+    """Validate a catalogue delivery; beyond the schema, every UPC/EAN and ISWC check digit holds and each release
+    names a recording once."""
+    from khaos_attribution import industry_codes as C  # noqa: PLC0415
+    _validate(record, "catalogue_delivery.schema.json", "catalogue delivery")
+    for release in record["releases"]:
+        where = f"release {release['release_reference']}"
+        if release.get("icpn") and C.gtin(release["icpn"]) is None:
+            raise AttributionValidationError(f"Invalid catalogue delivery: {where}'s UPC/EAN {release['icpn']} fails its check digit")
+        refs = [t["resource_reference"] for t in release["tracks"]]
+        if len(refs) != len(set(refs)):
+            raise AttributionValidationError(f"Invalid catalogue delivery: {where} names a recording twice")
+        for t in release["tracks"]:
+            if t.get("iswc") and C.iswc(t["iswc"]) is None:
+                raise AttributionValidationError(
+                    f"Invalid catalogue delivery: {where}, {t['resource_reference']}: ISWC {t['iswc']} fails its check digit")
+    return record
+
+
 def validate_attribution_estimate(record):
     """Validate an attribution estimate; raise AttributionValidationError if invalid.
 
