@@ -43,7 +43,7 @@
         },
         "ddex_party_id": {
           "type": "string",
-          "pattern": "^PADPIDA[0-9A-Z]{11}$"
+          "pattern": "^PADPIDA[a-zA-Z0-9]+$"
         }
       }
     },
