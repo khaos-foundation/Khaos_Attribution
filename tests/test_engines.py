@@ -115,6 +115,38 @@ def test_the_pins_helper_reads_a_checkout_and_never_guesses(tmp_path, monkeypatc
     assert "GIT_DIR" not in pins.git_env() and pins.checkout_commit(tmp_path) == sha, "an inherited GIT_DIR never redirects the question"
 
 
+def test_without_git_the_pins_helper_reads_heads_own_files(tmp_path, monkeypatch):
+    """A clone on a machine whose git has gone: a detached SHA, a loose ref and a packed ref are read; nothing else."""
+    sha = "a" * 40
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+
+    def no_git(cmd, *a, **k):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+    monkeypatch.setattr(pins.subprocess, "run", no_git)
+    (git / "HEAD").write_text(sha + "\n")
+    assert pins.checkout_commit(tmp_path) == sha
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    assert pins.checkout_commit(tmp_path) is None, "a ref that names nothing is not guessed"
+    (git / "packed-refs").write_text(f"# pack-refs with: peeled fully-peeled sorted\n{'b' * 40} refs/heads/main\n")
+    assert pins.checkout_commit(tmp_path) == "b" * 40
+    (git / "refs" / "heads" / "main").write_text(sha + "\n")
+    assert pins.checkout_commit(tmp_path) == sha, "a loose ref is newer than the packed one"
+    (git / "HEAD").write_text("not a sha\n")
+    assert pins.checkout_commit(tmp_path) is None
+    (git / "HEAD").write_bytes(b"\xff\xfe")
+    assert pins.checkout_commit(tmp_path) is None, "an unreadable HEAD is None, never an exception"
+
+
+def test_a_clone_git_refuses_is_read_from_its_files(tmp_path, monkeypatch):
+    """git present but failing on the clone (a stub, a refused ownership): its HEAD is still read, never guessed."""
+    sha = "c" * 40
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text(sha + "\n")
+    monkeypatch.setattr(pins.subprocess, "run", lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 128, "", "fatal"))
+    assert pins.checkout_commit(tmp_path) == sha
+
+
 def test_capabilities_say_what_a_form_may_offer_and_explain_each_control_it_must_hide():
     """Both rooms hide a control the engine lacks and say why in the contract's words."""
     ace = E.capabilities("acestep-1.5")

@@ -21,9 +21,28 @@ def git_env() -> dict:
 COMMIT_FILE = ".khaos-commit"
 
 
+def head_from_files(git_dir: Path) -> str | None:
+    """HEAD read from a repository's own files, for a machine where git cannot run: a detached SHA, or the ref it
+    names in refs/ or packed-refs; None for anything else."""
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref: "):
+            ref = head[5:].strip()
+            loose = git_dir / ref
+            if loose.is_file():
+                head = loose.read_text(encoding="utf-8").strip()
+            else:
+                packed = (git_dir / "packed-refs").read_text(encoding="utf-8").splitlines()
+                head = next((line.split()[0] for line in packed if line.endswith(" " + ref)), "")
+    except (OSError, ValueError):
+        return None
+    return head if _SHA_RE.match(head) else None
+
+
 def checkout_commit(root) -> str | None:
-    """The 40-character HEAD of the checkout at *root*, or None (not a checkout, no git, a slow git, no full SHA).
-    A checkout unpacked from an archive carries its commit in .khaos-commit instead of a .git."""
+    """The 40-character HEAD of the checkout at *root*, or None (not a checkout, a slow git, no full SHA).
+    A checkout unpacked from an archive carries its commit in .khaos-commit; a clone git cannot read is read from
+    its own files."""
     if root is None:
         return None
     root = str(root)
@@ -39,10 +58,12 @@ def checkout_commit(root) -> str | None:
     try:
         proc = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
                               env=git_env())
-    except Exception:  # noqa: BLE001 — git missing, a timeout, an unreadable cwd: all None
+    except FileNotFoundError:
+        return head_from_files(Path(root) / ".git")
+    except Exception:  # noqa: BLE001 — a timeout, an unreadable cwd: None
         return None
     if proc.returncode != 0:
-        return None
+        return head_from_files(Path(root) / ".git")
     sha = (proc.stdout or "").strip()
     return sha if _SHA_RE.match(sha) else None
 
