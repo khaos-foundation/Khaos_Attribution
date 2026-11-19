@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/khaos-foundation/Khaos_Attribution/schemas/catalogue_delivery.schema.json",
+  "title": "Catalogue Delivery",
+  "description": "One batch of releases a rights holder delivered, read from its DDEX messages into one form: who sent it, each release and each recording with its codes, credits and file. Nothing in it is trained on until a person confirms each track's line.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "delivery_id",
+    "received_at_utc",
+    "sender",
+    "ern_version",
+    "releases"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "const": "1.0.0"
+    },
+    "delivery_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The batch's id as the sender named it."
+    },
+    "received_at_utc": {
+      "type": "string",
+      "minLength": 1,
+      "format": "date-time"
+    },
+    "sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "ddex_party_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ddex_party_id": {
+          "type": "string",
+          "pattern": "^PADPIDA[0-9A-Z]{11}$"
+        }
+      }
+    },
+    "ern_version": {
+      "type": "string",
+      "enum": [
+        "4.1",
+        "4.2",
+        "4.3",
+        "4.3.2"
+      ]
+    },
+    "releases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "message_id",
+          "release_reference",
+          "title",
+          "display_artist",
+          "tracks",
+          "takedown"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "release_reference": {
+            "type": "string",
+            "minLength": 1
+          },
+          "icpn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9]{12,14}$",
+            "description": "The release's UPC or EAN."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "display_artist": {
+            "type": "string",
+            "minLength": 1
+          },
+          "territories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "start_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "takedown": {
+            "type": "boolean",
+            "description": "The message takes the release down rather than delivering it."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "resource_reference",
+                "isrc",
+                "title",
+                "display_artist",
+                "contributors",
+                "file"
+              ],
+              "properties": {
+                "resource_reference": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The recording's reference inside its message (A1, A2, ...)."
+                },
+                "isrc": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$"
+                },
+                "iswc": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^T-[0-9]{9}-[0-9]$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "display_artist": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "duration_s": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "contributors": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "roles"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "roles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": "The roles the message gives, as written (Composer, Lyricist, MainArtist, ...)."
+                      },
+                      "instruments": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": "The instruments the message credits this contributor with."
+                      },
+                      "ipi": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "pattern": "^[0-9]{9,11}$"
+                      },
+                      "isni": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "pattern": "^[0-9]{15}[0-9X]$"
+                      }
+                    }
+                  }
+                },
+                "p_line": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "c_line": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "contains_ai": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The message's AI disclosure as written, or null where its version has none."
+                },
+                "file": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The file's path relative to the release folder, as the message names it."
+                    },
+                    "hash_algorithm": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "hash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^[0-9a-fA-F]+$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
