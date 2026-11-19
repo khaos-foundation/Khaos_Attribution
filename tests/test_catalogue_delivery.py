@@ -58,3 +58,18 @@ def test_a_rights_record_read_from_a_delivery_validates():
               "writers": [{"name": "A. Writer", "role": "composer", "share_pct": 100}], "publishers": [],
               "masters": [{"name": "Example Records", "share_pct": 100}], "source": "ddex_ern"}
     assert validate_track_rights(record)["source"] == "ddex_ern"
+
+
+def test_a_takedown_names_its_recordings_without_files_and_a_delivery_never_does():
+    """A takedown message carries no files; a delivered recording without one is refused."""
+    down = copy.deepcopy(GOOD)
+    down["releases"][0]["takedown"] = True
+    del down["releases"][0]["tracks"][0]["file"]
+    assert validate_catalogue_delivery(down) is not None
+    down["releases"][0]["takedown"] = False
+    with pytest.raises(AttributionValidationError, match="names its file"):
+        validate_catalogue_delivery(down)
+    empty = copy.deepcopy(GOOD)
+    empty["releases"][0]["tracks"][0]["file"]["path"] = ""
+    with pytest.raises(AttributionValidationError):
+        validate_catalogue_delivery(empty)

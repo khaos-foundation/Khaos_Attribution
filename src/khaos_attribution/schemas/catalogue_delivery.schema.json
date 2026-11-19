@@ -122,8 +122,7 @@
                 "isrc",
                 "title",
                 "display_artist",
-                "contributors",
-                "file"
+                "contributors"
               ],
               "properties": {
                 "resource_reference": {
@@ -251,7 +250,8 @@
                       ],
                       "pattern": "^[0-9a-fA-F]+$"
                     }
-                  }
+                  },
+                  "description": "The delivered file; every recording of a delivered release has one, and a takedown names recordings without one."
                 }
               }
             }
