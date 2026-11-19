@@ -298,10 +298,24 @@ def test_a_venv_uv_cannot_make_is_reported_in_uvs_words_and_nothing_installs(tmp
 def test_a_folder_left_by_a_failed_try_is_replaced_on_the_next(tmp_path, monkeypatch):
     """A retry over a half-made .venv asks uv to replace it, so a fixed cause lets the install through."""
     root = tmp_path / "sa3"
-    (root / ".venv" / "khaos").mkdir(parents=True)
+    (root / ".venv" / "Lib").mkdir(parents=True)
     seen = []
     _torch_env_fakes(monkeypatch, root, _done(), seen)
     ok, note = P.environment(root, "torch")
     venv_calls = [env for cmd, env in seen if "venv" in cmd]
     assert venv_calls and venv_calls[0].get("UV_VENV_CLEAR") == "1"
     assert not ok and "left no interpreter" in note, note
+
+
+def test_mimetic_stops_at_a_venv_uv_cannot_make_and_leaves_no_folder(tmp_path, monkeypatch):
+    """mimetic-a0 stops on uv's reason before it writes its lock under .venv, so a retry finds no half-made folder."""
+    from khaos_attribution.engines.mimetic import provision as M
+    root = tmp_path / "mimetic"
+    root.mkdir()
+    seen = []
+    _torch_env_fakes(monkeypatch, root, _done(2, err="error: No interpreter found for Python 3.11"), seen)
+    monkeypatch.setattr(M, "_run", P._run)
+    monkeypatch.setattr(M, "uv_path", lambda: "uv")
+    ok, note = M.environment(root, "cuda")
+    assert not ok and "No interpreter found" in note, note
+    assert not (root / ".venv").exists()

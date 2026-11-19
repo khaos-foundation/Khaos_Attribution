@@ -68,7 +68,7 @@ def make_venv(uv: str, venv: Path, python: Path, version: str) -> tuple:
     # A folder left by an earlier failed try holds no interpreter; uv refuses it unless told to replace it.
     done = _run([uv, "venv", "-q", "--python", version, venv], env={**host_env(), "UV_VENV_CLEAR": "1"})
     if done.returncode != 0:
-        return False, f"the engine's Python {version} environment could not be made: {done.stderr.strip()[-300:]}"
+        return False, f"the engine's Python {version} environment could not be made: {done.stderr.strip()[:400]}"
     if not python.is_file():
         return False, f"uv made the environment but left no interpreter at {python}"
     return True, f"Python {version} environment made"
