@@ -103,6 +103,26 @@ def archive_url(repo: str, commit: str) -> str:
 KEPT_ACROSS_PINS = (".venv", "checkpoints", f"{MLX_SUBDIR}/.venv", f"{MLX_SUBDIR}/models/mlx")
 
 
+def remove_tree(path: Path) -> None:
+    """``path`` removed, read-only files too (git marks its objects so on Windows); raises when any of it stays."""
+    import stat  # noqa: PLC0415
+
+    def writable_then_again(func, p, _exc):
+        for q in (p, os.path.dirname(p)):
+            try:
+                os.chmod(q, os.stat(q).st_mode | stat.S_IWRITE | stat.S_IWUSR)
+            except OSError:
+                pass
+        func(p)
+    if path.exists():
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=writable_then_again)
+        else:
+            shutil.rmtree(path, onerror=writable_then_again)
+    if path.exists():
+        raise OSError(f"{path} could not be removed")
+
+
 def unpack_archive(url: str, root: Path, commit: str, kept: tuple = KEPT_ACROSS_PINS) -> None:
     """Stability's code at the commit from its archive, when git is not usable here: the top folder stripped,
     the commit recorded in .khaos-commit so the pin can still be read; an earlier unpack's environments and
@@ -114,7 +134,10 @@ def unpack_archive(url: str, root: Path, commit: str, kept: tuple = KEPT_ACROSS_
     with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310 — the descriptor's own code repository
         data = resp.read()
     part = root.with_name(root.name + ".part")
-    shutil.rmtree(part, ignore_errors=True)
+    old = root.with_name(root.name + ".old")
+    # Both are cleared before anything of the checkout moves, so a failure leaves it whole.
+    remove_tree(part)
+    remove_tree(old)
     part.mkdir(parents=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         members = [m for m in tar.getmembers() if "/" in m.name]
@@ -127,12 +150,21 @@ def unpack_archive(url: str, root: Path, commit: str, kept: tuple = KEPT_ACROSS_
             (part / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(part / rel, ignore_errors=True)
             shutil.move(str(root / rel), str(part / rel))
-    old = root.with_name(root.name + ".old")
-    shutil.rmtree(old, ignore_errors=True)
     if root.exists():
-        root.replace(old)
+        try:
+            root.replace(old)
+        except OSError:
+            # The checkout could not be set aside (a file in it is open): its environments and weights go back.
+            for rel in kept:
+                if (part / rel).exists():
+                    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(part / rel), str(root / rel))
+            raise
     part.replace(root)
-    shutil.rmtree(old, ignore_errors=True)
+    try:
+        remove_tree(old)
+    except OSError:
+        pass  # the checkout is in place; the next move clears what is left
 
 
 MLX_TRAINER = Path("optimized") / "mlx" / "scripts" / "lora_train_mlx.py"
@@ -172,7 +204,8 @@ def checkout(root: Path, *, check_only: bool = False) -> tuple:
     """Stability's code at the descriptor's commit; (ok, note)."""
     from khaos_attribution.engines.pins import checkout_commit  # noqa: PLC0415
     repo, commit = DESCRIPTOR.doc["code"]["repo"], DESCRIPTOR.commit
-    if not (root / ".git").is_dir() and checkout_commit(root) is None:
+    is_git = (root / ".git").is_dir()
+    if not is_git and checkout_commit(root) is None:
         if check_only:
             return False, f"Stable Audio 3 code not cloned at {root}"
         root.parent.mkdir(parents=True, exist_ok=True)
@@ -180,18 +213,21 @@ def checkout(root: Path, *, check_only: bool = False) -> tuple:
             done = _run(["git", "clone", "-q", repo, root])
             if done.returncode != 0:
                 return False, f"clone failed: {done.stderr.strip()[-300:]}"
+            is_git = True
         else:
             try:
                 unpack_archive(archive_url(repo, commit), root, commit)
             except (OSError, ValueError) as exc:
                 return False, f"the code archive could not be fetched: {exc}"
             return True, f"Stable Audio 3 code unpacked at the pin {commit[:12]}"
-    head = _run(["git", "-C", root, "rev-parse", "HEAD"]).stdout.strip() if (root / ".git").is_dir() else (checkout_commit(root) or "")
+    head = (_run(["git", "-C", root, "rev-parse", "HEAD"]).stdout.strip() if is_git and git_usable()
+            else (checkout_commit(root) or ""))
     if head == commit:
         return True, f"Stable Audio 3 code at the pin {commit[:12]}"
     if check_only:
         return False, f"Stable Audio 3 code at {head[:12] or 'an unknown commit'}, pin is {commit[:12]}"
-    if not (root / ".git").is_dir():
+    # A clone with no git to move it takes the archive at the pin, as a checkout made without git does.
+    if not is_git or not git_usable():
         try:
             unpack_archive(archive_url(repo, commit), root, commit)
         except (OSError, ValueError) as exc:

@@ -180,6 +180,174 @@ def test_an_unpacked_checkout_moves_to_a_new_pin_and_keeps_its_environments(tmp_
     assert (root / ".venv" / "bin" / "python").is_file() and (root / "optimized/mlx/models/mlx/t5gemma_f16.npz").is_file()
 
 
+def _no_git_here(monkeypatch):
+    """git is not on PATH: the slot is told so, and any git run fails as Windows does."""
+    from khaos_attribution.engines import pins
+    monkeypatch.setattr(P, "git_usable", lambda: False)
+    real = pins.subprocess.run
+
+    def run(cmd, *a, **k):
+        if cmd and cmd[0] == "git":
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(pins.subprocess, "run", run)
+
+    def fake_run(cmd, cwd=None, env=None):
+        if cmd and str(cmd[0]) == "git":
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        return _done()
+    monkeypatch.setattr(P, "_run", fake_run)
+
+
+def test_a_clone_at_the_pin_needs_no_git_to_be_read(tmp_path, monkeypatch):
+    """A git clone whose git has gone is read from its own files, and at the pin nothing runs git."""
+    root = tmp_path / "sa3"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text(P.DESCRIPTOR.commit + "\n")
+    _no_git_here(monkeypatch)
+    assert P.checkout(root, check_only=True) == (True, f"Stable Audio 3 code at the pin {P.DESCRIPTOR.commit[:12]}")
+    assert P.checkout(root)[0]
+
+
+def test_a_clone_off_the_pin_with_no_git_moves_by_the_archive(tmp_path, monkeypatch):
+    """A clone at an older commit, with git gone, takes the archive at the pin and keeps its environment."""
+    root = tmp_path / "sa3"
+    (root / ".git" / "refs" / "heads").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".git" / "refs" / "heads" / "main").write_text("0" * 40 + "\n")
+    (root / ".venv" / "Scripts").mkdir(parents=True)
+    (root / ".venv" / "Scripts" / "python.exe").write_text("")
+    _no_git_here(monkeypatch)
+    moved = {}
+
+    def fake_unpack(url, where, commit):
+        moved["url"] = url
+        part = where.with_name(where.name + ".part"); part.mkdir(); (part / ".khaos-commit").write_text(commit + "\n")
+        (where / ".venv").rename(part / ".venv")
+        import shutil; shutil.rmtree(where); part.replace(where)
+    monkeypatch.setattr(P, "unpack_archive", fake_unpack)
+    ok, note = P.checkout(root, check_only=True)
+    assert not ok and "at 000000000000, pin is" in note
+    ok, note = P.checkout(root)
+    assert ok and "moved to the pin" in note and P.DESCRIPTOR.commit in moved["url"]
+    assert (root / ".venv" / "Scripts" / "python.exe").is_file()
+    assert P.checkout(root, check_only=True)[0]
+
+
+def _read_only_objects(git_dir):
+    """A clone's objects as Git for Windows leaves them: the file and its folder read-only."""
+    import os
+    objects = git_dir / "objects" / "ab"
+    objects.mkdir(parents=True)
+    (objects / "cdef").write_bytes(b"x")
+    os.chmod(objects / "cdef", 0o444)
+    os.chmod(objects, 0o555)
+
+
+def test_the_archive_replaces_a_clone_with_read_only_objects_and_keeps_its_environment(tmp_path, monkeypatch):
+    """The real move, over a clone whose objects are read-only and a leftover of an earlier move that is too."""
+    import io
+    import tarfile
+    import urllib.request
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("stable-audio-3-abc/setup.py"); info.size = 0
+        tar.addfile(info, io.BytesIO(b""))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: _Resp(buf.getvalue()))
+    root = tmp_path / "sa3"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("0" * 40 + "\n")
+    _read_only_objects(root / ".git")
+    (root / ".venv" / "Scripts").mkdir(parents=True)
+    (root / ".venv" / "Scripts" / "python.exe").write_text("venv")
+    _read_only_objects(tmp_path / "sa3.old" / ".git")
+    _no_git_here(monkeypatch)
+    ok, note = P.checkout(root)
+    assert ok and "moved to the pin" in note, note
+    assert (root / ".venv" / "Scripts" / "python.exe").read_text() == "venv"
+    assert not (root / ".git").exists() and (root / "setup.py").is_file()
+    assert not (tmp_path / "sa3.old").exists() and not (tmp_path / "sa3.part").exists()
+    assert P.checkout(root, check_only=True)[0]
+
+
+def test_a_leftover_that_cannot_be_cleared_stops_the_move_before_anything_moves(tmp_path, monkeypatch):
+    """When the earlier move's leftover stays, the checkout and its environment are left exactly as they were."""
+    root = tmp_path / "sa3"
+    (root / ".venv").mkdir(parents=True)
+    (root / ".venv" / "keep").write_text("")
+    (tmp_path / "sa3.old").mkdir()
+    real = P.remove_tree
+
+    def stuck(path):
+        if path.name == "sa3.old":
+            raise OSError(f"{path} could not be removed")
+        real(path)
+    monkeypatch.setattr(P, "remove_tree", stuck)
+    import io
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: io.BytesIO(b""))
+    with pytest.raises(OSError):
+        P.unpack_archive("https://example.invalid/x.tar.gz", root, "a" * 40)
+    assert (root / ".venv" / "keep").is_file() and not (tmp_path / "sa3.part").exists()
+
+
+def test_a_checkout_that_cannot_be_set_aside_gets_its_environment_back(tmp_path, monkeypatch):
+    """A swap refused (a file open in the checkout) leaves the environment where it was, never in a folder cleared next."""
+    import io
+    import pathlib
+    import tarfile
+    import urllib.request
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("stable-audio-3-abc/setup.py"); info.size = 0
+        tar.addfile(info, io.BytesIO(b""))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: _Resp(buf.getvalue()))
+    root = tmp_path / "sa3"
+    (root / ".venv").mkdir(parents=True)
+    (root / ".venv" / "keep").write_text("venv")
+    (root / ".khaos-commit").write_text("0" * 40 + "\n")
+    real = pathlib.Path.replace
+
+    def refused(self, target):
+        if pathlib.Path(target).name == "sa3.old":
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real(self, target)
+    monkeypatch.setattr(pathlib.Path, "replace", refused)
+    with pytest.raises(OSError):
+        P.unpack_archive("https://example.invalid/x.tar.gz", root, P.DESCRIPTOR.commit)
+    assert (root / ".venv" / "keep").read_text() == "venv"
+    assert not (tmp_path / "sa3.part" / ".venv").exists()
+
+
+def test_a_fresh_clone_off_the_pin_is_moved_by_git_not_replaced(tmp_path, monkeypatch):
+    """With git here, a clone just made is checked out at the pin; the archive is never fetched over it."""
+    root = tmp_path / "sa3"
+    monkeypatch.setattr(P, "git_usable", lambda: True)
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        calls.append(cmd)
+        if "clone" in cmd:
+            (root / ".git").mkdir(parents=True)
+        if "rev-parse" in cmd:
+            return _done(out="1" * 40 + "\n")
+        return _done()
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "unpack_archive", lambda *a, **k: pytest.fail("the archive replaced a git clone"))
+    ok, note = P.checkout(root)
+    assert ok and note == f"checked out {P.DESCRIPTOR.commit[:12]}"
+    assert ["git", "-C", str(root), "checkout", "-q", "--detach", P.DESCRIPTOR.commit] in calls
+
+
 def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tmp_path, monkeypatch):
     from khaos_attribution.engines.sa3 import render as R
     monkeypatch.setattr(R, "WINDOWS", True)
