@@ -13,7 +13,7 @@ from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import find_root, venv_python
 from khaos_attribution.engines.worker_process import host_env
 from khaos_attribution.engines.sa3.provision import (Report, _from_mirror, _run, archive_url, contract_into, contract_mismatch,
-                                                     contract_present, git_usable, unpack_archive, uv_path)
+                                                     contract_present, git_usable, make_venv, unpack_archive, uv_path)
 
 PYTHON_VERSION = "3.11"
 # Mick's lock takes torch from the CUDA 12.6 index on Linux, which cannot drive a Blackwell card; 12.8 can.
@@ -111,7 +111,9 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         return False, f"no environment at {python}"
     uv = uv_path()
     if not python.is_file():
-        _run([uv, "venv", "-q", "--python", PYTHON_VERSION, root / ".venv"])
+        ok, note = make_venv(uv, root / ".venv", python, PYTHON_VERSION)
+        if not ok:
+            return False, note
     export = _run([uv, "export", "--frozen", "--no-hashes", "--no-emit-project", "--no-dev"], cwd=root)
     if export.returncode != 0 or not export.stdout.strip():
         return False, f"Mick's lock could not be exported: {export.stderr.strip()[-300:]}"

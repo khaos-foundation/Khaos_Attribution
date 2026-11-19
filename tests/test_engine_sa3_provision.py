@@ -196,9 +196,10 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
             return _done(out=P.DESCRIPTOR.commit + "\n")
         if "export" in cmd:
             return _done(out="einops==0.8.0\ntorch==2.7.1\n")
-        if "-c" in cmd and "import torch" in cmd[-1]:
+        if "venv" in cmd:
             (root / ".venv" / "Scripts").mkdir(parents=True, exist_ok=True)
             (root / ".venv" / "Scripts" / "python.exe").write_text("")
+        if "-c" in cmd and "import torch" in cmd[-1]:
             return _done(0, "ok")
         return _done()
     monkeypatch.setattr(P, "_run", fake_run)
@@ -267,3 +268,40 @@ def test_flash_attention_comes_ready_made_on_linux_and_matches_the_pins(monkeypa
     monkeypatch.setattr(P.sys, "platform", "linux")
     assert P.flash_attn_requirement("x86_64") == wheel
     assert P.flash_attn_requirement("aarch64") == P.FLASH_ATTN
+
+
+def _torch_env_fakes(monkeypatch, root, venv_result, seen):
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        seen.append((cmd, env))
+        if "venv" in cmd:
+            return venv_result
+        if "export" in cmd:
+            return _done(out="einops==0.8.0\n")
+        return _done()
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+
+
+def test_a_venv_uv_cannot_make_is_reported_in_uvs_words_and_nothing_installs(tmp_path, monkeypatch):
+    """A failed `uv venv` stops the install with uv's own reason, not a later step's missing-venv error."""
+    root = tmp_path / "sa3"
+    root.mkdir()
+    seen = []
+    _torch_env_fakes(monkeypatch, root, _done(2, err="error: No interpreter found for Python 3.11"), seen)
+    ok, note = P.environment(root, "torch")
+    assert not ok
+    assert "Python 3.11" in note and "No interpreter found" in note, note
+    assert not any("pip" in cmd for cmd, _ in seen), "no install step runs without a venv"
+
+
+def test_a_folder_left_by_a_failed_try_is_replaced_on_the_next(tmp_path, monkeypatch):
+    """A retry over a half-made .venv asks uv to replace it, so a fixed cause lets the install through."""
+    root = tmp_path / "sa3"
+    (root / ".venv" / "khaos").mkdir(parents=True)
+    seen = []
+    _torch_env_fakes(monkeypatch, root, _done(), seen)
+    ok, note = P.environment(root, "torch")
+    venv_calls = [env for cmd, env in seen if "venv" in cmd]
+    assert venv_calls and venv_calls[0].get("UV_VENV_CLEAR") == "1"
+    assert not ok and "left no interpreter" in note, note
