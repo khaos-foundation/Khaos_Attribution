@@ -319,3 +319,97 @@ def test_mimetic_stops_at_a_venv_uv_cannot_make_and_leaves_no_folder(tmp_path, m
     ok, note = M.environment(root, "cuda")
     assert not ok and "No interpreter found" in note, note
     assert not (root / ".venv").exists()
+
+
+def test_where_uv_cannot_get_the_pinned_python_the_running_one_stands_in(tmp_path, monkeypatch):
+    """A failed pinned venv is made again on the interpreter running the install, and the log says so."""
+    root = tmp_path / "sa3"
+    root.mkdir()
+    python = P.venv_python(root, "torch")
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        calls.append(cmd)
+        if "venv" in cmd:
+            if cmd[cmd.index("--python") + 1] != P.sys.executable:
+                return _done(2, err="error: No interpreter found for Python 3.11")
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("")
+        if "export" in cmd:
+            return _done(out="einops==0.8.0\n")
+        return _done(0, "ok")
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "WINDOWS", True)
+    ok, note = P.environment(root, "torch")
+    assert ok, note
+    assert [c[c.index("--python") + 1] for c in calls if "venv" in c] == ["3.11", P.sys.executable]
+    assert "No interpreter found" in note and "made on this Python" in note, note
+
+
+def test_a_real_uv_falls_back_to_the_running_python(tmp_path, monkeypatch):
+    """With the real uv, a version it cannot get still ends in a venv whose interpreter runs."""
+    import shutil
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is not on PATH")
+    if not (3, 10) <= P.sys.version_info[:2] <= (3, 12):
+        pytest.skip("the fallback takes only a Python from 3.10 to 3.12")
+    monkeypatch.setenv("UV_PYTHON_DOWNLOADS", "never")
+    venv = tmp_path / ".venv"
+    python = venv / ("Scripts/python.exe" if P.WINDOWS else "bin/python")
+    ok, note = P.make_venv(uv, venv, python, "3.6", fallback=True)
+    assert ok, note
+    assert "made on this Python" in note
+    assert subprocess.run([str(python), "-c", "print('ok')"], capture_output=True, text=True).stdout.strip() == "ok"
+
+
+def test_off_windows_there_is_no_fallback(tmp_path, monkeypatch):
+    """Off Windows the ready-made Flash Attention wheel is for 3.11 only, so a failed 3.11 venv stops the install."""
+    root = tmp_path / "sa3"
+    root.mkdir()
+    seen = []
+    _torch_env_fakes(monkeypatch, root, _done(2, err="error: No interpreter found for Python 3.11"), seen)
+    monkeypatch.setattr(P, "WINDOWS", False)
+    ok, note = P.environment(root, "torch")
+    assert not ok and "No interpreter found" in note and "this Python" not in note, note
+    assert len([cmd for cmd, _ in seen if "venv" in cmd]) == 1
+
+
+def test_the_fallback_takes_only_a_python_from_3_10_to_3_12(monkeypatch, tmp_path):
+    """A running Python outside the range the engine is known to take is refused, with uv's first reason."""
+    calls = []
+    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: calls.append(cmd) or _done(2, err="error: no 3.11"))
+    for version in ((3, 9, 0), (3, 13, 0)):
+        monkeypatch.setattr(P.sys, "version_info", version)
+        calls.clear()
+        ok, note = P.make_venv("uv", tmp_path / ".venv", tmp_path / "py", "3.11", fallback=True)
+        assert not ok and "no 3.11" in note and len(calls) == 1, (version, note)
+
+
+def test_an_environment_whose_interpreter_cannot_start_is_made_again(tmp_path, monkeypatch):
+    """A venv whose base Python moved is rebuilt, not patched in place."""
+    root = tmp_path / "sa3"
+    python = P.venv_python(root, "torch")
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    seen = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        seen.append(cmd)
+        if cmd[:3] == [str(python), "-c", "pass"]:
+            return _done(1, err="No Python at 'C:\\old\\python.exe'")
+        if "-c" in cmd:
+            return _done(1)
+        if "export" in cmd:
+            return _done(out="einops==0.8.0\n")
+        return _done()
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    P.environment(root, "torch")
+    venv_at = next(i for i, c in enumerate(seen) if "venv" in c)
+    assert any("pip" in c and "install" in c for c in seen[venv_at:]), "the install runs into the venv made again"
