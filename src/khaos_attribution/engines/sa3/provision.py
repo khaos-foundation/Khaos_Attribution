@@ -63,15 +63,26 @@ def _run(cmd: list, cwd: Path | None = None, env: dict | None = None) -> subproc
     return subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
 
 
-def make_venv(uv: str, venv: Path, python: Path, version: str) -> tuple:
-    """A fresh venv at ``venv`` on Python ``version``: (ok, note), with uv's own words when it cannot make one."""
+def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool = False) -> tuple:
+    """A fresh venv at ``venv`` on Python ``version``, or with ``fallback`` on the Python running this: (ok, note).
+    The note is empty on ``version``, says why on the fallback, and gives uv's own words when nothing can be made."""
     # A folder left by an earlier failed try holds no interpreter; uv refuses it unless told to replace it.
-    done = _run([uv, "venv", "-q", "--python", version, venv], env={**host_env(), "UV_VENV_CLEAR": "1"})
+    env = {**host_env(), "UV_VENV_CLEAR": "1"}
+    done = _run([uv, "venv", "-q", "--python", version, venv], env=env)
+    note = ""
     if done.returncode != 0:
-        return False, f"the engine's Python {version} environment could not be made: {done.stderr.strip()[:400]}"
+        why = done.stderr.strip()[:400]
+        if not (fallback and (3, 10) <= sys.version_info[:2] <= (3, 12)):
+            return False, f"the engine's Python {version} environment could not be made: {why}"
+        here = f"{sys.version_info.major}.{sys.version_info.minor}"
+        again = _run([uv, "venv", "-q", "--python", sys.executable, venv], env=env)
+        if again.returncode != 0:
+            return False, (f"the engine's Python {version} environment could not be made: {why}; "
+                           f"nor on this Python {here} ({sys.executable}): {again.stderr.strip()[:400]}")
+        note = f"Python {version} could not be had ({why}); the environment was made on this Python {here}"
     if not python.is_file():
         return False, f"uv made the environment but left no interpreter at {python}"
-    return True, f"Python {version} environment made"
+    return True, note
 
 
 def git_usable() -> bool:
@@ -245,10 +256,13 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     uv = uv_path()
     work = root / "work"
     work.mkdir(exist_ok=True)
-    if not python.is_file():
-        ok, note = make_venv(uv, root / ".venv", python, PYTHON_VERSION)
+    made = ""
+    # An interpreter that cannot start (its base Python moved or went) is made again, not patched.
+    if not python.is_file() or _run([python, "-c", "pass"]).returncode != 0:
+        # Windows alone may fall back: it installs no Flash Attention, whose ready-made wheel is for 3.11 only.
+        ok, made = make_venv(uv, root / ".venv", python, PYTHON_VERSION, fallback=WINDOWS)
         if not ok:
-            return False, note
+            return False, made
     export = _run([uv, "export", "--frozen", "--no-hashes", "--extra", "lora", "--no-emit-project", "--no-dev"], cwd=root)
     if export.returncode != 0 or not export.stdout.strip():
         return False, f"Stability's lock could not be exported: {export.stderr.strip()[-300:]}"
@@ -272,7 +286,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     probe = _run([python, "-c", probe_code])
     if probe.returncode != 0:
         return False, f"the environment installed but cannot run the engine: {probe.stderr.strip()[-200:]}"
-    return True, f"the engine's environment installed; {probe_note}"
+    return True, f"the engine's environment installed; {probe_note}" + (f"; {made}" if made else "")
 
 
 CONTRACT_SRC_ENV = "KHAOS_CONTRACT_SRC"

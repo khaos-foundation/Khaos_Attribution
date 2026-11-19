@@ -110,10 +110,11 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     elif check_only:
         return False, f"no environment at {python}"
     uv = uv_path()
+    made = ""
     if not python.is_file():
-        ok, note = make_venv(uv, root / ".venv", python, PYTHON_VERSION)
+        ok, made = make_venv(uv, root / ".venv", python, PYTHON_VERSION)
         if not ok:
-            return False, note
+            return False, made
     export = _run([uv, "export", "--frozen", "--no-hashes", "--no-emit-project", "--no-dev"], cwd=root)
     if export.returncode != 0 or not export.stdout.strip():
         return False, f"Mick's lock could not be exported: {export.stderr.strip()[-300:]}"
@@ -135,7 +136,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     probe = _run([python, "-c", code])
     if probe.returncode != 0:
         return False, f"the environment installed but cannot run the engine: {probe.stderr.strip()[-200:]}"
-    return True, f"the engine's environment installed; {note}"
+    return True, f"the engine's environment installed; {note}" + (f"; {made}" if made else "")
 
 
 def cached(repo: str, files: list, revision: str | None) -> bool:
