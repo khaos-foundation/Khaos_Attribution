@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -35,7 +36,12 @@ LINUX_ONLY = "the process table is read from /proc on Linux only"
 
 
 class WorkerFailed(RuntimeError):
-    """The worker could not start, exited badly or wrote no reply; the sentence says which."""
+    """The worker could not start, exited badly or wrote no reply; the sentence says which, and ``why`` the reason
+    alone (the reply's error or the tail of stderr), for a caller that words the failure itself."""
+
+    def __init__(self, message: str, why: str | None = None):
+        super().__init__(message)
+        self.why = message if why is None else why
 
 
 class WorkerCancelled(RuntimeError):
@@ -68,11 +74,11 @@ def engine_env(root, **extra: str) -> dict:
 
 # ── one request, one reply ────────────────────────────────────────────────────
 
-def _start(python: Path, script: Path, *, cwd: Path, env: dict, stderr) -> subprocess.Popen:
+def _start(python: Path, script: Path, *, cwd: Path, env: dict, stderr, args=()) -> subprocess.Popen:
     """The worker, in its host's process group so the host's own signals reach it, and marked so its tree is found."""
     mark = secrets.token_hex(8)
-    proc = subprocess.Popen([str(python), str(script)], cwd=str(cwd), env={**env, MARK_ENV: mark}, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=stderr, text=True, errors="replace")
+    proc = subprocess.Popen([str(python), str(script), *(str(a) for a in args)], cwd=str(cwd), env={**env, MARK_ENV: mark},
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, text=True, errors="replace")
     proc.khaos_mark = mark
     return proc
 
@@ -93,11 +99,49 @@ def run(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, labe
         stop_tree(proc)
     reply = _last_json(stdout)
     if isinstance(reply, dict) and reply.get("error"):
+        _log_failure(label, stderr)
         raise WorkerFailed(str(reply["error"]))
     if proc.returncode != 0 or not isinstance(reply, dict) or (required and required not in reply):
         tail = "\n".join((stderr or "").strip().splitlines()[-8:]) or (stdout or "")[-300:]
-        raise WorkerFailed(f"the {label} worker failed ({proc.returncode}): {tail}")
+        _log_failure(label, stderr)
+        raise WorkerFailed(f"the {label} worker failed ({proc.returncode}): {tail}", why=tail)
     return reply
+
+
+def _log_failure(label: str, stderr: str | None) -> None:
+    """What a failed worker wrote to stderr (its traceback) goes to the log; the error a caller shows stays one line."""
+    tail = "\n".join((stderr or "").strip().splitlines()[-40:])
+    if tail:
+        log.error("the %s worker failed; its stderr ends:\n%s", label, tail)
+
+
+def call(python: Path, script: Path, args, *, cwd: Path, env: dict, label: str, should_stop=None,
+         timeout=None) -> tuple:
+    """A plain command in an engine's environment, marked, bounded and stopped as a worker is: (exit code, stdout,
+    stderr). None waits for ever."""
+    try:
+        proc = _start(python, script, cwd=cwd, env=env, stderr=subprocess.PIPE, args=args)
+    except OSError as exc:
+        raise WorkerFailed(f"the {label} could not start: {exc}") from exc
+    try:
+        stdout, stderr = communicate(proc, "", should_stop, timeout, label)
+    finally:
+        stop_tree(proc)
+    return proc.returncode, stdout, stderr
+
+
+def answer(work) -> int:
+    """A worker's main: the request from stdin, ``work(request)``'s reply as the last line of stdout; a failure is
+    replied as its type and message, and its traceback written to stderr for the caller's log."""
+    req = json.loads(sys.stdin.read())
+    try:
+        reply = work(req)
+    except Exception as exc:  # noqa: BLE001 — the reply carries it
+        traceback.print_exc()
+        reply = {"error": f"{type(exc).__name__}: {exc}"}
+    sys.stdout.write("\n" + json.dumps(reply) + "\n")
+    sys.stdout.flush()
+    return 0 if not reply.get("error") else 1
 
 
 def _last_json(stdout: str):
@@ -142,9 +186,12 @@ def _released(proc, readers) -> None:
 
 
 def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, label: str, on_row=None,
-           required=()) -> dict:
-    """The worker's reply, its ``khaos-row`` lines handed to ``on_row`` as they come, so long work shows its
-    progress; WorkerFailed says what went wrong and names the reply keys in ``required`` that are missing."""
+           required=(), should_stop=None, timeout=None) -> dict:
+    """The worker's reply, its ``khaos-row`` lines handed to ``on_row`` as they come; a stop or the deadline (None
+    waits for ever) ends it as ``run`` does. WorkerFailed says what went wrong and names missing ``required`` keys."""
+    if timeout is DEFAULT:
+        timeout = DEFAULT_DEADLINE_S
+    deadline = time.monotonic() + timeout if timeout else None
     lines, arriving = [], queue.Queue()
     # stderr to a file, never a pipe: a worker that writes much to it would block while stdout is being read.
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as err:
@@ -163,14 +210,21 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
                 try:
                     line = arriving.get(timeout=POLL_S)
                 except queue.Empty:
+                    line = ""
                     if proc.poll() is not None:
                         # The worker has gone and its output has not ended: something it started holds the pipe.
                         _released(proc, [reader])
                         if reader.is_alive():
                             arriving.put(None)
-                    continue
                 if line is None:
                     break
+                # Read after every line as well as every quiet poll, so a worker that never falls silent still stops.
+                if should_stop is not None and should_stop():
+                    raise WorkerCancelled()
+                if deadline is not None and time.monotonic() > deadline:
+                    raise WorkerFailed(f"the {label} worker ran past its time limit")
+                if not line:
+                    continue
                 if not line.startswith(ROW_PREFIX):
                     lines.append(line)
                 elif on_row is not None:
@@ -189,7 +243,8 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
     reply = _last_json("".join(lines))
     if not isinstance(reply, dict) or reply.get("error") or returncode != 0:
         why = (reply.get("error") if isinstance(reply, dict) else None) or "\n".join(stderr.splitlines()[-6:])
-        raise WorkerFailed(f"the {label} worker failed: {why}")
+        _log_failure(label, stderr)
+        raise WorkerFailed(f"the {label} worker failed: {why}", why=why)
     missing = [k for k in required if k not in reply]
     if missing:
         raise WorkerFailed(f"the {label} worker's reply lacks {', '.join(missing)}")

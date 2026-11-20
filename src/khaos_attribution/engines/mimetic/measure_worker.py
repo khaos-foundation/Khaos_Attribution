@@ -134,20 +134,17 @@ def run(req: dict) -> dict:
     raise RuntimeError(f"unknown command {command!r}")
 
 
-def main() -> int:
-    req = json.loads(sys.stdin.read())
+def _peak_gb() -> float | None:
     try:
-        reply = run(req)
-        try:
-            import torch  # noqa: PLC0415
-            reply["peak_gb"] = round(torch.cuda.max_memory_allocated() / 1024 ** 3, 2) if torch.cuda.is_available() else None
-        except Exception:  # noqa: BLE001
-            reply["peak_gb"] = None
-    except Exception as exc:  # noqa: BLE001 — the reply carries it
-        reply = {"error": f"{type(exc).__name__}: {exc}"}
-    sys.stdout.write("\n" + json.dumps(reply) + "\n")
-    sys.stdout.flush()
-    return 0 if not reply.get("error") else 1
+        import torch  # noqa: PLC0415
+        return round(torch.cuda.max_memory_allocated() / 1024 ** 3, 2) if torch.cuda.is_available() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def main() -> int:
+    from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
+    return answer(lambda req: {**run(req), "peak_gb": _peak_gb()})
 
 
 if __name__ == "__main__":

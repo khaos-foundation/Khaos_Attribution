@@ -834,15 +834,8 @@ def _tid_kernels(req: dict) -> dict:
 
 
 def main() -> int:
-    req = json.loads(sys.stdin.read())
-    try:
-        reply = run(req)
-        reply["peak_gb"] = _peak_gb()
-    except Exception as exc:  # noqa: BLE001 — the reply carries it
-        reply = {"error": f"{type(exc).__name__}: {exc}"}
-    sys.stdout.write("\n" + json.dumps(reply) + "\n")
-    sys.stdout.flush()
-    return 0 if not reply.get("error") else 1
+    from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
+    return answer(lambda req: {**run(req), "peak_gb": _peak_gb()})
 
 
 TID_COMMANDS = {"tid_factors": _tid_factors, "tid_invert": _tid_invert, "tid_kernels": _tid_kernels}

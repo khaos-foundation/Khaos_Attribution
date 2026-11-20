@@ -4,7 +4,6 @@ the trainer takes it (khaos_attribution.engines.mimetic.clip); noise is seeded p
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -30,14 +29,8 @@ def heldout(req: dict) -> dict:
 
 
 def main() -> int:
-    req = json.loads(sys.stdin.read())
-    try:
-        reply = heldout(req)
-    except Exception as exc:  # noqa: BLE001 — the reply carries it
-        reply = {"error": f"{type(exc).__name__}: {exc}"}
-    sys.stdout.write("\n" + json.dumps(reply) + "\n")
-    sys.stdout.flush()
-    return 0 if not reply.get("error") else 1
+    from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
+    return answer(lambda req: heldout(req))
 
 
 if __name__ == "__main__":
