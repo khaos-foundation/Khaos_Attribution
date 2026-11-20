@@ -78,6 +78,72 @@
     "splits.writers"
    ],
    "version": "1.2.0"
+  },
+  {
+   "fields": [
+    "#dtrak_method.abstention",
+    "#dtrak_method.adapter_sha256",
+    "#dtrak_method.calibrated",
+    "#dtrak_method.calibration",
+    "#dtrak_method.dataset_hash",
+    "#dtrak_method.embedding_model",
+    "#dtrak_method.embedding_version",
+    "#dtrak_method.estimator_version",
+    "#dtrak_method.exposure_basis",
+    "#dtrak_method.feature_target",
+    "#dtrak_method.index_sha256",
+    "#dtrak_method.kind",
+    "#dtrak_method.lambda",
+    "#dtrak_method.lambda_multiple",
+    "#dtrak_method.measured_error_pp",
+    "#dtrak_method.n_pairs",
+    "#dtrak_method.n_tracks",
+    "#dtrak_method.noise_seed",
+    "#dtrak_method.projection_dim",
+    "#dtrak_method.similarity_informative",
+    "#dtrak_method.temperature",
+    "#dtrak_method.timesteps",
+    "#dtrak_method.validation",
+    "#party_split.name",
+    "#party_split.share_pct",
+    "#party_split.share_range_pct",
+    "adapter_version",
+    "artist_id",
+    "base_model_id",
+    "caveats",
+    "created_at",
+    "generation_id",
+    "groups",
+    "groups[].group_id",
+    "groups[].share_pct",
+    "groups[].titles",
+    "groups[].track_ids",
+    "influence",
+    "influence[].blended_share_pct",
+    "influence[].exposure_share_pct",
+    "influence[].influence_share_pct",
+    "influence[].share_range_pct",
+    "influence[].similarity_share_pct",
+    "influence[].title",
+    "influence[].track_id",
+    "method",
+    "method.embedding_model",
+    "method.embedding_version",
+    "method.estimator_version",
+    "method.exposure_basis",
+    "method.kind",
+    "method.similarity_informative",
+    "method.temperature",
+    "resemblance",
+    "schema_version",
+    "splits",
+    "splits.masters",
+    "splits.publishers",
+    "splits.unattributed_pct",
+    "splits.writers"
+   ],
+   "shape": "082c715525f7e5791e42d31b4febbd29e9c73da87eaf19f936616e03e4a6cc70",
+   "version": "1.3.0"
   }
  ],
  "catalogue_delivery": [
@@ -120,6 +186,7 @@
     "sender.ddex_party_id",
     "sender.name"
    ],
+   "shape": "dd6919e5e1a021fd8440e9e90e37dd88fcaf52f9e00b658901e7893bdb69200e",
    "version": "1.0.0"
   }
  ],
@@ -151,6 +218,7 @@
     "tracks[].workshop_review.by",
     "written_at_utc"
    ],
+   "shape": "c0738dd501c0baf84fe5afe0df833e0ca7827086ff2e9da0a9ccecb005c0ea89",
    "version": "1.0.0"
   }
  ],
@@ -185,6 +253,7 @@
     "training_date",
     "watermark_id"
    ],
+   "shape": "d723f956fc5c498e1316755955b46d7979adcd0f012c415016081a4f304b7122",
    "version": "1.1.0"
   }
  ],
@@ -206,6 +275,7 @@
     "timestamp",
     "watermark_id"
    ],
+   "shape": "b9667df0668a504703f8e8fbd106031571ce4a47419a93440c562abc75597eb3",
    "version": "1.0.0"
   }
  ],
@@ -222,6 +292,7 @@
     "schema_version",
     "watermark_id"
    ],
+   "shape": "0b6fc5a2f97780d7ce4b39b3146db995803f8b261e75e5cf8abdc4e50eddc1e7",
    "version": "1.0.0"
   }
  ],
@@ -254,6 +325,36 @@
     "writers"
    ],
    "version": "1.0.0"
+  },
+  {
+   "fields": [
+    "#isrc_field.status",
+    "#isrc_field.value",
+    "#iswc_field.status",
+    "#iswc_field.value",
+    "#publisher.ipi",
+    "#publisher.name",
+    "#publisher.share_pct",
+    "#writer.ipi",
+    "#writer.name",
+    "#writer.role",
+    "#writer.share_pct",
+    "isrc",
+    "iswc",
+    "masters",
+    "performers",
+    "performers[].name",
+    "performers[].role",
+    "publishers",
+    "schema_version",
+    "source",
+    "title",
+    "track_id",
+    "verified_date",
+    "writers"
+   ],
+   "shape": "dcfed3b550467675e7c45bc003b88e85427e7322d19b1f3e6e17e95966967880",
+   "version": "1.1.0"
   }
  ]
 }

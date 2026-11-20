@@ -161,9 +161,14 @@ closed and its `schema_version` is a const, so a key there would invalidate
 every estimate ever written. Both schemas otherwise reject unknown fields, so typos in field names fail validation
 rather than passing silently.
 
-A new field always comes with a new `schema_version` (a test pins each schema's fields beside its version). A reader
-that meets a `schema_version` past the ones it reads raises `WrittenByNewerContract`, which says the record was written
-by a newer contract and which version this one reads up to; an unknown field under a known version is named as such.
+A change to what a schema accepts (a field, an enum value, a pattern, a required list) comes with a new
+`schema_version`: a test pins each schema's fields and the hash of its rules beside its version, and
+`scripts/goldens.py schema-pin <name>` appends the pin. A writer stamps a new version only on a record that uses what it
+added (a track rights record whose source is `ddex_ern` takes 1.1.0 through `track_rights_schema_version`), so a room
+on an older contract still reads every other record. A reader that meets a `schema_version` past the ones it reads
+raises `WrittenByNewerContract`, which says the record was written by a newer contract and which version this one
+reads up to; an unknown field under a known version is named as such. From 1.3.0 a dtrak estimate's `method` has a
+declared shape: the error every share travels with, whether it was calibrated, and the index it was measured over.
 
 ## What the attribution estimate carries about its own signal
 

@@ -11,7 +11,8 @@
       "enum": [
         "1.0.0",
         "1.1.0",
-        "1.2.0"
+        "1.2.0",
+        "1.3.0"
       ]
     },
     "generation_id": {
@@ -282,6 +283,104 @@
         "share_range_pct"
       ],
       "additionalProperties": false
+    },
+    "dtrak_method": {
+      "type": "object",
+      "description": "A dtrak estimate's method from schema 1.3.0: what the money's split was read with, and the error it travels with.",
+      "properties": {
+        "kind": {
+          "const": "dtrak"
+        },
+        "estimator_version": {
+          "type": "string"
+        },
+        "exposure_basis": {
+          "type": "string"
+        },
+        "embedding_model": {},
+        "embedding_version": {},
+        "similarity_informative": {
+          "type": "boolean"
+        },
+        "temperature": {},
+        "feature_target": {
+          "type": "string"
+        },
+        "lambda_multiple": {
+          "type": "number"
+        },
+        "lambda": {
+          "type": "number"
+        },
+        "projection_dim": {
+          "type": "integer"
+        },
+        "timesteps": {
+          "type": "array"
+        },
+        "noise_seed": {},
+        "n_pairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "n_tracks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "index_sha256": {
+          "type": "string"
+        },
+        "adapter_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dataset_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measured_error_pp": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "The error, in percentage points, every share travels with."
+        },
+        "validation": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "calibrated": {
+          "type": "boolean"
+        },
+        "abstention": {
+          "type": "object",
+          "description": "The abstention reading, when one was taken."
+        },
+        "calibration": {
+          "type": "object",
+          "description": "The calibration block, applied or the reason it was not."
+        }
+      },
+      "required": [
+        "kind",
+        "estimator_version",
+        "exposure_basis",
+        "similarity_informative",
+        "feature_target",
+        "lambda",
+        "n_pairs",
+        "n_tracks",
+        "index_sha256",
+        "measured_error_pp",
+        "validation",
+        "calibrated"
+      ]
     }
   },
   "allOf": [
@@ -321,6 +420,36 @@
           "required": [
             "groups"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "1.3.0"
+          },
+          "method": {
+            "properties": {
+              "kind": {
+                "const": "dtrak"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "method": {
+            "$ref": "#/$defs/dtrak_method"
+          }
         }
       }
     }
