@@ -54,6 +54,29 @@ def space_origin_of(value) -> str | None:
     return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
 
 
+# The shape of file this code writes (PRAGMA user_version): it opens no file a newer register wrote.
+STORE_VERSION = 1
+
+
+class NewerFile(RuntimeError):
+    """A database written by a newer register than this code: update the code, never the file."""
+
+
+def file_version(path: Path) -> int:
+    """A database's user_version, read without opening it for writing; 0 for none or no file."""
+    path = Path(path)
+    if not path.is_file():
+        return 0
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+        return int(db.execute("PRAGMA user_version").fetchone()[0])
+
+
+def refuse_newer(path: Path, version: int, ours: int) -> None:
+    if version > ours:
+        raise NewerFile(f"{path} was written by a newer register (file version {version}; this code reads up to {ours}): "
+                        "update the code to that release, never the file")
+
+
 # A struck model returns when a warden admits it again; a withdrawn one never does. Neither is served.
 NOT_SERVED = ("withdrawn", "struck")
 # Between whole readings of the ledger's chain, a public page checks only the rows since the last one.
@@ -74,12 +97,17 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._local = threading.local()
+        version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
+        refuse_newer(self.path, version, STORE_VERSION)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self._ledger_status = None
         self._add_payload_column()
         self._served_as_origins()
         self.log = TransLog(self)
+        if version < STORE_VERSION:
+            # An older file has taken every step above: from here on it is this version's.
+            self.db.execute(f"PRAGMA user_version = {STORE_VERSION}")
 
     def _served_as_origins(self) -> None:
         """Rows kept before addresses were origins are rewritten as theirs, the latest report winning, so a later

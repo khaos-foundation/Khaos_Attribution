@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from khaos_attribution.fingerprint import best_phase_profile, dominant, is_confident
-from register_service.store import now_utc
+from register_service.store import now_utc, refuse_newer
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outputs (generation_id TEXT PRIMARY KEY, serial INTEGER NOT NULL, payload INTEGER NOT NULL,
@@ -34,6 +34,8 @@ CREATE INDEX IF NOT EXISTS claim_fingerprints_claim ON claim_fingerprints (claim
 CREATE TABLE IF NOT EXISTS claim_shares (claim_id INTEGER NOT NULL, other_claim INTEGER NOT NULL, votes INTEGER NOT NULL,
   at TEXT NOT NULL, PRIMARY KEY (claim_id, other_claim));
 """
+# The shape of file this code writes (PRAGMA user_version): it opens no file a newer register wrote.
+INDEX_VERSION = 1
 MAX_LANDMARKS = 200_000
 MAX_PHASES = 8
 # Columns a first-version index file gains in place.
@@ -57,11 +59,15 @@ class Index:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._local = threading.local()
+        version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
+        refuse_newer(self.path, version, INDEX_VERSION)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         for table, column, declaration in _ADDED:
             if column not in {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        if version < INDEX_VERSION:
+            self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
 
     @property
     def db(self) -> sqlite3.Connection:

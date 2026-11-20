@@ -12,6 +12,7 @@
     python -m register_service log-stamp | log-upgrade    the day's heartbeat entry and the anchor of its root; the upgrade
     python -m register_service log-recover    put back entries the published log holds and this database lost
     python -m register_service bill-of-materials    what this environment runs, as JSON
+    python -m register_service check-version <folder>    exit 1 when a database there is newer than this code
 """
 
 from __future__ import annotations
@@ -43,12 +44,15 @@ def main(argv=None) -> int:
     sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again; after a "
                                       "crashed export, run this")
     sub.add_parser("bill-of-materials")
+    sub.add_parser("check-version").add_argument("folder")
     a = p.parse_args(argv)
     if a.cmd == "bill-of-materials":
         import json  # noqa: PLC0415
         from register_service.bom import bill_of_materials  # noqa: PLC0415
         print(json.dumps(bill_of_materials(), indent=1, sort_keys=True))
         return 0
+    if a.cmd == "check-version":
+        return check_version(a.folder)
     cfg = settings()
     if a.cmd.startswith("log-"):
         from register_service.app import LOG_OFF, log_started  # noqa: PLC0415
@@ -153,6 +157,21 @@ def main(argv=None) -> int:
             print(f"  {p_}")
         return 0 if ok and not problems else 1
     return 0
+
+
+def check_version(folder) -> int:
+    """Whether this code can open the databases in a folder (a backup before it is put back): 1 when one is newer."""
+    from pathlib import Path  # noqa: PLC0415
+    from register_service.index import INDEX_VERSION  # noqa: PLC0415
+    from register_service.store import STORE_VERSION, file_version  # noqa: PLC0415
+    newer = False
+    for name, ours in (("register.sqlite3", STORE_VERSION), ("index.sqlite3", INDEX_VERSION)):
+        version = file_version(Path(folder) / name)
+        print(f"{name}: file version {version}, this code reads up to {ours}")
+        newer |= version > ours
+    if newer:
+        print("a database here was written by a newer register: put it back only with that release's code")
+    return 1 if newer else 0
 
 
 def ledger_whole(cfg: dict, store: Store) -> None:

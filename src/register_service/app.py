@@ -272,8 +272,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     cfg = cfg or settings()
     # Read before the store is opened: opening it never counts as a start.
     log_on = log_runs(cfg)
-    store = Store(cfg["data"] / "register.sqlite3")
-    index = Index(cfg["data"] / "index.sqlite3")
+    from register_service.store import NewerFile  # noqa: PLC0415
+    try:
+        store = Store(cfg["data"] / "register.sqlite3")
+        index = Index(cfg["data"] / "index.sqlite3")
+    except NewerFile as exc:
+        raise SystemExit(str(exc)) from None
     key = load_register_key(cfg)
     store.remember_register_key(key.key_id, key.public_pem())
     log_key, log_dev = (load_log_key(cfg), log_key_settings(cfg)[1]) if log_on else (None, False)
