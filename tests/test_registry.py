@@ -59,7 +59,7 @@ def test_a_machine_key_is_made_once_and_its_id_is_the_public_keys(tmp_path):
     k1 = R.SigningKey.load_or_create(tmp_path / R.MACHINE_KEY_FILE)
     k2 = R.SigningKey.load_or_create(tmp_path / R.MACHINE_KEY_FILE)
     assert k1.key_id == k2.key_id and len(k1.key_id) == 16
-    assert (tmp_path / R.MACHINE_KEY_PUBLIC_FILE).read_text(encoding="utf-8") == k1.public_pem()
+    assert (tmp_path / R.MACHINE_KEY_FILE).with_suffix(".pub").read_text(encoding="utf-8") == k1.public_pem()
     sig = k1.sign(b"hello")
     assert R.verify(k1.public_pem(), b"hello", sig) and not R.verify(k1.public_pem(), b"hullo", sig)
     assert not R.verify(R.SigningKey.generate().public_pem(), b"hello", sig)
