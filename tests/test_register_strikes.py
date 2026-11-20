@@ -165,3 +165,108 @@ def test_a_release_that_lands_after_a_withdrawal_is_not_offered(register, monkey
     monkeypatch.setattr(index, "release", withdrawn_meanwhile)
     client.release("gen-late", serial, FP)
     assert not index.offered("gen-late")
+
+
+def _interleaved(store, monkeypatch, after):
+    """store.log_append that runs ``after`` between its commit and the app's own next step."""
+    real = store.log_append
+
+    def append_then(entry, key_id):
+        out = real(entry, key_id)
+        monkeypatch.setattr(store, "log_append", real)
+        after()
+        return out
+    monkeypatch.setattr(store, "log_append", append_then)
+
+
+def test_a_withdrawal_landing_between_a_readmit_and_its_offer_keeps_the_pieces_out(register, monkeypatch):
+    app, store, http = register
+    key, client, space, warden, signed, serial = _published(register)
+    _strike(store, warden, signed)
+    _interleaved(store, monkeypatch, lambda: store.withdraw(serial, key.key_id, "the artist withdrew"))
+    warden.log_append({"kind": "admit", "record_sha256": signed["record_sha256"], "sitting": "S2"})
+    assert store.state_of(serial) == "withdrawn" and not app.state.index.offered("gen-1")
+
+
+def test_a_readmit_landing_between_a_strike_and_its_offer_leaves_the_pieces_offered(register, monkeypatch):
+    app, store, http = register
+    key, client, space, warden, signed, serial = _published(register)
+    _interleaved(store, monkeypatch, lambda: store.log_append(
+        {"kind": "admit", "record_sha256": signed["record_sha256"], "sitting": "S2"}, warden.key.key_id))
+    _strike(store, warden, signed)
+    assert store.state_of(serial) == "registered" and app.state.index.offered("gen-1")
+
+
+def test_withdrawing_a_struck_model_is_a_log_entry_no_admit_undoes(register, tmp_path, capsys):
+    from khaos_attribution.translog import verify as V
+    from tests.test_register_log import run_page_verifier
+    app, store, http = register
+    key, client, space, warden, signed, serial = _published(register)
+    _strike(store, warden, signed)
+    client.withdraw(serial, "the artist withdrew")
+    last = store.log.entries(store.log.size() - 1, store.log.size())[0]["entry"]
+    assert last["kind"] == "withdraw" and last["record_sha256"] == signed["record_sha256"] and "reason" not in last
+    with pytest.raises(R.RegisterError) as e:
+        warden.log_append({"kind": "admit", "record_sha256": signed["record_sha256"], "sitting": "S2"})
+    assert e.value.status == 422
+    leaf = store.log.admit_leaf_of(signed["record_sha256"])
+    pem = tmp_path / "k.pub"
+    pem.write_text(store.log.signer.public_pem())
+    mirror = app.state.cfg["data"] / "mirror"
+    assert V.main([leaf, "--mirror", str(mirror), "--key", str(pem), "--state", "none"]) == V.PROVED
+    assert "WITHDRAWN by the account that published it" in capsys.readouterr().out
+    page, = run_page_verifier(tmp_path, [(mirror, leaf, store.log.signer.public_pem())])
+    assert "bad|Withdrawn by the account that published it." in page
+    assert "Withdrawn by the account that published it" in http.get(f"/models/{serial}").text
+
+
+def test_a_struck_model_withdrawn_after_the_backup_comes_back_withdrawn(register, tmp_path):
+    from register_service.translog import recover
+    app, store, http = register
+    cfg = app.state.cfg
+    key, client, space, warden, signed, serial = _published(register)
+    _strike(store, warden, signed)
+    store.db.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy(cfg["data"] / "register.sqlite3", tmp_path / "backup.sqlite3")
+    client.withdraw(serial, "the artist withdrew")
+    for p in cfg["data"].glob("register.sqlite3*"):
+        p.unlink()
+    shutil.copy(tmp_path / "backup.sqlite3", cfg["data"] / "register.sqlite3")
+    st = create_app(cfg).state.store
+    assert st.record(serial)["state"] == "struck"
+    ok, lines = recover(st, log_places(cfg)[3], st.log.signer.public_pem())
+    assert ok, lines
+    app3 = create_app(cfg)
+    store3 = app3.state.store
+    assert store3.record(serial)["state"] == "withdrawn"
+    warden._post = _Transport(TestClient(app3), warden.key)
+    with pytest.raises(R.RegisterError) as e:
+        warden.log_append({"kind": "admit", "record_sha256": signed["record_sha256"], "sitting": "S2"})
+    assert e.value.status == 422 and store3.ledger_ok()
+
+
+def test_the_start_sets_every_offer_from_the_store_both_ways(register):
+    app, store, http = register
+    key, client, space, warden, signed, serial = _published(register)
+    app.state.index.withdraw_model(serial)
+    assert not app.state.index.offered("gen-1")
+    assert create_app(app.state.cfg).state.index.offered("gen-1"), "a re-admit cut short before its offer is mended at start"
+
+
+def test_a_move_the_start_takes_from_the_log_has_a_ledger_row(register, tmp_path):
+    from register_service.translog import recover
+    app, store, http = register
+    cfg = app.state.cfg
+    key, client, space, warden, signed, serial = _published(register)
+    store.db.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy(cfg["data"] / "register.sqlite3", tmp_path / "backup.sqlite3")
+    _strike(store, warden, signed)
+    for p in cfg["data"].glob("register.sqlite3*"):
+        p.unlink()
+    shutil.copy(tmp_path / "backup.sqlite3", cfg["data"] / "register.sqlite3")
+    st = create_app(cfg).state.store
+    assert recover(st, log_places(cfg)[3], st.log.signer.public_pem())[0]
+    store3 = create_app(cfg).state.store
+    rows = [r for r in store3.ledger() if r["kind"] == "state"]
+    assert rows and rows[-1]["serial"] == serial and rows[-1]["detail"] == {"state": "struck", "restored_from_log": True}
+    assert store3.ledger_ok()

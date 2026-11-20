@@ -127,6 +127,12 @@ class Index:
             return sum(self.db.execute("UPDATE outputs SET withdrawn = 1 WHERE serial = ? AND withdrawn = 0", (int(s),)).rowcount
                        for s in serials)
 
+    def set_offered(self, served: list, not_served: list) -> None:
+        """The offer flag of every model the store knows, both ways, at start; a serial it does not know is left as it is."""
+        with self._lock:
+            self.db.executemany("UPDATE outputs SET withdrawn = 1 WHERE serial = ? AND withdrawn = 0", [(int(s),) for s in not_served])
+            self.db.executemany("UPDATE outputs SET withdrawn = 0 WHERE serial = ? AND withdrawn = 1", [(int(s),) for s in served])
+
     def restore_model(self, serial: int) -> int:
         """A struck model a warden admitted again: its pieces are offered again. Never called for a withdrawn model."""
         with self._lock:

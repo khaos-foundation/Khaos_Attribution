@@ -59,7 +59,6 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self._ledger_status = None
-        self.moved_at_open: list = []
         self._add_payload_column()
         self.log = TransLog(self)
 
@@ -231,11 +230,13 @@ class Store:
         return serial, counter, False
 
     def _state_in_log(self, record_sha256: str) -> str | None:
-        """What the log says of a record whose every admit is struck: 'struck' when wardens' machines struck them all,
-        'withdrawn' when its account's withdrawal did; None while any admit is not struck."""
+        """What the log says of a record whose every admit is struck: 'withdrawn' when its account withdrew it (a
+        revoke no warden appended, or a withdraw entry), else 'struck'; None while any admit is not struck."""
         states = self.log.admit_states(record_sha256)
         if not states or set(states.values()) != {"struck"}:
             return None
+        if self.db.execute("SELECT 1 FROM log_leaves WHERE kind = 'withdraw' AND record_sha256 = ?", (record_sha256,)).fetchone():
+            return "withdrawn"
         for r in self.db.execute("SELECT b.body FROM log_leaves l JOIN log_bodies b ON b.leaf_hash = l.leaf_hash"
                                  " WHERE l.kind = 'revoke' AND l.record_sha256 = ?", (record_sha256,)).fetchall():
             try:
@@ -258,6 +259,10 @@ class Store:
         if state == "withdrawn" and changed:
             self._ledger("withdraw", serial, record_sha256, None, {"reason": "struck in the log", "restored_from_log": True})
 
+    def state_of(self, serial: int) -> str | None:
+        row = self.db.execute("SELECT state FROM records WHERE serial = ?", (int(serial),)).fetchone()
+        return row["state"] if row else None
+
     def reconcile_states_locked(self) -> list:
         """Every record not withdrawn set to what the log says, so a strike put back by a recovery takes effect:
         (serial, state) for each record that moved."""
@@ -273,6 +278,8 @@ class Store:
                 state = "registered"
             if state != r["state"]:
                 self._set_state_locked(r["serial"], r["record_sha256"], state)
+                if state != "withdrawn":
+                    self._ledger("state", r["serial"], r["record_sha256"], None, {"state": state, "restored_from_log": True})
                 moved.append((r["serial"], state))
         return moved
 
@@ -308,8 +315,11 @@ class Store:
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
             if self.log.admit_leaf_of(row["record_sha256"]) is None:
                 raise RuntimeError(f"record {serial} has no admit entry in the log")
-            for leaf in [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]:
+            standing = [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]
+            for leaf in standing:
                 self.log.revoke_locked(leaf, reason[:400].strip() or "withdrawn by the account that published it", time=at)
+            if not standing:
+                self.log.withdraw_locked(serial, row["record_sha256"], time=at)
             return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
 
     def served(self, serial: int, key_id: str, space_url: str, state: str) -> dict:
@@ -360,6 +370,10 @@ class Store:
         return [r["serial"] for r in self.db.execute(
             "SELECT serial FROM records WHERE state IN ('withdrawn', 'struck') ORDER BY serial")]
 
+    def served_serials(self) -> list:
+        return [r["serial"] for r in self.db.execute(
+            "SELECT serial FROM records WHERE state NOT IN ('withdrawn', 'struck') ORDER BY serial")]
+
     def struck_serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'struck' ORDER BY serial")]
 
@@ -400,7 +414,7 @@ class Store:
             n = self.log.genesis_locked()
             self.log.resign_locked()
             self.log.sync_reserved_locked()
-            self.moved_at_open = self.reconcile_states_locked()
+            self.reconcile_states_locked()
             return n
 
     def log_append(self, entry: dict, key_id: str) -> dict:

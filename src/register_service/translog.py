@@ -450,6 +450,11 @@ class TransLog:
                                                wardens=_names(wardens), sitting=_text(sitting, "sitting", False),
                                                appended_by=appended_by))
 
+    def withdraw_locked(self, serial: int, record_sha256: str, time: str | None = None) -> dict:
+        """An account's withdrawal of a model the wardens had already struck: with no admit left to revoke, this entry
+        is what keeps the withdrawal, which no admit undoes, in the log."""
+        return self.append_locked(T.make_entry("withdraw", time=time, serial=int(serial), record_sha256=record_sha256))
+
     def confirm_locked(self, answers: str, confirms: str | None = None, wardens=None, sitting=None,
                        appended_by: str | None = None) -> dict:
         """The wardens' answer to a lost leaf: nothing it held strikes the admits before it (or only `confirms`)."""

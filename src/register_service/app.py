@@ -319,18 +319,23 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 log.error("mirror not written for %s: %s", serial, exc)
         log_mirror_quietly()
 
-    def model_moved(serial: int, state: str) -> None:
-        """The index follows a model the log struck, or admitted again."""
-        if state in NOT_SERVED:
-            index.withdraw_model(serial)
-        else:
-            index.restore_model(serial)
+    flag_lock = threading.Lock()
 
-    for serial, state in store.moved_at_open:
-        model_moved(serial, state)
-    # Nothing the store does not serve is offered, whatever an earlier start left in the index.
-    index.withdraw_models(store.withdrawn_serials())
-    if not store.log.blocked:
+    def sync_offered(serial: int) -> None:
+        """The index offers a model's pieces exactly while the store serves it: read after the change committed, under
+        one lock, so the last of two racing changes always decides."""
+        with flag_lock:
+            state = store.state_of(serial)
+            if state in NOT_SERVED:
+                index.withdraw_model(serial)
+            elif state is not None:
+                index.restore_model(serial)
+
+    if store.log.blocked:
+        # A store behind its log may have lost a withdrawal: it only ever takes pieces out of the offer.
+        index.withdraw_models(store.withdrawn_serials())
+    else:
+        index.set_offered(store.served_serials(), store.withdrawn_serials())
         # A model file a failed write or a recovery left missing or stale is written now; a blocked store is behind.
         unresolved_now = set(store.unresolved_serials())
         try:
@@ -442,7 +447,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             except PermissionError as e:
                 raise HTTPException(403, str(e)) from None
             index.release_claims(out["serial"])
-            index.withdraw_model(out["serial"])
+            sync_offered(out["serial"])
             mirror_quietly(out["serial"])
             return out
         return await run_in_threadpool(once, body, key_id, work)
@@ -498,8 +503,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(422, str(e)) from None
             # A withdrawal that ran between the read above and the insert flagged every row but this one.
-            if (store.record(rec["serial"]) or {}).get("state") in NOT_SERVED:
-                index.withdraw_model(rec["serial"])
+            sync_offered(rec["serial"])
             kept = manifest is not None and index.keep_manifest(gid, manifest, key_id)
             return {**{k: out[k] for k in ("generation_id", "serial", "payload", "released_at", "landmarks", "already")},
                     "manifest_kept": kept}
@@ -848,7 +852,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             after = set(store.unresolved_serials())
             moved = out.get("model")
             if moved:
-                model_moved(moved["serial"], moved["state"])
+                sync_offered(moved["serial"])
             # Each model whose state or review the entry changed has its public file rewritten.
             mirror_quietly(*sorted((before ^ after) | ({moved["serial"]} if moved else set())), unresolved=after)
             return out
