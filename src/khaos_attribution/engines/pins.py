@@ -68,10 +68,6 @@ def checkout_commit(root) -> str | None:
     return sha if _SHA_RE.match(sha) else None
 
 
-def is_sha(value) -> bool:
-    return isinstance(value, str) and bool(_SHA_RE.match(value))
-
-
 def contract_code_hash(root=None) -> str:
     """"<version> <sha256>" of the khaos_attribution package this interpreter imports (or the package folder given):
     every .py and .json file by its path, line endings normalised so a Windows checkout and a wheel agree."""

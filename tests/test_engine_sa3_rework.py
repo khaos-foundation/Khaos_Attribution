@@ -82,7 +82,7 @@ def test_regions_widen_outward_to_whole_latent_frames_clip_to_the_piece_and_merg
 def test_the_noise_each_strength_starts_from_is_the_descriptors_and_follow_runs_the_right_way():
     table = packaged_descriptor("khaos_attribution.engines.sa3").rework
     level = lambda mode, **kw: RW.noise_level(mode, RenderRequest(prompt="p", duration_seconds=30, **kw), table)  # noqa: E731
-    assert [level("repaint", repaint_mode=m) for m in RW.REPAINT_MODES] == [0.3, 0.6, 1.0]
+    assert [level("repaint", repaint_mode=m) for m in ("conservative", "balanced", "aggressive")] == [0.3, 0.6, 1.0]
     assert level("repaint") == 0.6, "a fix with no strength named is a Rework"
     assert level("retake", retake_variance=0.2) == 0.2 and level("retake") == 0.5
     assert level("audio2audio", cover_strength=0.8) == pytest.approx(0.2), "following more is less noise"

@@ -142,7 +142,8 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
         from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
         raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker")
     if timestep_norm:
-        raise NotImplementedError("per-timestep normalisation is not built on the mimetic-a0 worker")
+        from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+        raise GradientUnavailable("per-timestep normalisation is not built on the mimetic-a0 worker")
     if param_filter:
         from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
         raise GradientUnavailable("a parameter filter is not built on the mimetic-a0 worker")

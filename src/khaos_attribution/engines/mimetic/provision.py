@@ -1,4 +1,4 @@
-"""mimetic-a0's provision slot: Mick's code at the descriptor's pin, its own environment (his lock, torch from the
+"""mimetic-a0's provision slot: the engine's code at the descriptor's pin, its own environment (its lock, torch from the
 CUDA 12.8 index on an NVIDIA machine, stable-audio-tools' training extras the adapters need), the contract, and the
 weights the descriptor lists, from Khaos's own mirror first. --check reports without changing anything."""
 
@@ -16,10 +16,10 @@ from khaos_attribution.engines.sa3.provision import (Report, _from_mirror, _run,
                                                      contract_present, git_usable, make_venv, unpack_archive, uv_path)
 
 PYTHON_VERSION = "3.11"
-# Mick's lock takes torch from the CUDA 12.6 index on Linux, which cannot drive a Blackwell card; 12.8 can.
+# The engine's lock takes torch from the CUDA 12.6 index on Linux, which cannot drive a Blackwell card; 12.8 can.
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 TORCH_FAMILY = ("torch==2.7.1", "torchaudio==2.7.1", "torchvision==0.22.1")
-# stable-audio-tools' own train extras at Mick's pin, less what its trainer never imports here.
+# stable-audio-tools' own train extras at the engine's pin, less what its trainer never imports here.
 TRAIN_EXTRAS = ("prefigure==0.0.9", "wandb==0.15.4", "webdataset==0.2.100", "auraloss==0.4.0", "descript-audio-codec==1.0.0",
                 "matplotlib==3.11.2")
 STRIPPED = ("torch==", "torchaudio==", "torchvision==", "triton==", "nvidia-", "#", "-e")
@@ -35,7 +35,7 @@ def runtime_for(device: str = "auto") -> str:
 
 
 def locked_requirements(export: str) -> str:
-    """Mick's lock as requirements: the torch family left to the caller, stable-audio-tools from its archive so no
+    """The engine's lock as requirements: the torch family left to the caller, stable-audio-tools from its archive so no
     git is needed."""
     out = []
     for line in export.splitlines():
@@ -61,7 +61,7 @@ def probe_code(runtime: str) -> str:
 
 
 def checkout(root: Path, *, check_only: bool = False) -> tuple:
-    """Mick's code at the descriptor's commit; (ok, note)."""
+    """The engine's code at the descriptor's commit; (ok, note)."""
     from khaos_attribution.engines.pins import checkout_commit  # noqa: PLC0415
     repo, commit = DESCRIPTOR.doc["code"]["repo"], DESCRIPTOR.commit
     is_git = (root / ".git").is_dir()
@@ -117,7 +117,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
             return False, made
     export = _run([uv, "export", "--frozen", "--no-hashes", "--no-emit-project", "--no-dev"], cwd=root)
     if export.returncode != 0 or not export.stdout.strip():
-        return False, f"Mick's lock could not be exported: {export.stderr.strip()[-300:]}"
+        return False, f"mimetic-a0's lock could not be exported: {export.stderr.strip()[-300:]}"
     work = root / ".venv" / "khaos"
     work.mkdir(parents=True, exist_ok=True)
     (work / "locked.txt").write_text(locked_requirements(export.stdout), encoding="utf-8")

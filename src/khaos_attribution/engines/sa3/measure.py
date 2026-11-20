@@ -4,9 +4,13 @@ group removal reads paired_loss and output_losses here whatever the flag says.""
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from khaos_attribution.engines.sa3 import DESCRIPTOR
+from khaos_attribution.engines.worker_process import ROW_PREFIX  # noqa: F401 — the workers read it here
 
 SYSTEM_RESERVE_GB = 6.0
 LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
@@ -67,12 +71,6 @@ def flush_accelerator() -> None:
 
 
 # ── the features, by a worker in the engine's environment ─────────────────────────────────────────────────────────
-
-import json  # noqa: E402
-from dataclasses import dataclass  # noqa: E402
-from pathlib import Path  # noqa: E402
-
-from khaos_attribution.engines.worker_process import ROW_PREFIX  # noqa: E402, F401 — the workers read it here
 
 MEASURE_WORKER = Path(__file__).with_name("measure_worker.py")
 MEASURE_WORKER_MLX = Path(__file__).with_name("measure_worker_mlx.py")

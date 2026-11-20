@@ -34,15 +34,24 @@ def matches(version: str, platform: str | None = None) -> bool:
     return local[0].startswith(pin["torch"] + ".") and len(local) == 2 and local[1] == pin["cuda_tag"]
 
 
-def install_args(platform: str | None = None) -> list[str]:
-    """The ``uv pip install`` arguments that put the torch family in place together: a torchvision or torchcodec
-    built for another torch imports and then fails at its first compiled op. On CUDA every package is reinstalled,
-    because the CUDA libraries of another torch share their folders and removing them takes shared files."""
+# The packages that move together: a torchvision or torchcodec built for another torch imports, then fails at its
+# first compiled op.
+FAMILY = ("torch", "torchvision", "torchaudio", "torchcodec")
+
+
+def install_args(platform: str | None = None, installed=()) -> list[str]:
+    """The ``uv pip install`` arguments that put the torch family in place together. On CUDA the family is reinstalled
+    from the pin's index, and with it every CUDA library ``installed``: another CUDA release's copy shares their
+    folders, and removing it takes shared files. Nothing else is reinstalled, so the rest of the lock stays as it is."""
     pin = pin_for(platform)
     if pin["index"] is None:
         return [f"torch=={pin['torch']}", f"torchaudio=={pin['torchaudio']}", f"torchvision=={pin['torchvision']}",
                 f"torchcodec=={pin['torchcodec']}"]
-    return [f"torch=={pin['torch']}.*", "torchvision", "torchaudio", "torchcodec", "--index-url", pin["index"], "--reinstall"]
+    installed = list(installed)
+    stale = {s.lower() for s in stale_packages(installed, platform)}
+    cuda = sorted({n.lower() for n in installed if n.lower().startswith("nvidia-")} - stale)
+    again = [a for n in (*FAMILY, *cuda) for a in ("--reinstall-package", n)]
+    return [f"torch=={pin['torch']}.*", "torchvision", "torchaudio", "torchcodec", "--index-url", pin["index"], *again]
 
 
 def stale_packages(installed, platform: str | None = None) -> list[str]:
@@ -68,7 +77,8 @@ def family_problems(installed: dict, platform: str | None = None) -> list[str]:
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--install-args"]:
-        print(" ".join(install_args()))
+        import importlib.metadata  # noqa: PLC0415
+        print(" ".join(install_args(installed=[d.metadata["Name"] for d in importlib.metadata.distributions()])))
         return 0
     if args == ["--stale"]:
         import importlib.metadata  # noqa: PLC0415

@@ -1,4 +1,4 @@
-"""mimetic-a0 loaded inside its own environment: Mick's config and weights at the descriptor's pinned revision,
+"""mimetic-a0 loaded inside its own environment: the release's config and weights at the descriptor's pinned revision,
 built by stock stable-audio-tools, held at full precision on every device (training, rendering and measuring agree)."""
 
 from __future__ import annotations

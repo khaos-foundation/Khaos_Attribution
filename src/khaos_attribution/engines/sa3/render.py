@@ -6,7 +6,6 @@ rework is planned here (sa3/rework.py) and spliced into the source here."""
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import secrets
@@ -18,7 +17,6 @@ from pathlib import Path
 import numpy as np
 
 from khaos_attribution.engines import worker_process as W
-from khaos_attribution.engines.worker_process import stop_tree  # noqa: F401 — sa3.train and the room still import it here
 from khaos_attribution.engines.render import RenderCancelled, RenderFailed, RenderRequest, RenderResult
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3 import rework as RW
@@ -355,6 +353,3 @@ def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, tim
     except W.WorkerFailed as exc:
         raise RenderFailed(str(exc)) from None
 
-
-def adapter_digest(path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()

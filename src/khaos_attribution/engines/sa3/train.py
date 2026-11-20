@@ -191,10 +191,6 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
 
 # ── preprocessing: Khaos's dataset into Stability's clips ─────────────────────
 
-def _resample_stereo(audio, sr: int, target_sr: int):
-    return PT.resample_stereo(audio, sr, target_sr, engine_name="Stable Audio 3", unavailable=TrainingUnavailable)
-
-
 def write_clips(dataset_json: Path | str, out_dir: Path | str) -> dict:
     """Every sample of a Khaos dataset.json as a clip beside its caption, at the engine's rate."""
     return PT.write_clips(dataset_json, out_dir, sample_rate=DESCRIPTOR.sample_rate, pair_suffix=PAIR_SUFFIX,
@@ -504,7 +500,7 @@ class Session:
         salvage path records what it really took."""
         if self.latest_adapter is None or not self.latest_adapter.is_file():
             raise RuntimeError("Stable Audio 3 wrote no checkpoint to export")
-        if getattr(self, "latest_epoch", 0) < self.steps["epochs"]:
+        if self.latest_epoch < self.steps["epochs"]:
             raise RuntimeError(f"the last checkpoint is epoch {self.latest_epoch} of {self.steps['epochs']}; "
                                "the final weights were not written")
         final_dir = Path(final_dir)

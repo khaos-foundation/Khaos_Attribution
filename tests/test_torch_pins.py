@@ -15,7 +15,36 @@ def test_the_install_arguments_move_the_whole_torch_family_together():
     assert mac == ["torch==2.11.0", "torchaudio==2.11.0", "torchvision==0.26.0", "torchcodec==0.12.0"]
     gpu = T.install_args("linux")
     assert gpu[:4] == ["torch==2.13.*", "torchvision", "torchaudio", "torchcodec"] and T.CU130_INDEX in gpu
-    assert "--reinstall" in gpu, "another torch's CUDA libraries share folders: everything is put back whole"
+
+
+INSTALLED = ["numpy", "setuptools", "pillow", "fsspec", "torch", "nvidia-nccl-cu13", "nvidia-cublas", "nvidia-nccl-cu12",
+             "Nvidia-Cudnn-Cu13"]
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32", "darwin"])
+def test_only_the_torch_family_and_its_cuda_libraries_are_reinstalled(platform):
+    """A blanket --reinstall would put every locked package back from the torch index alone; on CUDA the family and
+    the CUDA libraries that share folders with another release's are reinstalled, and on a Mac nothing is."""
+    args = T.install_args(platform, installed=INSTALLED)
+    assert "--reinstall" not in args
+    again = [args[i + 1] for i, a in enumerate(args) if a == "--reinstall-package"]
+    if platform == "darwin":
+        assert again == []
+    else:
+        assert again == ["torch", "torchvision", "torchaudio", "torchcodec", "nvidia-cublas", "nvidia-cudnn-cu13",
+                         "nvidia-nccl-cu13"]
+        assert not {"numpy", "setuptools", "pillow", "fsspec", "nvidia-nccl-cu12"} & set(again)
+
+
+def test_the_command_line_reinstalls_the_cuda_libraries_installed_where_it_runs(monkeypatch, capsys):
+    import importlib.metadata
+    import types
+    dists = [types.SimpleNamespace(metadata={"Name": n}) for n in INSTALLED]
+    monkeypatch.setattr(T, "pin_for", lambda platform=None: T.TORCH["linux"])
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: dists)
+    assert T.main(["--install-args"]) == 0
+    out = capsys.readouterr().out.split()
+    assert "--reinstall" not in out and "nvidia-cublas" in out and "numpy" not in out
 
 
 def test_another_cuda_releases_libraries_are_named_for_removal_on_cuda_only():
