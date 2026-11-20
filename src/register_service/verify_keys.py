@@ -1,4 +1,4 @@
-"""Verify keys: the free, unlimited lane to /api/verify for authorities, researchers and media.
+"""Verify keys: a free lane of its own to /api/verify for authorities, researchers and media, far above the public bound.
 Only each key's hash is kept; the key itself is shown once, when it is issued."""
 
 from __future__ import annotations

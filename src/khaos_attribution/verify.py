@@ -262,7 +262,7 @@ def main(argv=None) -> int:
     ap.add_argument("--register", default=os.environ.get("KHAOS_REGISTER_URL") or None,
                     help="the Register to ask (default KHAOS_REGISTER_URL; none asks nothing beyond this machine)")
     ap.add_argument("--key", default=os.environ.get("KHAOS_VERIFY_KEY") or None,
-                    help="a verify key for the Register's unlimited lane (authorities, researchers, media)")
+                    help="a verify key for the Register's own lane for authorities, researchers and media")
     ap.add_argument("--no-watermark", action="store_true", help="skip the watermark detector")
     ap.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = ap.parse_args(argv)

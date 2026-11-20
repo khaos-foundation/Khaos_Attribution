@@ -12,6 +12,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from khaos_attribution.registry import FIRST_SERIAL, canonical_bytes, sha256_hex
 from register_service.translog import LogBlocked, LogOff, TransLog
@@ -36,6 +37,23 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 
 
 ROLES = ("workshop", "space", "warden")
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def space_origin_of(value) -> str | None:
+    """A Space's address as its origin (lower-case host, no path), or None when it is neither https nor loopback http."""
+    parts = urlsplit(str(value or "").strip())
+    host = (parts.hostname or "").lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if not host or parts.scheme not in ("https", "http") or (parts.scheme == "http" and host not in LOOPBACK_HOSTS):
+        return None
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
+
 # A struck model returns when a warden admits it again; a withdrawn one never does. Neither is served.
 NOT_SERVED = ("withdrawn", "struck")
 # Between whole readings of the ledger's chain, a public page checks only the rows since the last one.
@@ -60,7 +78,22 @@ class Store:
         self.db.executescript(SCHEMA)
         self._ledger_status = None
         self._add_payload_column()
+        self._served_as_origins()
         self.log = TransLog(self)
+
+    def _served_as_origins(self) -> None:
+        """Rows kept before addresses were origins are rewritten as theirs, the latest report winning, so a later
+        report from the same Space matches them."""
+        with self._tx() as db:
+            for row in db.execute("SELECT * FROM served ORDER BY at").fetchall():
+                origin = space_origin_of(row["space_url"])
+                if origin is None or origin == row["space_url"]:
+                    continue
+                db.execute("DELETE FROM served WHERE serial = ? AND space_url = ?", (row["serial"], row["space_url"]))
+                db.execute("INSERT INTO served (serial, space_url, state, at, key_id) VALUES (?, ?, ?, ?, ?)"
+                           " ON CONFLICT(serial, space_url) DO UPDATE SET state = excluded.state, at = excluded.at,"
+                           " key_id = excluded.key_id WHERE excluded.at >= served.at",
+                           (row["serial"], origin, row["state"], row["at"], row["key_id"]))
 
     def _add_payload_column(self) -> None:
         """The watermark bucket as its own indexed column, so a bucket lookup never parses every record."""
@@ -308,8 +341,8 @@ class Store:
             if not row:
                 raise KeyError(f"no record {serial}")
             mach = self.machine(key_id)
-            if not mach or mach["account_id"] != row["account_id"]:
-                raise PermissionError("only a machine of the account that published a model may withdraw it")
+            if not mach or mach["account_id"] != row["account_id"] or mach["role"] != "workshop":
+                raise PermissionError("only a Workshop of the account that published a model may withdraw it")
             if row["state"] == "withdrawn":
                 return {"serial": serial, "state": "withdrawn", "withdrawn_at": row["withdrawn_at"]}
             at = now_utc()
@@ -476,11 +509,14 @@ class Store:
             return {**out, "model": {"serial": moved[0], "state": moved[1]}} if moved else out
 
     def log_withhold(self, leaf_hex: str, reason: str) -> dict:
-        """The operator's withhold: the body leaves public view, the withholding is itself an entry."""
+        """The operator's withhold: the body leaves public view, the withholding is itself an entry with a ledger row
+        that names the leaves, never the reason."""
         if self.log.off:
             raise LogOff(self.log.off)
         with self._tx():
-            return self.log.withhold_locked(leaf_hex, reason)
+            out = self.log.withhold_locked(leaf_hex, reason)
+            self._ledger("log-withhold", None, None, None, {"withholds": leaf_hex, "leaf_hash": out["leaf_hash"], "index": out["index"]})
+            return out
 
     # ---- the ledger ----
 
