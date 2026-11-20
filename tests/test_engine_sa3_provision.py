@@ -16,6 +16,15 @@ from khaos_attribution.engines.sa3 import provision as P
 pytestmark = pytest.mark.usefixtures("confined")
 
 
+@pytest.fixture(autouse=True)
+def _temp_inside(tmp_path, monkeypatch):
+    """Temporary folders the code under test makes (the hub's among them) are made inside the test's folder too."""
+    import tempfile
+    inside = tmp_path / "tmp"
+    inside.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(inside))
+
+
 def _patch(monkeypatch, name, fake):
     """A shared environment helper, patched both where sa3's provision binds it and in the shared module."""
     monkeypatch.setattr(P, {"run": "_run"}.get(name, name), fake)
