@@ -41,6 +41,16 @@ def test_an_older_unstamped_file_is_brought_up_and_stamped(tmp_path):
 
 
 @pytest.mark.parametrize("cls,name,ours", [(Store, "register.sqlite3", STORE_VERSION), (Index, "index.sqlite3", INDEX_VERSION)])
+def test_a_live_file_from_before_versions_opens_and_is_stamped(tmp_path, cls, name, ours):
+    """A register's live store or index, unstamped (0), opens as it always did and is stamped; it is never refused."""
+    path = tmp_path / name
+    cls(path)
+    _stamp(path, 0)
+    cls(path)
+    assert file_version(path) == ours
+
+
+@pytest.mark.parametrize("cls,name,ours", [(Store, "register.sqlite3", STORE_VERSION), (Index, "index.sqlite3", INDEX_VERSION)])
 def test_a_file_a_newer_register_wrote_is_refused_untouched(tmp_path, cls, name, ours):
     path = tmp_path / name
     _stamp(path, ours + 1)
