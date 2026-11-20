@@ -271,7 +271,7 @@ record_get() {
 # Clears the records of a holder no longer beside this checkout, or holding no pin on it, saying so once.
 pins_prune() {
   local holders holder named branch
-  # Records of a branch that is gone, or of a detached HEAD left more than three days ago, go with it.
+  # Records of a branch that is gone, or of a detached HEAD left four whole days ago (-mtime +3), go with it.
   for named in "$QUICK".pins.*.branch; do
     [ -f "$named" ] && [ "$named" != "$PINS_RED.branch" ] || continue
     case "$named" in "${QUICK:?}".pins.*.branch) ;; *) continue ;; esac
