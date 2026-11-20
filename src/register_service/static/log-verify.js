@@ -188,11 +188,17 @@
     throw new Error("neither a log entry nor a register record");
   }
 
+  function withdrawnAfter(log, index) {
+    const e0 = log.entries[index];
+    if (!e0 || e0.kind !== "admit") return false;
+    return log.entries.slice(index + 1).some((e) => e && e.kind === "withdraw" && e.record_sha256 === e0.record_sha256);
+  }
+
   function strikeOf(log, index) {
     const leaf = log.leaves[index];
     for (let i = index + 1; i < log.leaves.length; i++) {
       const e = log.entries[i];
-      if (e && e.kind === "revoke" && e.revokes === leaf) return { reason: e.reason, sitting: e.sitting, withheld: false };
+      if (e && e.kind === "revoke" && e.revokes === leaf) return { reason: e.reason, sitting: e.sitting, withheld: false, byAccount: !e.appended_by };
       if (e && e.kind === "withhold" && e.revokes === leaf) return { reason: null, sitting: e.sitting, withheld: true };
     }
     return null;
@@ -248,7 +254,9 @@
     if (age > STALE_HOURS) lines.unshift(["bad", "Not current: the newest head is " + Math.round(age) + " hours old; this copy may be frozen (the log takes a heartbeat entry daily)."]);
     if (!log.signed) lines.push(["bad", "This browser cannot check Ed25519 signatures: the proof holds, but check the head's signature with khaos-log-verify."]);
     if (!form.dataset.pinnedPem) lines.push(["bad", "The key is the one the register serves, not one committed in the contract."]);
-    if (struck) lines.push(["bad", "Struck: " + (struck.withheld ? "its reason is withheld" : struck.reason || "") + (struck.sitting ? " (" + struck.sitting + ")" : "")]);
+    if (struck) lines.push(["bad", (struck.byAccount ? "Withdrawn by the account that published it: " : "Struck: ") +
+      (struck.withheld ? "its reason is withheld" : struck.reason || "") + (struck.sitting ? " (" + struck.sitting + ")" : "")]);
+    if (withdrawnAfter(log, index)) lines.push(["bad", "Withdrawn by the account that published it."]);
     if (log.withheld[leafHex]) lines.push(["", "The body is withheld, by a withhold entry in the log; the proof stands without it."]);
     else if (!log.entries[index]) lines.push(["", "The body is not yet published in this mirror; the proof stands without it."]);
     let held = 0;

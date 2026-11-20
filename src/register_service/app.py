@@ -25,7 +25,7 @@ from khaos_attribution import translog as T
 from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of, sha256_of
-from register_service.store import Store, now_utc
+from register_service.store import NOT_SERVED, Store, now_utc
 from register_service.translog import EntryRefused, LogBlocked, export as export_log, export_lock, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
@@ -280,19 +280,29 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     mirror_lock = threading.Lock()
 
-    def write_mirror(serial: int) -> None:
+    def model_bytes(serial: int, unresolved: set | None = None) -> bytes | None:
+        """A model's public JSON, from the store: what /api/models answers and the mirror's file holds."""
+        rec = store.record(serial)
+        if rec is None:
+            return None
+        unresolved = set(store.unresolved_serials()) if unresolved is None else unresolved
+        doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
+               "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
+               "machine_public_pem": rec.get("machine_public_pem"),
+               "countersignature": rec["countersignature"], "served": rec["served"],
+               "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
+               "log_state": "unresolved" if serial in unresolved else None}
+        return (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8")
+
+    def write_mirror(serial: int, unresolved: set | None = None, only_if_changed: bool = False, ledger: bool = True) -> None:
         """One writer at a time: the mirror is rsynced on a timer, so a model's file goes through a temporary file of its
         own, and the ledger gains its new rows as whole lines in one write."""
         with mirror_lock:
-            rec = store.record(serial)
-            doc = {"serial": serial, "state": rec["state"], "record": public_view(rec["signed"]["record"]),
-                   "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
-                   "machine_public_pem": rec.get("machine_public_pem"),
-                   "countersignature": rec["countersignature"], "served": rec["served"],
-                   "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
-                   "log_state": "unresolved" if serial in store.unresolved_serials() else None}
-            write_whole(mirror / "models" / f"{serial}.json", (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8"))
-            write_ledger(store, mirror / "ledger.jsonl")
+            data, path = model_bytes(serial, unresolved), mirror / "models" / f"{serial}.json"
+            if data is not None and not (only_if_changed and path.is_file() and path.read_bytes() == data):
+                write_whole(path, data)
+            if ledger:
+                write_ledger(store, mirror / "ledger.jsonl")
 
     def log_mirror_quietly() -> None:
         try:
@@ -300,14 +310,42 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             log.error("log mirror not written: %s", exc)
 
-    def mirror_quietly(serial: int) -> None:
-        # The record is in the ledger; a mirror that cannot be written is logged and written on the next change.
-        try:
-            write_mirror(serial)
-        except Exception as exc:  # noqa: BLE001
-            log.error("mirror not written for %s: %s", serial, exc)
+    def mirror_quietly(*serials: int, unresolved: set | None = None) -> None:
+        # The record is in the ledger; a mirror that cannot be written is logged and written at the next start.
+        for serial in serials:
+            try:
+                write_mirror(serial, unresolved)
+            except Exception as exc:  # noqa: BLE001
+                log.error("mirror not written for %s: %s", serial, exc)
         log_mirror_quietly()
 
+    flag_lock = threading.Lock()
+
+    def sync_offered(serial: int) -> None:
+        """The index offers a model's pieces exactly while the store serves it: read after the change committed, under
+        one lock, so the last of two racing changes always decides. A model under review keeps the offer it has."""
+        with flag_lock:
+            state = store.state_of(serial)
+            if state in NOT_SERVED:
+                index.withdraw_model(serial)
+            elif state is not None and serial not in store.unresolved_serials():
+                index.restore_model(serial)
+
+    if store.log.blocked:
+        # A store behind its log may have lost a withdrawal: it only ever takes pieces out of the offer.
+        index.withdraw_models(store.withdrawn_serials())
+    else:
+        # Under review, a struck model's pieces may be struck still: only a warden's answer brings them back.
+        under_review = set(store.unresolved_serials())
+        index.set_offered([s for s in store.served_serials() if s not in under_review], store.withdrawn_serials())
+        # A model file a failed write or a recovery left missing or stale is written now; a blocked store is behind.
+        unresolved_now = set(store.unresolved_serials())
+        try:
+            for serial in store.serials():
+                write_mirror(serial, unresolved_now, only_if_changed=True, ledger=False)
+            write_ledger(store, mirror / "ledger.jsonl")
+        except Exception as exc:  # noqa: BLE001
+            log.error("mirror not written at start: %s", exc)
     log_mirror_quietly()
 
     limits = {path: RateLimit(n) for path, n in {**PUBLIC_LIMITS, **CLAIM_LIMITS}.items()}
@@ -374,6 +412,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             serial, counter, already = store.register(signed, key_id, machine["account_id"],
                                                       lambda n, at: R.countersign(signed, n, key, at or now_utc()), mine)
             if not already:
+                # A row put back from the log may come back withdrawn or struck.
+                sync_offered(serial)
                 mirror_quietly(serial)
             return {"serial": serial, "countersignature": counter, "already": already,
                     "page": f"{cfg['public_url']}/models/{serial}"}
@@ -411,7 +451,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             except PermissionError as e:
                 raise HTTPException(403, str(e)) from None
             index.release_claims(out["serial"])
-            index.withdraw_model(out["serial"])
+            sync_offered(out["serial"])
             mirror_quietly(out["serial"])
             return out
         return await run_in_threadpool(once, body, key_id, work)
@@ -425,8 +465,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
         def work():
             rec = store.record(serial_of(body))
-            if rec and rec["state"] == "withdrawn" and state == "serving":
-                raise HTTPException(410, "the model is withdrawn; a Space does not serve it")
+            if rec and rec["state"] in NOT_SERVED and state == "serving":
+                raise HTTPException(410, f"the model is {rec['state']}; a Space does not serve it")
             review = bool(rec and state == "serving" and rec["serial"] in store.unresolved_serials())
             try:
                 out = store.served(serial_of(body), key_id, str(body.get("space_url", ""))[:200], state)
@@ -450,8 +490,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             rec = store.record(serial_of(body))
             if not rec:
                 raise HTTPException(404, "no such model")
-            if rec["state"] == "withdrawn":
-                raise HTTPException(410, "the model is withdrawn; its outputs are not released into the index")
+            if rec["state"] in NOT_SERVED:
+                raise HTTPException(410, f"the model is {rec['state']}; its outputs are not released into the index")
             if machine["role"] == "workshop" and rec["account_id"] != machine["account_id"]:
                 raise HTTPException(403, "a Workshop releases outputs of its own account's models only")
             if machine["role"] == "space" and not any(s["key_id"] == key_id and s["state"] == "serving" for s in rec["served"]):
@@ -466,6 +506,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                     sha256=_sha256_or_none(body.get("sha256")))
             except ValueError as e:
                 raise HTTPException(422, str(e)) from None
+            # A withdrawal that ran between the read above and the insert flagged every row but this one.
+            sync_offered(rec["serial"])
             kept = manifest is not None and index.keep_manifest(gid, manifest, key_id)
             return {**{k: out[k] for k in ("generation_id", "serial", "payload", "released_at", "landmarks", "already")},
                     "manifest_kept": kept}
@@ -532,8 +574,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 raise HTTPException(404, "no model is registered under that record")
             if rec["account_id"] != machine["account_id"]:
                 raise HTTPException(403, "a Workshop claims tracks for its own account's models only")
-            if rec["state"] == "withdrawn":
-                raise HTTPException(410, "the model is withdrawn")
+            if rec["state"] in NOT_SERVED:
+                raise HTTPException(410, f"the model is {rec['state']}")
             track_id = str(body.get("track_id") or "").strip()
             declaration = str(body.get("declaration") or "").strip()
             trained = {str(t.get("track_id")) for t in (rec["signed"]["record"].get("training_set") or {}).get("tracks") or []}
@@ -633,16 +675,17 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/models/{serial}")
     def model_json(serial: int):
-        path = mirror / "models" / f"{serial}.json"
-        if not path.is_file():
+        data = model_bytes(serial)
+        if data is None:
             raise HTTPException(404, "no such model")
-        return Response(path.read_bytes(), media_type="application/json")
+        return Response(data, media_type="application/json")
 
     @app.get("/api/withdrawn")
     def withdrawn():
-        """`withdrawn`: models a Space must not serve. `unresolved`: models under review because a recovery lost an entry
+        """`withdrawn`: models a Space must not serve, withdrawn by their account or struck by the wardens (`struck` names
+        the second, which a warden may admit again). `unresolved`: models under review because a recovery lost an entry
         after their admission and the wardens have not answered it; a Space keeps them and shows them as under review."""
-        return {"withdrawn": store.withdrawn_serials(), "unresolved": store.unresolved_serials()}
+        return {"withdrawn": store.withdrawn_serials(), "struck": store.struck_serials(), "unresolved": store.unresolved_serials()}
 
     @app.get("/api/ledger")
     def ledger(since: int = 0):
@@ -666,7 +709,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         m, ts = r["model"], r["training_set"]
         tracks = ts.get("tracks") or []
         unresolved = serial in store.unresolved_serials()
-        facts = [P.state_chip("under review" if unresolved and rec["state"] != "withdrawn" else rec["state"]),
+        facts = [P.state_chip("under review" if unresolved and rec["state"] not in NOT_SERVED else rec["state"]),
                  f"registered {P.esc(P.day(rec['published_at']))}", P.esc(m["base_model"]),
                  P.count(len(tracks) or ts.get("track_count", 0), "track")]
         note = ("What the artist's Workshop attested, bound to hashes the artist's own machine can reproduce. The register cannot "
@@ -704,15 +747,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             body += P.table("minmax(0, 1fr) 120px 160px", ["Listening Space", "State", "Since"],
                             [[(f'<a href="{P.esc(s_["space_url"])}">{P.esc(s_["space_url"])}</a>', "wrap"), (P.esc(s_["state"]), "muted"), (P.esc(P.day(s_["at"])), "muted")]
                              for s_ in rec["served"]])
-        body += P.log_section(store.log.of_record(rec["record_sha256"]), store.log.struck())
+        body += P.log_section(store.log.of_record(rec["record_sha256"]), store.log.struck(rec["record_sha256"]))
         body += f'<div class="stage-pill-row"><a class="k-btn k-btn--pill" href="/api/models/{serial}">The record as JSON</a></div>'
         n_tracks = len(tracks) or ts.get("track_count", 0)
-        withdrawn = " It has since been withdrawn." if rec["state"] == "withdrawn" else ""
+        withdrawn = {"withdrawn": " It has since been withdrawn.",
+                     "struck": " It has since been struck by the Guild's wardens."}.get(rec["state"], "")
         description = (f"Register No. {serial}: {r['artist_name']}'s fine-tuned model on {m['base_model']}, trained on "
                        f"{P.count(n_tracks, 'track')} and registered {P.day(rec['published_at'])}.{withdrawn} The record as the "
                        "artist's Workshop attested it, countersigned by the Guild Register.")
         # A withdrawn record stays readable as the ledger's history, but search engines are asked to drop it.
-        noindex = '<meta name="robots" content="noindex">' if rec["state"] == "withdrawn" else ""
+        noindex = '<meta name="robots" content="noindex">' if rec["state"] in NOT_SERVED else ""
         return P.page(f"Register No. {serial} · {r['artist_name']} · Guild Register", body, dev=bool(cfg["dev_key"]),
                       description=description, path=f"/models/{serial}", base=cfg["public_url"], extra_head=noindex)
 
@@ -745,7 +789,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
     def sitemap(page: int = 1):
-        """A page of the models not withdrawn; the plain address is the first, which also names the home page."""
+        """A page of the models served; the plain address is the first, which also names the home page."""
         from register_service import pages as P  # noqa: PLC0415
         models = store.listed(SITEMAP_PAGE, (page - 1) * SITEMAP_PAGE) if page >= 1 else []
         if page != 1 and not models:
@@ -802,13 +846,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(422, "entry must be an object")
 
         def work():
+            before = set(store.unresolved_serials())
             try:
                 out = store.log_append(entry, key_id)
             except KeyError as e:
                 raise HTTPException(404, e.args[0]) from None
             except (EntryRefused, ValueError) as e:
                 raise HTTPException(422, str(e)) from None
-            log_mirror_quietly()
+            after = set(store.unresolved_serials())
+            moved = out.get("model")
+            # Each model whose state or review the entry changed has its offer set again and its public file rewritten.
+            changed = sorted((before ^ after) | ({moved["serial"]} if moved else set()))
+            for serial in changed:
+                sync_offered(serial)
+            mirror_quietly(*changed, unresolved=after)
             return out
         return await run_in_threadpool(once, body, key_id, work)
 

@@ -105,11 +105,14 @@ frozen. The same check runs in a browser at
 `https://register.khaos.dev/verify-entry`.
 
 What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/
-genesis, `time` in RFC 3339 UTC, a random 128-bit `salt`, and the kind's own fields); its leaf hash is
+withdraw/confirm/heartbeat/genesis, `time` in RFC 3339 UTC, a random 128-bit `salt`, and the kind's own fields); its leaf hash is
 SHA-256(0x00 || entry); nodes are SHA-256(0x01 || left || right); a signed tree head is Ed25519 over the RFC 8785 JSON of
 `{log_id, root_sha256, timestamp, tree_size, version}`. RFC 8785 does not normalise unicode: anyone writing an entry
 sends its strings in NFC, or the same name in two forms is two different entries. A strike is an appended `revoke` that
-names the admitted leaf; nothing is ever changed or deleted. A withheld entry keeps its leaf, so every proof and head
+names the admitted leaf: a warden's carries `appended_by`, the warden's machine, and one without it is the account's own
+withdrawal, which no admit undoes. An account withdrawing a model the wardens had already struck appends a `withdraw`
+naming the record. Nothing is ever changed or deleted. Both keep the entry version, so a verifier from an earlier
+release reports either withdrawal as struck and passes over a `withdraw` entry. A withheld entry keeps its leaf, so every proof and head
 stays valid while its body is no longer served. The public git mirror receives a new entry's body only seven days after
 it is appended, counted from the signed head that first held it (heads, leaf hashes, proofs, withholds and heartbeats
 at once), so a body withheld within that week never enters the public history; a body withheld later stays in that history, and withholding then hides it from the live register only.

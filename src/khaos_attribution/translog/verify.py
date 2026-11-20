@@ -174,14 +174,29 @@ def _by_record(record_sha256: str, log: dict) -> tuple:
 
 
 def strike_of(log: dict, index: int) -> dict | None:
-    """The proved revoke after the entry that names it, or a withhold of a revoke that still names it."""
+    """The proved revoke after the entry that names it, or a withhold of a revoke that still names it. A revoke no
+    warden's machine appended is the account's own withdrawal (`by_account`); a withheld one cannot say."""
     leaf = log["leaves"][index]
     for i in range(index + 1, len(log["leaves"])):
         e = log["entries"][i]
         if e and e.get("kind") == "revoke" and e.get("revokes") == leaf:
-            return {"leaf_hash": log["leaves"][i], "reason": e.get("reason"), "sitting": e.get("sitting"), "reason_withheld": False}
+            return {"leaf_hash": log["leaves"][i], "reason": e.get("reason"), "sitting": e.get("sitting"), "reason_withheld": False,
+                    "by_account": not e.get("appended_by")}
         if e and e.get("kind") == "withhold" and e.get("revokes") == leaf:
-            return {"leaf_hash": e["withholds"], "reason": None, "sitting": e.get("sitting"), "reason_withheld": True}
+            return {"leaf_hash": e["withholds"], "reason": None, "sitting": e.get("sitting"), "reason_withheld": True,
+                    "by_account": None}
+    return None
+
+
+def withdrawn_after(log: dict, index: int) -> str | None:
+    """The proved withdraw entry after an admit that names its record: its account withdrew a model already struck."""
+    target = log["entries"][index] or {}
+    if target.get("kind") != "admit":
+        return None
+    for i in range(index + 1, len(log["leaves"])):
+        e = log["entries"][i]
+        if e and e.get("kind") == "withdraw" and e.get("record_sha256") == target.get("record_sha256"):
+            return log["leaves"][i]
     return None
 
 
@@ -219,7 +234,7 @@ def prove(target: str, mirror: Mirror, pem: str, state: dict | None = None, now:
     out = {"leaf_hash": leaf_hex, "found_by": how, "leaf_index": index, "tree_size": head["tree_size"],
            "head_timestamp": head["timestamp"], "key_id": head["key_id"], "entry": log["entries"][index],
            "withheld": leaf_hex in log["withheld"], "pending": log["entries"][index] is None and leaf_hex not in log["withheld"],
-           "struck": strike_of(log, index), "warnings": warnings}
+           "struck": strike_of(log, index), "withdrawn": withdrawn_after(log, index), "warnings": warnings}
     held = [i for i in range(index + 1, len(log["leaves"])) if log["entries"][i] is None and log["leaves"][i] not in log["withheld"]]
     out["held_back_after"] = len(held)
     out["lost_after"] = lost_after(log, index) and not out["struck"]
@@ -324,7 +339,10 @@ def main(argv=None) -> int:
                   f"head signed {out['head_timestamp']} by log key {out['key_id']} ({where}).")
             if out["struck"]:
                 reason = "its reason is withheld" if out["struck"]["reason_withheld"] else out["struck"]["reason"]
-                print(f"STRUCK: {reason} (entry {out['struck']['leaf_hash']})")
+                what = "WITHDRAWN by the account that published it" if out["struck"]["by_account"] else "STRUCK"
+                print(f"{what}: {reason} (entry {out['struck']['leaf_hash']})")
+            if out["withdrawn"]:
+                print(f"WITHDRAWN by the account that published it (entry {out['withdrawn']})")
             if out["withheld"]:
                 print("The body is withheld, by a withhold entry in the log; the proof stands without it.")
             elif out["entry"] is None:

@@ -185,10 +185,13 @@ class TransLog:
             out.append({**dict(r), "entry": json.loads(body) if body else None})
         return out
 
-    def struck(self) -> dict:
-        """Every struck leaf: the revoke that strikes it, its reason and sitting (None when the revoke is withheld)."""
+    def struck(self, record_sha256: str | None = None) -> dict:
+        """Every struck leaf, or one record's: the revoke that strikes it, its reason and sitting (None when the revoke
+        is withheld)."""
         out = {}
-        for r in self.db.execute("SELECT leaf_hash, refers FROM log_leaves WHERE kind = 'revoke' ORDER BY idx"):
+        one = " AND record_sha256 = ?" if record_sha256 is not None else ""
+        for r in self.db.execute(f"SELECT leaf_hash, refers FROM log_leaves WHERE kind = 'revoke'{one} ORDER BY idx",
+                                 (record_sha256,) if record_sha256 is not None else ()):
             body = self.body(r["leaf_hash"])
             entry = json.loads(body) if body else {}
             out.setdefault(r["refers"], {"leaf_hash": r["leaf_hash"], "reason": entry.get("reason"), "sitting": entry.get("sitting"),
@@ -446,6 +449,11 @@ class TransLog:
                                                record_sha256=leaf["record_sha256"], reason=_text(reason, "reason", True),
                                                wardens=_names(wardens), sitting=_text(sitting, "sitting", False),
                                                appended_by=appended_by))
+
+    def withdraw_locked(self, serial: int, record_sha256: str, time: str | None = None) -> dict:
+        """An account's withdrawal of a model the wardens had already struck: with no admit left to revoke, this entry
+        is what keeps the withdrawal, which no admit undoes, in the log."""
+        return self.append_locked(T.make_entry("withdraw", time=time, serial=int(serial), record_sha256=record_sha256))
 
     def confirm_locked(self, answers: str, confirms: str | None = None, wardens=None, sitting=None,
                        appended_by: str | None = None) -> dict:
@@ -859,8 +867,9 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
             pass
         if was_size > n:
             return None
-    # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing: neither waits.
-    shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat") else b
+    # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing; a withdraw names only
+    # the record, and a recovery from the public copy alone must not lose it: none waits.
+    shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat", "withdraw") else b
              for i, b in enumerate(snap["bodies"])]
     was = 0 if done is None else done["tree_size"]
     # A body's place can change behind the newest leaf only where the delay's edge moved, or by a withhold.

@@ -117,9 +117,26 @@ class Index:
         return self.db.execute("SELECT 1 FROM manifests WHERE generation_id = ?", (generation_id,)).fetchone() is not None
 
     def withdraw_model(self, serial: int) -> int:
-        """A withdrawn model's pieces are not offered by any door: the one rule, kept on the rows."""
+        """A withdrawn or struck model's pieces are not offered by any door: the one rule, kept on the rows."""
         with self._lock:
             return self.db.execute("UPDATE outputs SET withdrawn = 1 WHERE serial = ?", (int(serial),)).rowcount
+
+    def withdraw_models(self, serials: list) -> int:
+        """withdraw_model for many at once; nothing is ever offered again here."""
+        with self._lock:
+            return sum(self.db.execute("UPDATE outputs SET withdrawn = 1 WHERE serial = ? AND withdrawn = 0", (int(s),)).rowcount
+                       for s in serials)
+
+    def set_offered(self, served: list, not_served: list) -> None:
+        """The offer flag of every model the store knows, both ways, at start; a serial it does not know is left as it is."""
+        with self._lock:
+            self.db.executemany("UPDATE outputs SET withdrawn = 1 WHERE serial = ? AND withdrawn = 0", [(int(s),) for s in not_served])
+            self.db.executemany("UPDATE outputs SET withdrawn = 0 WHERE serial = ? AND withdrawn = 1", [(int(s),) for s in served])
+
+    def restore_model(self, serial: int) -> int:
+        """A struck model a warden admitted again: its pieces are offered again. Never called for a withdrawn model."""
+        with self._lock:
+            return self.db.execute("UPDATE outputs SET withdrawn = 0 WHERE serial = ?", (int(serial),)).rowcount
 
     def remove_output(self, generation_id: str, serial: int) -> dict | None:
         """A piece its maker took down: its fingerprint stays, so a copy found later is still named, but the answer

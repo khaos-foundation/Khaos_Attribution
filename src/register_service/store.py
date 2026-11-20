@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 
 
 ROLES = ("workshop", "space", "warden")
+# A struck model returns when a warden admits it again; a withdrawn one never does. Neither is served.
+NOT_SERVED = ("withdrawn", "struck")
 # Between whole readings of the ledger's chain, a public page checks only the rows since the last one.
 LEDGER_WHOLE_CHECK_S = 3600.0
 
@@ -214,17 +216,72 @@ class Store:
         """A record the log admitted before this database lost it: its row back under the same serial, nothing appended."""
         serial = int(admitted["serial"])
         counter = countersign(serial, admitted["countersignature"]["countersigned_at_utc"])
-        struck = set(self.log.admit_states(signed["record_sha256"]).values()) == {"struck"}
+        state = self._state_in_log(signed["record_sha256"]) or "registered"
+        gone = state in NOT_SERVED
         self.db.execute(
             "INSERT INTO records (serial, record_sha256, machine_key_id, account_id, signed_json, counter_json, state,"
             " published_at, payload, withdrawn_at, withdraw_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (serial, signed["record_sha256"], machine_key_id, account_id, json.dumps(signed, sort_keys=True),
-             json.dumps(counter, sort_keys=True), "withdrawn" if struck else "registered", counter["countersigned_at_utc"],
-             _payload_of(signed), now_utc() if struck else None, "struck in the log" if struck else None))
+             json.dumps(counter, sort_keys=True), state, counter["countersigned_at_utc"],
+             _payload_of(signed), now_utc() if gone else None, "struck in the log" if gone else None))
         self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
                      {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"],
                       "restored_from_log": True})
         return serial, counter, False
+
+    def _state_in_log(self, record_sha256: str) -> str | None:
+        """What the log says of a record whose every admit is struck: 'withdrawn' when its account withdrew it (a
+        revoke no warden appended, or a withdraw entry), else 'struck'; None while any admit is not struck."""
+        states = self.log.admit_states(record_sha256)
+        if not states or set(states.values()) != {"struck"}:
+            return None
+        if self.db.execute("SELECT 1 FROM log_leaves WHERE kind = 'withdraw' AND record_sha256 = ?", (record_sha256,)).fetchone():
+            return "withdrawn"
+        for r in self.db.execute("SELECT b.body FROM log_leaves l JOIN log_bodies b ON b.leaf_hash = l.leaf_hash"
+                                 " WHERE l.kind = 'revoke' AND l.record_sha256 = ?", (record_sha256,)).fetchall():
+            try:
+                by = json.loads(bytes(r["body"])).get("appended_by")
+            except ValueError:
+                by = None
+            if not by:
+                return "withdrawn"
+        return "struck"
+
+    def _set_state_locked(self, serial: int, record_sha256: str, state: str) -> None:
+        """A record's state as the log now has it; a withdrawn record is final and never changed here."""
+        if state == "registered":
+            self.db.execute("UPDATE records SET state = 'registered', withdrawn_at = NULL, withdraw_reason = NULL"
+                            " WHERE serial = ? AND state = 'struck'", (serial,))
+            return
+        before = "('registered', 'struck')" if state == "withdrawn" else "('registered')"
+        changed = self.db.execute(f"UPDATE records SET state = ?, withdrawn_at = ?, withdraw_reason = 'struck in the log'"
+                                  f" WHERE serial = ? AND state IN {before}", (state, now_utc(), serial)).rowcount
+        if state == "withdrawn" and changed:
+            self._ledger("withdraw", serial, record_sha256, None, {"reason": "struck in the log", "restored_from_log": True})
+
+    def state_of(self, serial: int) -> str | None:
+        row = self.db.execute("SELECT state FROM records WHERE serial = ?", (int(serial),)).fetchone()
+        return row["state"] if row else None
+
+    def reconcile_states_locked(self) -> list:
+        """Every record not withdrawn set to what the log says, so a strike put back by a recovery takes effect:
+        (serial, state) for each record that moved."""
+        fully = {r["record_sha256"] for r in self.db.execute(
+            "SELECT l.record_sha256 FROM log_leaves l WHERE l.kind = 'admit' AND l.record_sha256 IS NOT NULL"
+            " GROUP BY l.record_sha256 HAVING SUM(NOT EXISTS (SELECT 1 FROM log_leaves r WHERE r.kind = 'revoke'"
+            " AND r.refers = l.leaf_hash)) = 0")}
+        moved = []
+        for r in self.db.execute("SELECT serial, record_sha256, state FROM records WHERE state IN ('registered', 'struck')").fetchall():
+            if r["record_sha256"] in fully:
+                state = self._state_in_log(r["record_sha256"]) or r["state"]
+            else:
+                state = "registered"
+            if state != r["state"]:
+                self._set_state_locked(r["serial"], r["record_sha256"], state)
+                if state != "withdrawn":
+                    self._ledger("state", r["serial"], r["record_sha256"], None, {"state": state, "restored_from_log": True})
+                moved.append((r["serial"], state))
+        return moved
 
     def record(self, serial: int) -> dict | None:
         row = self.db.execute("SELECT * FROM records WHERE serial = ?", (serial,)).fetchone()
@@ -258,8 +315,11 @@ class Store:
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
             if self.log.admit_leaf_of(row["record_sha256"]) is None:
                 raise RuntimeError(f"record {serial} has no admit entry in the log")
-            for leaf in [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]:
+            standing = [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]
+            for leaf in standing:
                 self.log.revoke_locked(leaf, reason[:400].strip() or "withdrawn by the account that published it", time=at)
+            if not standing:
+                self.log.withdraw_locked(serial, row["record_sha256"], time=at)
             return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
 
     def served(self, serial: int, key_id: str, space_url: str, state: str) -> dict:
@@ -278,9 +338,9 @@ class Store:
             return {"serial": serial, "space_url": space_url, "state": state, "at": at}
 
     def serials_in_bucket(self, payload: int) -> list:
-        """Every registered, not withdrawn model whose watermark bucket is this one."""
+        """Every model served (neither withdrawn nor struck) whose watermark bucket is this one."""
         return [r["serial"] for r in self.db.execute(
-            "SELECT serial FROM records WHERE payload = ? AND state != 'withdrawn' ORDER BY serial", (int(payload),))]
+            "SELECT serial FROM records WHERE payload = ? AND state NOT IN ('withdrawn', 'struck') ORDER BY serial", (int(payload),))]
 
     def remember_register_key(self, key_id: str, public_pem: str) -> None:
         """Every countersigning key's public half, so a countersignature made before a key switch can still be checked."""
@@ -306,23 +366,32 @@ class Store:
         return sorted(out)
 
     def withdrawn_serials(self) -> list:
-        return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'withdrawn' ORDER BY serial")]
+        """The models a Space must not serve: withdrawn by their account, or struck by the wardens."""
+        return [r["serial"] for r in self.db.execute(
+            "SELECT serial FROM records WHERE state IN ('withdrawn', 'struck') ORDER BY serial")]
+
+    def served_serials(self) -> list:
+        return [r["serial"] for r in self.db.execute(
+            "SELECT serial FROM records WHERE state NOT IN ('withdrawn', 'struck') ORDER BY serial")]
+
+    def struck_serials(self) -> list:
+        return [r["serial"] for r in self.db.execute("SELECT serial FROM records WHERE state = 'struck' ORDER BY serial")]
 
     def serials(self) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records ORDER BY serial")]
 
     def count(self, listed: bool = False) -> int:
-        """How many models are registered; with ``listed``, how many of them are not withdrawn."""
-        where = " WHERE state != 'withdrawn'" if listed else ""
+        """How many models are registered; with ``listed``, how many of them are served."""
+        where = " WHERE state NOT IN ('withdrawn', 'struck')" if listed else ""
         return int(self.db.execute(f"SELECT COUNT(*) AS n FROM records{where}").fetchone()["n"])
 
     def latest_serials(self, n: int) -> list:
         return [r["serial"] for r in self.db.execute("SELECT serial FROM records ORDER BY serial DESC LIMIT ?", (int(n),))]
 
     def listed(self, limit: int, offset: int = 0) -> list:
-        """(serial, published_at) of the models not withdrawn, in serial order, one page of them."""
+        """(serial, published_at) of the models served, in serial order, one page of them."""
         return [(r["serial"], r["published_at"]) for r in self.db.execute(
-            "SELECT serial, published_at FROM records WHERE state != 'withdrawn' ORDER BY serial LIMIT ? OFFSET ?",
+            "SELECT serial, published_at FROM records WHERE state NOT IN ('withdrawn', 'struck') ORDER BY serial LIMIT ? OFFSET ?",
             (int(limit), int(offset)))]
 
     def record_key(self, key_id: str, public_pem: str, present: list, note: str = "") -> None:
@@ -345,13 +414,17 @@ class Store:
             n = self.log.genesis_locked()
             self.log.resign_locked()
             self.log.sync_reserved_locked()
+            self.reconcile_states_locked()
             return n
 
     def log_append(self, entry: dict, key_id: str) -> dict:
-        """A warden's entry: an admit of a registered record, a revoke or a withhold, each naming its sitting and
-        signed into the leaf with the machine that appended it; the ledger gets the row in the same transaction."""
+        """A warden's entry: an admit of a registered or struck record, a revoke or a withhold, each naming its sitting
+        and signed into the leaf with the machine that appended it; the ledger gets the row in the same transaction.
+        A strike that leaves no admit standing makes the record struck, and an admit of a struck record undoes it:
+        the answer then names the model and its new state."""
         kind = entry.get("kind")
         with self._tx():
+            moved = None
             if kind == "admit":
                 row = self.db.execute("SELECT serial, record_sha256, counter_json, state FROM records WHERE record_sha256 = ?",
                                       (str(entry.get("record_sha256") or ""),)).fetchone()
@@ -368,9 +441,19 @@ class Store:
                 out = self.log.admit_locked(row["serial"], row["record_sha256"], json.loads(row["counter_json"]),
                                             wardens=entry.get("wardens"), sitting=entry.get("sitting") or "", appended_by=key_id,
                                             pending_lost=self.log.open_lost_global() or None)
+                if row["state"] == "struck":
+                    self._set_state_locked(row["serial"], row["record_sha256"], "registered")
+                    moved = (row["serial"], "registered")
             elif kind == "revoke":
                 out = self.log.revoke_locked(str(entry.get("revokes") or ""), entry.get("reason"), wardens=entry.get("wardens"),
                                              sitting=entry.get("sitting") or "", appended_by=key_id)
+                struck = self.log.leaf(str(entry.get("revokes")))
+                row = self.db.execute("SELECT serial, record_sha256 FROM records WHERE record_sha256 = ? AND state = 'registered'",
+                                      (struck["record_sha256"],)).fetchone()
+                state = self._state_in_log(row["record_sha256"]) if row else None
+                if state:
+                    self._set_state_locked(row["serial"], row["record_sha256"], state)
+                    moved = (row["serial"], state)
             elif kind == "confirm":
                 out = self.log.confirm_locked(str(entry.get("answers") or ""), entry.get("confirms"), wardens=entry.get("wardens"),
                                               sitting=entry.get("sitting") or "", appended_by=key_id)
@@ -380,7 +463,7 @@ class Store:
             else:
                 raise ValueError("kind is admit, revoke, confirm or withhold")
             self._ledger("log-append", None, None, key_id, {"kind": kind, "leaf_hash": out["leaf_hash"], "index": out["index"]})
-            return out
+            return {**out, "model": {"serial": moved[0], "state": moved[1]}} if moved else out
 
     def log_withhold(self, leaf_hex: str, reason: str) -> dict:
         """The operator's withhold: the body leaves public view, the withholding is itself an entry."""

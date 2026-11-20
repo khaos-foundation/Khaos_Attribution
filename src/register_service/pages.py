@@ -194,7 +194,7 @@ def table(cols: str, headers: list, rows: list) -> str:
 
 
 def state_chip(state: str) -> str:
-    kind = {"registered": "good", "withdrawn": "failed", "under review": "failed"}.get(state, "")
+    kind = {"registered": "good", "withdrawn": "failed", "struck": "failed", "under review": "failed"}.get(state, "")
     return f'<span class="stage-chip {kind}">{esc(state)}</span>'
 
 
@@ -237,7 +237,10 @@ def log_section(entries: list, struck: dict) -> str:
         elif kind == "confirm":
             what = "Confirmed after a recovery" + (f" at {esc(body['sitting'])}" if body.get("sitting") else "")
         elif kind == "revoke":
-            what = f"Struck: {esc(body.get('reason') or '')}" + (f" ({esc(body['sitting'])})" if body.get("sitting") else "")
+            what = (("Withdrawn by the account that published it" if not body.get("appended_by") else "Struck")
+                    + f": {esc(body.get('reason') or '')}" + (f" ({esc(body['sitting'])})" if body.get("sitting") else ""))
+        elif kind == "withdraw":
+            what = "Withdrawn by the account that published it"
         else:
             what = esc(kind)
         if not body:
