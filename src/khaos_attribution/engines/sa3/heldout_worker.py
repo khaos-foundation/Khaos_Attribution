@@ -24,11 +24,14 @@ def _load_adapters(wrapped, paths: list, torch) -> None:
 
 
 def _switched_off_is_base(wrapped, torch) -> bool:
-    """Whether, at strength 0, every adapted weight equals its base: only then is one adapter on and the rest off the
-    same model as that adapter loaded alone."""
+    """Whether one adapter on and the rest off is that adapter loaded alone: each layer's adapters sit at the
+    positions their indexes name (the loader keys their weights by index, so an adapter at another position would
+    load none), and at strength 0 every adapted weight equals its base."""
     model = wrapped.model
     layers = [(mod, plist) for mod in model.modules()
               if (plist := getattr(getattr(mod, "parametrizations", None), "weight", None)) is not None]
+    if any(getattr(p, "lora_index", pos) != pos for _mod, plist in layers for pos, p in enumerate(plist)):
+        return False
     wrapped.set_lora_strength(0.0)
     with torch.no_grad():
         return bool(layers) and all(torch.equal(mod.weight, plist.original) for mod, plist in layers)
@@ -42,7 +45,7 @@ def heldout_torch_many(req: dict) -> dict:
     wrapped = load_measured(req["model"])
     _load_adapters(wrapped, req["adapters"], torch)
     if not _switched_off_is_base(wrapped, torch):
-        return {"per_adapter": [], "fallback": "at strength 0 an adapted weight differs from the base", "runtime": "torch"}
+        return {"per_adapter": [], "fallback": "an adapter switched off would not leave the base whole", "runtime": "torch"}
     per_adapter = []
     for i in range(len(req["adapters"])):
         wrapped.set_lora_strength(0.0)
@@ -195,7 +198,7 @@ def heldout_mlx(req: dict) -> dict:
 def main() -> int:
     from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
     return answer(lambda req: heldout_mlx(req) if req.get("runtime") == "mlx"
-                  else heldout_torch_many(req) if req.get("adapters") else heldout_torch(req))
+                  else heldout_torch_many(req) if "adapters" in req else heldout_torch(req))
 
 
 if __name__ == "__main__":

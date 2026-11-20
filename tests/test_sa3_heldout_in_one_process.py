@@ -138,3 +138,23 @@ def test_a_decomposed_adapter_is_not_vouched_for():
     torch = pytest.importorskip("torch")
     wrapped, _layer = _loaded(torch, [torch.ones(2, 3)], decomposed=True)
     assert not HW._switched_off_is_base(wrapped, torch)
+
+
+def test_on_a_worker_that_fails_with_every_adapter_loaded_is_retried_one_adapter_at_a_time(switch, monkeypatch):
+    """Several adapters take more memory than one: a failed one-process worker is a fallback, not a refusal."""
+    switch(True)
+
+    def fails(*a, **k):
+        raise W.WorkerFailed("the Stable Audio 3 held-out worker failed (killed by SIGKILL)", why="")
+    monkeypatch.setattr(W, "run", fails)
+    monkeypatch.setattr(T, "heldout_summary", lambda api, clips, adapter, **kw: {"mean": 4.0})
+    assert M.output_losses(API, "/c", ADAPTERS, seed=4) == {"served": 4.0, "g1": 4.0}
+
+
+def test_an_adapter_at_another_position_than_its_index_is_not_vouched_for():
+    """The loader keys an adapter's weights by its index; at another position its weights would load as zero."""
+    torch = pytest.importorskip("torch")
+    wrapped, layer = _loaded(torch, [torch.ones(2, 3), torch.ones(2, 3)])
+    assert HW._switched_off_is_base(wrapped, torch)
+    layer.parametrizations.weight[1].lora_index = 0
+    assert not HW._switched_off_is_base(wrapped, torch)
