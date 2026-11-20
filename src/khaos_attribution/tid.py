@@ -33,11 +33,6 @@ def served_grid(steps: int = 50, anchor_logsnr: float = -6.2, logsnr_end: float 
     return out
 
 
-def fm_weight(t: float) -> float:
-    """The flow-matching score weight ((1 − t)/t)², which the paper derives and then drops."""
-    return ((1.0 - float(t)) / float(t)) ** 2
-
-
 def draw_noise(seed: int, m: int, shape: Sequence[int]) -> np.ndarray:
     """Draw m's noise: the same for every training clip and query clip, cut to the clip's frames."""
     return G.shared_noise(int(seed), int(m), shape)
@@ -168,23 +163,3 @@ def layer_kernels(P, q, bounds: Sequence[tuple]):
     """Each tensor's share of the kernel, (tensors × rows), from preconditioned rows P and a query row q."""
     import torch  # noqa: PLC0415
     return torch.stack([P[:, off:off + n] @ q[off:off + n] for off, n in bounds])
-
-
-def tau_from_kernels(K, weights: Sequence[float] | None = None) -> np.ndarray:
-    """TID's score per (query clip, training row): the mean over draws of the squared kernel, weighted when asked."""
-    K = np.asarray(K, dtype=np.float64)
-    w = np.ones(K.shape[0]) if weights is None else np.asarray(weights, dtype=np.float64)
-    if w.shape != (K.shape[0],) or not w.sum() > 0.0:
-        raise ValueError(f"{w.shape[0] if w.ndim else 0} weights for {K.shape[0]} draws")
-    return np.tensordot(w, K * K, axes=1) / w.sum()
-
-
-def output_scores(tau, clip_groups: Sequence) -> dict:
-    """Each output's score per training row: the mean of its clips' scores, outputs in first-appearance order."""
-    tau = np.asarray(tau, dtype=np.float64)
-    if len(clip_groups) != tau.shape[0]:
-        raise ValueError(f"{len(clip_groups)} groups for {tau.shape[0]} clips")
-    out: dict = {}
-    for row, group in zip(tau, clip_groups):
-        out.setdefault(group, []).append(row)
-    return {g: np.mean(np.stack(rows), axis=0).astype(np.float32) for g, rows in out.items()}

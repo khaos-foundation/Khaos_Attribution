@@ -51,12 +51,6 @@ def test_the_served_grid_is_stabilitys_euler_schedule_without_t_one():
         assert grid[k] == pytest.approx(v, abs=1e-6)
 
 
-def test_the_flow_matching_weight_is_the_papers():
-    assert T.fm_weight(0.5) == pytest.approx(1.0)
-    assert T.fm_weight(0.2) == pytest.approx(16.0)
-    assert T.fm_weight(0.9) == pytest.approx((0.1 / 0.9) ** 2)
-
-
 def test_a_draws_noise_is_shared_by_every_clip_on_their_common_frames():
     a = T.draw_noise(1000, 3, (1, 4, 50))
     b = T.draw_noise(1000, 3, (1, 4, 20))
@@ -157,19 +151,3 @@ def test_the_damping_is_a_tenth_of_the_mean_eigenvalue_and_scales_with_the_facto
     assert torch.allclose(scaled, inverse / 40.0, atol=1e-12), "relative damping is scale-equivariant"
     with pytest.raises(ValueError, match="zero trace"):
         T.damped_inverse(torch.zeros(3, 3, dtype=torch.float64))
-
-
-def test_tau_is_the_mean_over_draws_of_the_squared_kernel_and_an_output_averages_its_clips():
-    K = np.array([[[1.0, -2.0], [0.5, 0.0], [3.0, 1.0]],
-                  [[-1.0, 1.0], [0.5, 2.0], [0.0, 1.0]]])
-    tau = T.tau_from_kernels(K)
-    assert np.allclose(tau, [[1.0, 2.5], [0.25, 2.0], [4.5, 1.0]])
-    weighted = T.tau_from_kernels(K, weights=[3.0, 1.0])
-    assert np.allclose(weighted[0], [(3 * 1 + 1 * 1) / 4, (3 * 4 + 1 * 1) / 4])
-    scores = T.output_scores(tau, ["o2", "o1", "o2"])
-    assert list(scores) == ["o2", "o1"]
-    assert np.allclose(scores["o2"], [(1.0 + 4.5) / 2, (2.5 + 1.0) / 2]) and np.allclose(scores["o1"], [0.25, 2.0])
-    with pytest.raises(ValueError):
-        T.tau_from_kernels(K, weights=[1.0])
-    with pytest.raises(ValueError):
-        T.output_scores(tau, ["o1"])

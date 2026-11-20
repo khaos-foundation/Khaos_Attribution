@@ -240,3 +240,11 @@ def test_a_record_of_ten_or_more_groups_reads_back():
     out = G.split(rec, {"served": 1.0, **{f"g{i + 1}": 1.0 + (0.1 if i == 9 else 0.0) for i in range(12)}},
                   {t: _r(("W" + t, 100)) for g in groups for t in g})
     assert [g["share"] for g in out["groups"]][9] == pytest.approx(1.0)
+
+
+def test_a_loss_that_is_not_a_number_is_refused_for_what_it_is_never_called_no_rise():
+    import math
+    for losses in ((float("nan"), [1.0, 2.0]), (1.0, [float("nan"), 2.0]), (1.0, [math.inf, 2.0])):
+        with pytest.raises(G.LossNotFinite, match="not finite") as refused:
+            G.group_shares(*losses)
+        assert isinstance(refused.value, G.NoRise), "a room that refuses on NoRise refuses this piece too"
