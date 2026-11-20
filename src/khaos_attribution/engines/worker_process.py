@@ -4,6 +4,7 @@ Every such child takes its environment from engine_env, which starts from what t
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -451,3 +452,25 @@ def communicate(proc, stdin: str, should_stop, timeout, label: str):
                 raise WorkerFailed(f"the {label} worker ran past its time limit")
     _released(proc, readers)
     return "".join(x for x in out if x is not None), "".join(x for x in err if x is not None)
+
+
+# ── files a worker writes ─────────────────────────────────────────────────────
+
+# A worker writes a file the caller keeps at this name beside it, renamed into place only when whole.
+PART_SUFFIX = ".part"
+
+
+def part_of(path) -> Path:
+    return Path(str(path) + PART_SUFFIX)
+
+
+@contextlib.contextmanager
+def scratch_file(folder: Path, prefix: str, suffix: str):
+    """A file of this call's own in ``folder`` for a worker to write, removed whatever ends the block."""
+    folder.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=str(folder))
+    os.close(fd)
+    try:
+        yield Path(name)
+    finally:
+        Path(name).unlink(missing_ok=True)

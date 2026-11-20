@@ -1,5 +1,6 @@
 """Stable Audio 3's measure slot: features through a worker in the engine's own environment, torch (CUDA) or MLX
-(a Mac). The descriptor declares no platform measure yet, so no room serves a measured split on this engine."""
+(a Mac). The descriptor's measure flag names the influence index, which no platform declares on this engine yet;
+group removal reads paired_loss and output_losses here whatever the flag says."""
 
 from __future__ import annotations
 
@@ -148,16 +149,15 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
                latent_pool: int | None = None, noise_draws: int | None = None, noise_shared: bool = False,
                param_groups: str | None = None, groups_out=None, on_row=None) -> tuple:
-    """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy; with
-    ``param_groups`` each row's block sketches land at ``groups_out`` and their names beside it."""
-    import json  # noqa: PLC0415
+    """(matrix, rows) of an index through the worker: the matrix lands beside the files in a file of this call's own;
+    with ``param_groups`` each row's block sketches land at ``groups_out``, whole or not at all, their names beside it."""
     import numpy as np  # noqa: PLC0415
-    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
     if param_groups and not groups_out:
         raise GradientUnavailable("an index with block sketches needs groups_out, where they are written")
     if groups_out and not param_groups:
         raise GradientUnavailable("groups_out needs param_groups, the pattern that names the blocks")
-    out = Path(files[0]).resolve().parent / ".khaos_index_rows.tmp.npy" if files else Path(".khaos_index_rows.tmp.npy")
     seen = set()
 
     def progress(row: dict) -> None:
@@ -165,24 +165,29 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
             seen.add(row["row"])
             on_row(row["row"], Path(files[row["row"]]), row.get("gradient_norm"))
 
-    r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target,
-                                       "timestep_norm": timestep_norm, "param_filter": param_filter,
-                                       "latent_transform": latent_transform, "latent_pool": latent_pool,
-                                       "noise_draws": noise_draws, "noise_shared": noise_shared,
-                                       "param_groups": param_groups}, files, "index"),
-                      "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out),
-                      "groups_out": str(Path(groups_out).resolve()) if groups_out else None},
-             on_progress=progress)
-    from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
-    if r.get("compute_dtype") and r["compute_dtype"] != dtype_tag(handle.dtype):
-        Path(r["matrix"]).unlink(missing_ok=True)
-        raise GradientUnavailable(f"the worker ran at {r['compute_dtype']}, and the index would record "
-                                  f"{dtype_tag(handle.dtype)}; they must be one precision")
+    folder = Path(files[0]).resolve().parent if files else Path.cwd()
+    groups = Path(groups_out).resolve() if groups_out else None
     try:
-        matrix = np.load(str(r["matrix"]))
-    except (OSError, ValueError) as exc:
-        raise GradientUnavailable(f"the Stable Audio 3 measure worker left no readable matrix: {exc}") from exc
-    Path(r["matrix"]).unlink(missing_ok=True)
+        with W.scratch_file(folder, ".khaos_index_rows.", ".npy") as out:
+            r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target,
+                                               "timestep_norm": timestep_norm, "param_filter": param_filter,
+                                               "latent_transform": latent_transform, "latent_pool": latent_pool,
+                                               "noise_draws": noise_draws, "noise_shared": noise_shared,
+                                               "param_groups": param_groups}, files, "index"),
+                              "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out),
+                              "groups_out": str(groups) if groups else None},
+                     on_progress=progress)
+            if r.get("compute_dtype") and r["compute_dtype"] != dtype_tag(handle.dtype):
+                raise GradientUnavailable(f"the worker ran at {r['compute_dtype']}, and the index would record "
+                                          f"{dtype_tag(handle.dtype)}; they must be one precision")
+            try:
+                matrix = np.load(str(r["matrix"]))
+            except (OSError, ValueError) as exc:
+                raise GradientUnavailable(f"the Stable Audio 3 measure worker left no readable matrix: {exc}") from exc
+    finally:
+        # A worker stopped part way leaves its sketches beside their name, never at it.
+        if groups:
+            W.part_of(groups).unlink(missing_ok=True)
     if param_groups:
         if not Path(groups_out).is_file() or not r.get("group_labels"):
             raise GradientUnavailable("the Stable Audio 3 measure worker wrote no block sketches")
@@ -225,10 +230,15 @@ def output_feature(handle: Handle, index_meta: dict, files, *, groups_out=None):
         raise GradientUnavailable(why)
     if groups_out and not index_meta.get("param_groups"):
         raise GradientUnavailable("this index was built without block sketches; an output's cannot be read against it")
+    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
     request = _base(handle, index_meta, files, "feature")
     if groups_out:
         request["groups_out"] = str(Path(groups_out).resolve())
-    r = _ask(handle, request)
+    try:
+        r = _ask(handle, request)
+    finally:
+        if groups_out:
+            W.part_of(Path(groups_out).resolve()).unlink(missing_ok=True)
     if groups_out and not Path(groups_out).is_file():
         raise GradientUnavailable("the Stable Audio 3 measure worker wrote no block sketches for this output")
     built_on = (index_meta.get("projection") or {}).get("parameter_signature")

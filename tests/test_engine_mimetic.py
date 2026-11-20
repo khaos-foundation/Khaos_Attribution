@@ -2,6 +2,7 @@
 provision slot installs Mick's lock without his CUDA 12.6 torch, its measure refuses a device never measured, and its
 trainer's bookkeeping maps Khaos's epochs onto steps."""
 import subprocess
+import sys
 
 import pytest
 
@@ -172,3 +173,30 @@ def test_an_experimental_engine_says_so_in_its_install_statement():
     from khaos_attribution.engines.provision import statement
     assert "mimetic-a0 is experimental" in statement("mimetic-a0")
     assert "experimental" not in statement("stable-audio-3")
+
+
+def test_an_index_matrix_is_a_file_of_the_calls_own_and_never_left_behind(tmp_path, monkeypatch):
+    from khaos_attribution.engines.mimetic import measure as M
+    from khaos_attribution.gradient import GradientUnavailable, make_projection
+    worker = tmp_path / "worker.py"
+    worker.write_text("import json, sys, numpy as np\nreq = json.loads(sys.stdin.read())\n"
+                      "np.save(req['out'], np.zeros((len(req['files']), req['projection']['dim']), np.float32))\n"
+                      "if req['adapter'].endswith('dies.safetensors'):\n    sys.stderr.write('killed\\n'); sys.exit(9)\n"
+                      "print(json.dumps({'rows': [{'row': i, 'pair_id': 'p', 'track_id': 't', 'gradient_norm': 1.0}\n"
+                      "                            for i, _ in enumerate(req['files'])], 'matrix': req['out']}))\n")
+    monkeypatch.setattr(M, "MEASURE_WORKER", worker)
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    files = [clips / f"t_seg_00{i}.wav" for i in range(2)]
+    for f in files:
+        f.write_bytes(b"x")
+    handle = M.Handle(root=tmp_path, python=sys.executable, adapter=tmp_path / "adapter_model.safetensors", dtype="float32")
+    asked, ask = [], M._ask
+    monkeypatch.setattr(M, "_ask", lambda h, req, on_progress=None: asked.append(req["out"]) or ask(h, req, on_progress))
+    for _ in range(2):
+        assert M.index_rows(handle, files, projection=make_projection(12, 4, 1), timesteps=[0.5], noise_seed=1)[0].shape == (2, 4)
+    assert asked[0] != asked[1] and not list(clips.glob(".khaos_index_rows*"))
+    handle.adapter = tmp_path / "dies.safetensors"
+    with pytest.raises(GradientUnavailable, match="killed"):
+        M.index_rows(handle, files, projection=make_projection(12, 4, 1), timesteps=[0.5], noise_seed=1)
+    assert not list(clips.glob(".khaos_index_rows*"))

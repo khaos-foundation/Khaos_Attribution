@@ -890,8 +890,11 @@ def run(req: dict) -> dict:
         if command == "index" and labels and not groups_out:
             raise RuntimeError("an index with param_groups writes its block sketches; name groups_out")
         sketch = G.group_sketch(projection, [int(p.numel()) for p in params], labels) if labels and groups_out else None
-        # The index's blocks are written row by row, so a long index never holds them all in memory.
-        group_rows = (np.lib.format.open_memmap(str(groups_out), mode="w+", dtype=np.float32,
+        from khaos_attribution.engines.worker_process import part_of  # noqa: PLC0415
+        groups_part = part_of(groups_out) if groups_out else None
+        # The index's blocks are written row by row, so a long index never holds them all in memory; beside their
+        # name until whole, so a build that dies leaves the sketches already there as they were.
+        group_rows = (np.lib.format.open_memmap(str(groups_part), mode="w+", dtype=np.float32,
                                                 shape=(len(files), len(sketch.labels), projection.dim))
                       if sketch is not None and command == "index" else None)
         group_feats = []
@@ -936,9 +939,12 @@ def run(req: dict) -> dict:
         if group_rows is not None:
             group_rows.flush()
             del group_rows
+            groups_part.replace(groups_out)
         if sketch is not None and command == "feature":
             Path(groups_out).parent.mkdir(parents=True, exist_ok=True)
-            np.save(str(groups_out), np.mean(np.stack(group_feats), axis=0).astype(np.float32))
+            with groups_part.open("wb") as fh:
+                np.save(fh, np.mean(np.stack(group_feats), axis=0).astype(np.float32))
+            groups_part.replace(groups_out)
         if sketch is not None:
             extra["group_labels"] = sketch.labels
             extra["groups"] = str(groups_out)
