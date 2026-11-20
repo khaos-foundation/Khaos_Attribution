@@ -7,9 +7,12 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "description": "Version of this track rights schema.",
+      "description": "Version of this track rights schema. 1.1.0 is stamped on a record whose source is ddex_ern, which a reader from before that value refuses; every other record stays 1.0.0.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.0.0"
+      "enum": [
+        "1.0.0",
+        "1.1.0"
+      ]
     },
     "track_id": {
       "type": "string",
