@@ -1,6 +1,6 @@
 # Watermarking v2 — model-level identity, the provenance index, and fingerprints
 
-> **0.26.0 (October 2026):** the watermark payload is a *bucket* derived by the machine from its register key and the run id (`derive_payload`), never allocated from a band; the Guild Register's serial names the model. The bands in §3 are history kept for the readers that still name them; see `docs/history/registry-service-plan.md`'s note and the Workshop's `docs/plans/register-and-publish.md`.
+> **0.26.0 (October 2026):** the watermark payload is a *bucket* derived by the machine from its register key and the run id (`derive_payload`), never allocated from a band; the Guild Register's serial names the model. The bands in §3 and both allocators are history, gone from the code; an ID stamped from a band still reads, and verify names every ID on record as Khaos's; see `docs/history/registry-service-plan.md`'s note and the Workshop's `docs/plans/register-and-publish.md`.
 
 Status: **implemented 2026-08-20** (operator decisions recorded; spec
 adversarially reviewed — 10 findings folded in; Phase 0 measured, two
