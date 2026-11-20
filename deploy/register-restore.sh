@@ -8,6 +8,8 @@ DATA="${REGISTER_DATA_DIR:-/srv/register/data}"
 sha256sum -c "$ARCHIVE.sha256"
 WORK="$(mktemp -d)"
 tar -C "$WORK" -xzf "$ARCHIVE"
+# A backup written by a newer register than the code here is refused before the service is touched.
+/srv/register/venv/bin/python -m register_service check-version "$WORK" || { rm -rf "$WORK"; exit 1; }
 systemctl stop register.service
 for db in register index; do
   if [ -f "$WORK/$db.sqlite3" ]; then
