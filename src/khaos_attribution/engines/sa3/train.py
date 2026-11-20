@@ -460,16 +460,22 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
 
 # ── the held-out loss, by a worker on the latest checkpoint ──────────────────
 
+def heldout_request(api: TrainingApi, clips_dir: Path | str, adapter: Path | str | None, *, seed: int,
+                    timesteps: list, checkpoint_root: Path | str | None) -> dict:
+    """What the held-out worker is asked for the clips under ``clips_dir`` under ``adapter`` (the base alone when None)."""
+    clips_dir = Path(clips_dir).resolve()
+    adapter = Path(adapter).resolve() if adapter else None
+    root = Path(checkpoint_root) if checkpoint_root else Path(api.root) / "checkpoints"
+    return {"runtime": api.runtime, "model": DESCRIPTOR.variant_config("base"), "clips_dir": str(clips_dir),
+            "latents_dir": str(clips_dir / LATENTS_DIRNAME), "adapter": str(adapter) if adapter else None,
+            "timesteps": list(timesteps), "seed": int(seed), "high_noise_t": HIGH_NOISE_T,
+            "checkpoint_root": str(root.resolve()), "base_npz": str((root / BASE_NPZ).absolute())}
+
+
 def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str | None, *, seed: int,
                     timesteps: list, checkpoint_root: Path | str | None) -> dict:
     """The held-out record of the clips under ``clips_dir`` scored under ``adapter`` (the base alone when None), by
     the worker the trainer's own held-out loss runs: what a datamodel reads per subset adapter."""
-    clips_dir = Path(clips_dir).resolve()
-    adapter = Path(adapter).resolve() if adapter else None
-    root = Path(checkpoint_root) if checkpoint_root else Path(api.root) / "checkpoints"
-    request = {"runtime": api.runtime, "model": DESCRIPTOR.variant_config("base"), "clips_dir": str(clips_dir),
-               "latents_dir": str(clips_dir / LATENTS_DIRNAME), "adapter": str(adapter) if adapter else None,
-               "timesteps": list(timesteps), "seed": int(seed), "high_noise_t": HIGH_NOISE_T,
-               "checkpoint_root": str(root.resolve()), "base_npz": str((root / BASE_NPZ).absolute())}
+    request = heldout_request(api, clips_dir, adapter, seed=seed, timesteps=timesteps, checkpoint_root=checkpoint_root)
     return PE.heldout_record(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="Stable Audio 3",
                              timesteps=timesteps)

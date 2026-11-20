@@ -190,6 +190,11 @@ class Descriptor:
         return copy.deepcopy(dict(self.doc.get("recipes") or {}))
 
     @property
+    def runtime(self) -> dict:
+        """The switches for how the engine's processes run; empty, every switch off, when the descriptor names none."""
+        return dict(self.doc.get("runtime") or {})
+
+    @property
     def memory(self) -> dict:
         """The engine's footprint and its scorer's peak, in GB, as measured on it; empty when never measured."""
         return dict(self.doc.get("memory") or {})

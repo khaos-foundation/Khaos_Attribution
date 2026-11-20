@@ -15,18 +15,59 @@ def pair_noise_seed(seed: int, name: str) -> int:
     return (int(seed) * 1_000_003 + zlib.crc32(name.encode("utf-8"))) % (2 ** 31 - 1)
 
 
-def heldout_torch(req: dict) -> dict:
-    import soundfile as sf  # noqa: PLC0415
+def _load_adapters(wrapped, paths: list, torch) -> None:
+    from stable_audio_3.models.lora.utils import name_is_lora  # noqa: PLC0415
+    wrapped.load_lora([str(p) for p in paths])
+    wrapped.set_lora_strength(1.0)
+    if any(p.dtype != torch.float32 for n, p in wrapped.model.named_parameters() if name_is_lora(n)):
+        raise RuntimeError("the adapter's parameters are not float32, the precision they trained at")
+
+
+def _switched_off_is_base(wrapped, torch) -> bool:
+    """Whether one adapter on and the rest off is that adapter loaded alone: each layer's adapters sit at the
+    positions their indexes name (the loader keys their weights by index, so an adapter at another position would
+    load none), and at strength 0 every adapted weight equals its base."""
+    model = wrapped.model
+    layers = [(mod, plist) for mod in model.modules()
+              if (plist := getattr(getattr(mod, "parametrizations", None), "weight", None)) is not None]
+    if any(getattr(p, "lora_index", pos) != pos for _mod, plist in layers for pos, p in enumerate(plist)):
+        return False
+    wrapped.set_lora_strength(0.0)
+    with torch.no_grad():
+        return bool(layers) and all(torch.equal(mod.weight, plist.original) for mod, plist in layers)
+
+
+def heldout_torch_many(req: dict) -> dict:
+    """The held-out losses under each of several adapters from one load of the base: every adapter loaded at its own
+    index, then each switched on alone; a fallback reply when switched-off adapters would not leave the base whole."""
     import torch  # noqa: PLC0415
-    from khaos_attribution.engines.sa3.loading import load_measured, measure_autocast  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.loading import load_measured  # noqa: PLC0415
+    wrapped = load_measured(req["model"])
+    _load_adapters(wrapped, req["adapters"], torch)
+    if not _switched_off_is_base(wrapped, torch):
+        return {"per_adapter": [], "fallback": "an adapter switched off would not leave the base whole", "runtime": "torch"}
+    per_adapter = []
+    for i in range(len(req["adapters"])):
+        wrapped.set_lora_strength(0.0)
+        wrapped.set_lora_strength(1.0, lora_index=i)
+        per_adapter.append(_score_torch(wrapped, req, torch))
+    return {"per_adapter": per_adapter, "runtime": "torch"}
+
+
+def heldout_torch(req: dict) -> dict:
+    import torch  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.loading import load_measured  # noqa: PLC0415
 
     wrapped = load_measured(req["model"])
     if req.get("adapter"):
-        from stable_audio_3.models.lora.utils import name_is_lora  # noqa: PLC0415
-        wrapped.load_lora([str(req["adapter"])])
-        wrapped.set_lora_strength(1.0)
-        if any(p.dtype != torch.float32 for n, p in wrapped.model.named_parameters() if name_is_lora(n)):
-            raise RuntimeError("the adapter's parameters are not float32, the precision they trained at")
+        _load_adapters(wrapped, [req["adapter"]], torch)
+    return {"per_sample": _score_torch(wrapped, req, torch), "runtime": "torch"}
+
+
+def _score_torch(wrapped, req: dict, torch) -> dict:
+    """Per-sample bucket losses of the clips under the model as it stands."""
+    import soundfile as sf  # noqa: PLC0415
+    from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
     model = wrapped.model
     model.eval()
     device = wrapped.device
@@ -72,7 +113,7 @@ def heldout_torch(req: dict) -> dict:
                 mse = ((out - target) ** 2).mean(dim=1)
                 row[f"{t:.2f}"] = float(mse[mask].mean())
             per_sample[wav.name] = row
-    return {"per_sample": per_sample, "runtime": "torch"}
+    return per_sample
 
 
 def heldout_mlx(req: dict) -> dict:
@@ -156,7 +197,8 @@ def heldout_mlx(req: dict) -> dict:
 
 def main() -> int:
     from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
-    return answer(lambda req: heldout_mlx(req) if req.get("runtime") == "mlx" else heldout_torch(req))
+    return answer(lambda req: heldout_mlx(req) if req.get("runtime") == "mlx"
+                  else heldout_torch_many(req) if "adapters" in req else heldout_torch(req))
 
 
 if __name__ == "__main__":

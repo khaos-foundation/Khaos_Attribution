@@ -5,6 +5,7 @@ group removal reads paired_loss and output_losses here whatever the flag says.""
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from khaos_attribution.engines.memory import (LOW_MEMORY_OVERRIDE_ENV, SYSTEM_RE
 from khaos_attribution.engines import process_engine as PE
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.worker_process import ROW_PREFIX  # noqa: F401 — the workers read it here
+
+log = logging.getLogger(__name__)
 
 __all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
            "index_rows", "latent_stats", "memory_plan", "output_feature", "output_loss", "output_losses", "paired_loss", "parameter_count", "scorer_need_gb",
@@ -282,6 +285,12 @@ def output_losses(api: Any, clips_dir, adapters: dict, *, seed: int, n_buckets: 
     from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
     contract_guard.require(api.python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=GradientUnavailable)
     timesteps = T.bucket_timesteps(n_buckets or T.DEFAULT_BUCKETS)
+    if DESCRIPTOR.runtime.get("heldout_in_one_process") and api.runtime == "torch" and len(adapters) > 1 \
+            and all(adapters.values()):
+        together = _losses_in_one_process(api, clips_dir, adapters, seed=seed, timesteps=timesteps,
+                                          checkpoint_root=checkpoint_root)
+        if together is not None:
+            return together
     out = {}
     for name, weights in adapters.items():
         try:
@@ -290,3 +299,29 @@ def output_losses(api: Any, clips_dir, adapters: dict, *, seed: int, n_buckets: 
         except (RuntimeError, ValueError) as exc:
             raise GradientUnavailable(str(exc)) from exc
     return out
+
+
+def _losses_in_one_process(api: Any, clips_dir, adapters: dict, *, seed: int, timesteps: list, checkpoint_root) -> dict | None:
+    """``{name: mean loss}`` from one held-out worker that loads the base once and switches each adapter on in turn;
+    None when the worker cannot vouch that a switched-off adapter leaves the base untouched, so each gets its own."""
+    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
+    from khaos_attribution.engines.heldout import summarise  # noqa: PLC0415
+    from khaos_attribution.engines.sa3 import train as T  # noqa: PLC0415
+    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
+    names = list(adapters)
+    request = {**T.heldout_request(api, clips_dir, None, seed=seed, timesteps=timesteps, checkpoint_root=checkpoint_root),
+               "adapters": [str(Path(adapters[n]).resolve()) for n in names]}
+    try:
+        reply = W.run(api.python, T.HELDOUT_WORKER, request, cwd=api.root, env=T._env(api),
+                      label="Stable Audio 3 held-out", timeout=None, required="per_adapter")
+    except W.WorkerFailed as exc:
+        # Every adapter loaded at once takes more memory than one: a worker that failed so is tried one at a time.
+        log.warning("the one-process held-out worker failed (%s); each adapter gets its own", exc.why)
+        return None
+    if reply.get("fallback"):
+        return None
+    per_adapter = reply["per_adapter"]
+    try:
+        return {n: float(summarise(per_adapter[i], list(timesteps))["mean"]) for i, n in enumerate(names)}
+    except (KeyError, IndexError, ValueError) as exc:
+        raise GradientUnavailable(f"the Stable Audio 3 held-out worker scored the adapters incompletely: {exc}") from exc

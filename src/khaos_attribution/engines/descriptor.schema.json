@@ -452,6 +452,17 @@
         }
       }
     },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Switches for how the engine's processes run; each is off unless named true",
+      "properties": {
+        "heldout_in_one_process": {
+          "type": "boolean",
+          "description": "Score several adapters' held-out losses in one worker, the base loaded once"
+        }
+      }
+    },
     "status": {
       "type": "string",
       "enum": [
