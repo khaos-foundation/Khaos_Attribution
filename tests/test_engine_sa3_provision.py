@@ -1,6 +1,9 @@
 """Stable Audio 3's provision slot behind fakes: --check reports what is missing without changing anything, the
 pin is compared not assumed, every listed weight is accounted for, and the report says CHECK OK only when all is."""
+import hashlib
+import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -385,16 +388,24 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
 
 
 def test_the_contract_comes_from_the_nearest_source(tmp_path, monkeypatch):
-    """A checkout named in the environment, then a shipped wheel, then the room's sibling checkout, then the tag."""
+    """A checkout named in the environment, then a shipped wheel, then the room's sibling checkout when it holds this
+    room's code, then the tag."""
+    import shutil
+    import khaos_attribution
     from khaos_attribution import __version__
     root = tmp_path / "engines" / "stable-audio-3"
     root.mkdir(parents=True)
     monkeypatch.delenv(P.CONTRACT_SRC_ENV, raising=False)
     monkeypatch.delenv(P.CONTRACT_WHEEL_ENV, raising=False)
-    assert P.contract_spec(root) == f"khaos-attribution @ git+{P.CONTRACT_REPO}@v{__version__}"
-    (tmp_path / "engines" / "Khaos_Attribution").mkdir()
-    (tmp_path / "engines" / "Khaos_Attribution" / "pyproject.toml").write_text("")
-    assert P.contract_spec(root) == str(tmp_path / "engines" / "Khaos_Attribution")
+    tag = f"khaos-attribution @ git+{P.CONTRACT_REPO}@v{__version__}"
+    assert P.contract_spec(root) == tag
+    sibling = tmp_path / "engines" / "Khaos_Attribution"
+    shutil.copytree(Path(khaos_attribution.__file__).parent, sibling / "src" / "khaos_attribution",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (sibling / "pyproject.toml").write_text("")
+    assert P.contract_spec(root) == str(sibling), "the sibling holds this room's code"
+    (sibling / "src" / "khaos_attribution" / "newer.py").write_text("x = 1\n")
+    assert P.contract_spec(root) == tag, "a sibling that has moved on from this room's contract is not installed"
     monkeypatch.setenv(P.CONTRACT_WHEEL_ENV, str(tmp_path / "k.whl"))
     assert P.contract_spec(root) == str(tmp_path / "k.whl")
     monkeypatch.setenv(P.CONTRACT_SRC_ENV, str(tmp_path / "src"))
@@ -581,3 +592,207 @@ def test_an_environment_whose_interpreter_cannot_start_is_made_again(tmp_path, m
     P.environment(root, "torch")
     venv_at = next(i for i, c in enumerate(seen) if "venv" in c)
     assert any("pip" in c and "install" in c for c in seen[venv_at:]), "the install runs into the venv made again"
+
+
+def test_an_install_that_leaves_another_contract_is_refused_in_words(tmp_path, monkeypatch):
+    """The contract is read back from the engine's environment after it is installed, never assumed."""
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: _done())
+    monkeypatch.setattr(P, "contract_present", lambda python: False)
+    monkeypatch.setattr(P, "contract_mismatch", lambda python: "holds contract 0.41.0, this room runs 0.57.0")
+    ok, note = P.contract_into(tmp_path / "python", tmp_path)
+    assert not ok and "holds contract 0.41.0, this room runs 0.57.0" in note
+    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    assert P.contract_into(tmp_path / "python", tmp_path)[0]
+
+
+def _built_env(tmp_path, monkeypatch, record=None, lock=b"lock v1\n"):
+    """An existing torch environment that runs the engine and holds this contract, with a build record or none."""
+    root = tmp_path / "sa3"
+    python = P.venv_python(root, "torch")
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    (root / "uv.lock").write_bytes(lock)
+    if record is not None:
+        (root / ".venv" / P.BUILD_RECORD).write_text(json.dumps(record))
+    seen = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        seen.append(cmd)
+        if "export" in cmd:
+            return _done(out="einops==0.8.0\n")
+        return _done(0, "ok")
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    return root, seen
+
+
+def _installs(seen) -> list:
+    return [c for c in seen if "pip" in c and "install" in c]
+
+
+def test_an_environment_with_no_build_record_is_a_note_and_nothing_is_reinstalled(tmp_path, monkeypatch):
+    """A live engine environment built before the record was kept is left as it is, by --check and by an install."""
+    root, seen = _built_env(tmp_path, monkeypatch)
+    ok, note = P.environment(root, "torch", check_only=True)
+    assert ok and "no build record" in note
+    ok, note = P.environment(root, "torch")
+    assert ok and _installs(seen) == [] and not any("venv" in c for c in seen)
+    assert not (root / ".venv" / P.BUILD_RECORD).exists(), "a record is written only by a build"
+
+
+def test_an_environment_built_at_this_pin_and_lock_is_left_alone(tmp_path, monkeypatch):
+    lock = b"lock v1\n"
+    root, seen = _built_env(tmp_path, monkeypatch, {"commit": P.DESCRIPTOR.commit,
+                                                    "lock_sha256": hashlib.sha256(lock).hexdigest()}, lock)
+    assert P.environment(root, "torch", check_only=True)[0]
+    assert P.environment(root, "torch")[0] and _installs(seen) == []
+
+
+def test_an_environment_built_at_another_pin_fails_the_check_and_is_rebuilt_in_place(tmp_path, monkeypatch):
+    """After the pin moves, the old dependencies are not left under the new code: the lock is installed again into the
+    same environment, and the record then names the pin and the lock it was built from."""
+    root, seen = _built_env(tmp_path, monkeypatch, {"commit": "0" * 40, "lock_sha256": "old"})
+    ok, note = P.environment(root, "torch", check_only=True)
+    assert not ok and "built at 000000000000" in note and P.DESCRIPTOR.commit[:12] in note
+    assert _installs(seen) == []
+    ok, note = P.environment(root, "torch")
+    assert ok, note
+    assert not any("venv" in c and "uv" == c[0] for c in seen), "the environment is not made again"
+    assert any("-r" in c for c in _installs(seen)), "Stability's lock is installed again"
+    record = json.loads((root / ".venv" / P.BUILD_RECORD).read_text())
+    assert record == {"commit": P.DESCRIPTOR.commit, "lock_sha256": hashlib.sha256(b"lock v1\n").hexdigest()}
+
+
+def test_a_fresh_build_pins_every_extra_and_records_itself(tmp_path, monkeypatch):
+    root = tmp_path / "sa3"
+    root.mkdir()
+    (root / "uv.lock").write_bytes(b"lock v2\n")
+    python = P.venv_python(root, "torch")
+    seen = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        seen.append(cmd)
+        if "venv" in cmd:
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("")
+        if "export" in cmd:
+            return _done(out="einops==0.8.0\n")
+        return _done(0, "ok")
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    ok, note = P.environment(root, "torch")
+    assert ok, note
+    extras = next(c for c in _installs(seen) if any(x.startswith("psutil") for x in c))
+    named = [x for x in extras if x.split("==")[0] in ("setuptools", "wheel", "ninja", "psutil", "matplotlib", "wandb")]
+    assert len(named) == 6 and all("==" in x for x in named), named
+    assert json.loads((root / ".venv" / P.BUILD_RECORD).read_text())["lock_sha256"] == hashlib.sha256(b"lock v2\n").hexdigest()
+
+
+def test_the_ready_made_flash_attention_is_installed_only_once_its_sha256_matches(tmp_path, monkeypatch):
+    import io
+    body = b"a wheel"
+    served = []
+
+    def urlopen(url, timeout=None):
+        served.append(url)
+        return io.BytesIO(body)
+    monkeypatch.setattr(P.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(P, "FLASH_ATTN_WHEEL_SHA256", hashlib.sha256(b"another wheel").hexdigest())
+    path, why = P.fetch_flash_attn(tmp_path)
+    assert path is None and "sha256" in why and not list(tmp_path.glob("*.whl")), "a wheel that does not match is not kept"
+    monkeypatch.setattr(P, "FLASH_ATTN_WHEEL_SHA256", hashlib.sha256(body).hexdigest())
+    path, why = P.fetch_flash_attn(tmp_path)
+    assert why is None and path.read_bytes() == body and path.name == P.FLASH_ATTN_WHEEL.rsplit("/", 1)[1]
+    assert P.fetch_flash_attn(tmp_path)[0] == path and len(served) == 2, "a wheel already here and matching is not fetched again"
+
+
+def test_a_failed_flash_attention_fetch_stops_the_install_with_its_reason(tmp_path, monkeypatch):
+    root = tmp_path / "sa3"
+    root.mkdir()
+    (root / "uv.lock").write_bytes(b"lock\n")
+    python = P.venv_python(root, "torch")
+    seen = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        cmd = [str(c) for c in cmd]
+        seen.append(cmd)
+        if "venv" in cmd:
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("")
+        if "export" in cmd:
+            return _done(out="einops==0.8.0\n")
+        return _done(0, "ok")
+    monkeypatch.setattr(P, "_run", fake_run)
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "flash_attn_requirement", lambda machine=None: P.FLASH_ATTN_WHEEL)
+    monkeypatch.setattr(P, "fetch_flash_attn", lambda work: (None, "the wheel did not match its sha256"))
+    ok, note = P.environment(root, "torch")
+    assert not ok and "did not match its sha256" in note
+    assert not any("flash" in " ".join(c) for c in _installs(seen))
+    assert not (root / ".venv" / P.BUILD_RECORD).exists()
+
+
+@pytest.mark.parametrize("engine", ["stable-audio-3", "mimetic-a0"])
+def test_a_weight_set_whose_licence_has_obligations_fetches_its_licence_files(engine):
+    from khaos_attribution.engines import descriptor
+    d = descriptor(engine)
+    assert d.licence.get("obligations")
+    for w in d.weights:
+        if w.get("runtime") != "mlx":
+            assert {"LICENSE*", "NOTICE*"} <= set(w.get("patterns") or []), w["repo"]
+
+
+def _cached_without_licence(tmp_path, monkeypatch):
+    snapshot = tmp_path / "hub" / "snapshots" / "rev"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.safetensors").write_bytes(b"w")
+    monkeypatch.setattr(P, "cached", lambda repo, files: True)
+    monkeypatch.setattr(P, "cached_path", lambda repo, name: str(snapshot / name))
+    return snapshot
+
+
+def test_check_notes_a_cached_set_with_no_licence_beside_it_without_failing(tmp_path, monkeypatch):
+    """Weights already cached are not fetched again, so their licence files are reported, never assumed."""
+    snapshot = _cached_without_licence(tmp_path, monkeypatch)
+    root = tmp_path / "sa3"
+    monkeypatch.setattr(P, "checkout", lambda root, check_only=False: (True, "at the pin"))
+    monkeypatch.setattr(P, "environment", lambda root, runtime, check_only=False: (True, "imports"))
+    report = P.provision(root, tmp_path / "w", device="cuda", check_only=True)
+    assert report.passed and "[note] no licence file beside stabilityai/stable-audio-3-medium-base" in report.text()
+    (snapshot / "LICENSE.md").write_text("terms")
+    (snapshot / "NOTICE").write_text("notice")
+    assert P.licence_notes("torch") == [] and "[note]" not in P.provision(root, tmp_path / "w", device="cuda", check_only=True).text()
+
+
+def test_the_weights_check_the_workshop_reads_stays_a_list_of_passes_and_failures(tmp_path, monkeypatch):
+    """The Workshop counts every weights() line that is not ok as missing weights; a cached set with no licence file
+    beside it is a pass there, its note said only in the report."""
+    _cached_without_licence(tmp_path, monkeypatch)
+    lines = P.weights(tmp_path / "sa3", "torch", tmp_path / "w", check_only=True)
+    assert lines and all(ok is True for ok, _line in lines), lines
+    assert [line for ok, line in lines if not ok] == [], "what the Workshop's engine_weights_missing would read"
+    assert P.licence_notes("torch"), "the gap is still said, apart from the check"
+
+
+def test_an_mlx_environment_built_at_another_pin_fails_the_check_and_runs_the_ports_installer_again(tmp_path, monkeypatch):
+    root = tmp_path / "sa3"
+    python = P.venv_python(root, "mlx")
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    (root / P.MLX_SUBDIR / "requirements.txt").write_text("mlx==0.1\n")
+    (python.parent.parent / P.BUILD_RECORD).write_text(json.dumps({"commit": "1" * 40, "lock_sha256": "x"}))
+    seen = []
+    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: seen.append([str(c) for c in cmd]) or _done(0, "ok"))
+    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    ok, note = P.environment(root, "mlx", check_only=True)
+    assert not ok and "built at 111111111111" in note and not any("install.sh" in c for c in seen)
+    assert P.environment(root, "mlx")[0] and any("install.sh" in c for c in seen)
+    assert json.loads((python.parent.parent / P.BUILD_RECORD).read_text())["commit"] == P.DESCRIPTOR.commit

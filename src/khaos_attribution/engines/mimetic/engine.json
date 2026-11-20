@@ -27,7 +27,9 @@
       "runtime": "torch",
       "patterns": [
         "model.safetensors",
-        "model_config.json"
+        "model_config.json",
+        "LICENSE*",
+        "NOTICE*"
       ],
       "components": [
         "model.safetensors",
@@ -45,7 +47,9 @@
         "config.json",
         "model.safetensors",
         "spiece.model",
-        "tokenizer.json"
+        "tokenizer.json",
+        "LICENSE*",
+        "NOTICE*"
       ],
       "components": [
         "config.json",

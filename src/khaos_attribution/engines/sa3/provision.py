@@ -7,11 +7,13 @@ from __future__ import annotations
 
 from khaos_attribution import weights as mirror
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,9 +28,17 @@ TORCHAUDIO = "torchaudio==2.7.1"
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 FLASH_ATTN = "flash-attn==2.8.3"
 # Flash Attention's own build for this torch and Python: its installer needs a CUDA compiler even to fetch it.
-FLASH_ATTN_WHEEL = ("flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/"
+FLASH_ATTN_WHEEL = ("https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/"
                     "flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl")
+# The release asset's digest as GitHub publishes it; the wheel is installed only once it matches.
+FLASH_ATTN_WHEEL_SHA256 = "cd1a45ebfc1731a13e55ad68e0c9ad92390ddfffba306f9222be67c6d5a805af"
+# What the trainer and Flash Attention's install need beyond Stability's lock, at the versions a working CUDA
+# environment holds, so two builds agree.
+EXTRAS = ("setuptools==82.0.1", "wheel==0.48.0", "ninja==1.13.2", "psutil==7.2.2", "matplotlib==3.11.2",
+          "wandb==0.31.0")
 PYTHON_VERSION = "3.11"
+# Beside the interpreter's venv: the pin and the lock an environment was built from.
+BUILD_RECORD = ".khaos-built.json"
 
 
 @dataclass
@@ -41,12 +51,17 @@ class Report:
     def bad(self, what: str) -> None:
         self.checks.append((False, what))
 
+    def note(self, what: str) -> None:
+        """Said, never failed on."""
+        self.checks.append((None, what))
+
     @property
     def passed(self) -> bool:
-        return all(ok for ok, _ in self.checks)
+        return all(ok is not False for ok, _ in self.checks)
 
     def text(self) -> str:
-        return "\n".join(f"[{'ok' if ok else 'FAIL'}] {what}" for ok, what in self.checks) + \
+        mark = {True: "ok", False: "FAIL", None: "note"}
+        return "\n".join(f"[{mark[ok]}] {what}" for ok, what in self.checks) + \
             ("\nCHECK OK" if self.passed else "\nCHECK FAILED")
 
 
@@ -247,20 +262,98 @@ def flash_attn_requirement(machine: str | None = None) -> str:
     return FLASH_ATTN_WHEEL if sys.platform.startswith("linux") and machine in ("x86_64", "AMD64") else FLASH_ATTN
 
 
+def _lock_file(root: Path, runtime: str) -> Path:
+    return root / MLX_SUBDIR / "requirements.txt" if runtime == "mlx" else root / "uv.lock"
+
+
+def build_wanted(root: Path, runtime: str) -> dict:
+    """The pin and the sha256 of the lock an environment built here today would be built from."""
+    try:
+        lock = hashlib.sha256(_lock_file(root, runtime).read_bytes()).hexdigest()
+    except OSError:
+        lock = None
+    return {"commit": DESCRIPTOR.commit, "lock_sha256": lock}
+
+
+def _record_path(root: Path, runtime: str) -> Path:
+    return venv_python(root, runtime).parent.parent / BUILD_RECORD
+
+
+def build_record(root: Path, runtime: str) -> dict | None:
+    """What the environment says it was built from, or None when it keeps no record."""
+    try:
+        record = json.loads(_record_path(root, runtime).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def build_stale(root: Path, runtime: str) -> str | None:
+    """Why the environment was built from another pin or lock than today's, or None; no record is never stale, so a
+    live environment built before the record was kept is left as it is."""
+    record = build_record(root, runtime)
+    if record is None:
+        return None
+    wanted = build_wanted(root, runtime)
+    if record.get("commit") != wanted["commit"]:
+        return f"was built at {str(record.get('commit'))[:12]}, the pin is {wanted['commit'][:12]}"
+    if record.get("lock_sha256") != wanted["lock_sha256"]:
+        return "was built from another lock than the pin's"
+    return None
+
+
+def _write_build_record(root: Path, runtime: str) -> None:
+    _record_path(root, runtime).write_text(json.dumps(build_wanted(root, runtime)) + "\n", encoding="utf-8")
+
+
+def fetch_flash_attn(work: Path) -> tuple:
+    """Flash Attention's ready-made wheel under ``work``, kept only once its sha256 matches: (path, None) or (None, why)."""
+    target = Path(work) / FLASH_ATTN_WHEEL.rsplit("/", 1)[1]
+
+    def digest(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    if target.is_file() and digest(target) == FLASH_ATTN_WHEEL_SHA256:
+        return target, None
+    part = target.with_name(target.name + ".part")
+    try:
+        # The pinned release asset, checked below before anything installs it.
+        with urllib.request.urlopen(FLASH_ATTN_WHEEL, timeout=120) as resp, part.open("wb") as out:  # noqa: S310
+            shutil.copyfileobj(resp, out)
+    except OSError as exc:
+        part.unlink(missing_ok=True)
+        return None, f"Flash Attention's wheel could not be fetched: {exc}"
+    if digest(part) != FLASH_ATTN_WHEEL_SHA256:
+        part.unlink(missing_ok=True)
+        return None, "Flash Attention's wheel did not match its sha256; nothing was installed"
+    part.replace(target)
+    return target, None
+
+
 def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
-    """The engine's own interpreter: (ok, note)."""
+    """The engine's own interpreter: (ok, note). An environment whose build record names another pin or lock is
+    installed again in place; one with no record is left as it is."""
+    unrecorded = "; no build record (built before Khaos kept one)"
     if runtime == "mlx":
         mlx = root / MLX_SUBDIR
         python = venv_python(root, "mlx")
         if python.is_file():
             probe = _run([python, "-c", "import mlx.core, safetensors; print('ok')"], cwd=mlx)
             if probe.returncode == 0:
-                # The MLX measure worker projects its features with the contract, as the torch one does.
-                if contract_present(python):
-                    return True, "the MLX runtime imports"
-                if check_only:
-                    return False, f"the MLX environment at {python} runs the engine but {contract_mismatch(python)}"
-                return contract_into(python, root)
+                stale = build_stale(root, "mlx")
+                if stale and check_only:
+                    return False, f"the MLX environment at {python} {stale}: provision again to rebuild it"
+                if not stale:
+                    note = "the MLX runtime imports" + ("" if build_record(root, "mlx") else unrecorded)
+                    # The MLX measure worker projects its features with the contract, as the torch one does.
+                    if contract_present(python):
+                        return True, note
+                    if check_only:
+                        return False, f"the MLX environment at {python} runs the engine but {contract_mismatch(python)}"
+                    return contract_into(python, root)
         if check_only:
             return False, f"no MLX environment at {python}"
         done = _run(["bash", "install.sh", "-y"], cwd=mlx, env={**host_env(), "UV": uv_path()})
@@ -270,6 +363,8 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         if not python.is_file():
             return False, "the MLX runtime did not install"
         ok, note = contract_into(python, root)
+        if ok:
+            _write_build_record(root, "mlx")
         return ok, ("the MLX runtime installed; " + note) if ok else note
     python = venv_python(root, "torch")
     # Flash Attention has no Windows build; Stability's model falls back to PyTorch's own attention without it.
@@ -279,19 +374,31 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     if python.is_file():
         probe = _run([python, "-c", probe_code])
         if probe.returncode == 0:
-            if contract_present(python):
-                return True, probe_note
-            if check_only:
-                return False, f"the environment at {python} runs the engine but {contract_mismatch(python)}"
-            ok, note = contract_into(python, root)
-            return ok, (probe_note + "; " + note) if ok else note
-        if check_only:
+            stale = build_stale(root, "torch")
+            if stale and check_only:
+                return False, f"the environment at {python} {stale}: provision again to rebuild it"
+            if not stale:
+                note = probe_note + ("" if build_record(root, "torch") else unrecorded)
+                if contract_present(python):
+                    return True, note
+                if check_only:
+                    return False, f"the environment at {python} runs the engine but {contract_mismatch(python)}"
+                ok, cnote = contract_into(python, root)
+                return ok, (note + "; " + cnote) if ok else cnote
+        elif check_only:
             return False, f"the environment at {python} cannot run the engine: {probe.stderr.strip()[-200:]}"
     elif check_only:
         return False, f"no environment at {python}"
     uv = uv_path()
     work = root / "work"
     work.mkdir(exist_ok=True)
+    flash = [] if WINDOWS else [flash_attn_requirement()]
+    # Fetched and checked before anything installs, so a bad download changes nothing.
+    if flash == [FLASH_ATTN_WHEEL]:
+        wheel, why = fetch_flash_attn(work)
+        if why:
+            return False, why
+        flash = [wheel]
     made = ""
     # An interpreter that cannot start (its base Python moved or went) is made again, not patched.
     if not python.is_file() or _run([python, "-c", "pass"]).returncode != 0:
@@ -309,8 +416,8 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         [uv, "pip", "install", "-q", "--python", python, "-r", work / "stability-locked.txt", f"{TORCH}+cu128",
          f"{TORCHAUDIO}+cu128", "--extra-index-url", TORCH_INDEX, "--index-strategy", "unsafe-best-match"],
         [uv, "pip", "install", "-q", "--python", python, "--no-sources", "--no-deps", "-e", root],
-        [uv, "pip", "install", "-q", "--python", python, "setuptools", "wheel", "ninja", "psutil", "matplotlib", "wandb"],
-        *([] if WINDOWS else [[uv, "pip", "install", "--python", python, "--no-build-isolation", flash_attn_requirement()]]),
+        [uv, "pip", "install", "-q", "--python", python, *EXTRAS],
+        *[[uv, "pip", "install", "--python", python, "--no-build-isolation", f] for f in flash],
     ]
     for cmd in steps:
         done = _run(cmd, cwd=root)
@@ -322,6 +429,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     probe = _run([python, "-c", probe_code])
     if probe.returncode != 0:
         return False, f"the environment installed but cannot run the engine: {probe.stderr.strip()[-200:]}"
+    _write_build_record(root, "torch")
     return True, f"the engine's environment installed; {probe_note}" + (f"; {made}" if made else "")
 
 
@@ -332,8 +440,10 @@ CONTRACT_REPO = "https://github.com/khaos-foundation/Khaos_Attribution.git"
 
 def contract_spec(root: Path) -> str:
     """Where the contract comes from for the engine's environment: a checkout named in KHAOS_CONTRACT_SRC, a wheel
-    named in KHAOS_CONTRACT_WHEEL (the app ships one), the room's sibling checkout, else the tagged release."""
+    named in KHAOS_CONTRACT_WHEEL (the app ships one), the room's sibling checkout while it holds the code this room
+    imports, else the tagged release of this room's version."""
     from khaos_attribution import __version__  # noqa: PLC0415
+    from khaos_attribution.engines.pins import contract_code_hash  # noqa: PLC0415
     src = os.environ.get(CONTRACT_SRC_ENV, "").strip()
     if src:
         return src
@@ -341,7 +451,9 @@ def contract_spec(root: Path) -> str:
     if wheel:
         return wheel
     sibling = root.parent / "Khaos_Attribution"
-    if (sibling / "pyproject.toml").is_file():
+    package = sibling / "src" / "khaos_attribution"
+    if (sibling / "pyproject.toml").is_file() and package.is_dir() and \
+            contract_code_hash(package).split()[1] == contract_code_hash().split()[1]:
         return str(sibling)
     return f"khaos-attribution @ git+{CONTRACT_REPO}@v{__version__}"
 
@@ -386,6 +498,8 @@ def contract_into(python: Path, root: Path) -> tuple:
     done = _run([uv_path(), "pip", "install", "-q", "--python", python, "--reinstall-package", "khaos-attribution", contract_spec(root)])
     if done.returncode != 0:
         return False, f"the contract could not be installed into the engine's environment: {done.stderr.strip()[-200:]}"
+    if not contract_present(python):
+        return False, f"khaos-attribution was installed into the engine's environment, but it {contract_mismatch(python)}"
     return True, f"khaos-attribution {__version__} in the engine's environment"
 
 
@@ -401,6 +515,39 @@ def cached(repo: str, filenames: list) -> bool:
         if not isinstance(found, str):
             return False
     return True
+
+
+def cached_path(repo: str, name: str) -> str | None:
+    try:
+        from huggingface_hub import try_to_load_from_cache  # noqa: PLC0415
+    except ImportError:
+        return None
+    found = try_to_load_from_cache(repo, name)
+    return found if isinstance(found, str) else None
+
+
+LICENCE_PATTERNS = ("LICENSE*", "NOTICE*")
+
+
+def licence_note(w: dict) -> str | None:
+    """Said when a cached set whose licence must travel with it holds no licence file in its snapshot: weights fetched
+    before the set named its licence files are not fetched again, so the gap is reported, never assumed away."""
+    if not DESCRIPTOR.licence.get("obligations") or not set(LICENCE_PATTERNS) <= set(w.get("patterns") or ()):
+        return None
+    first = (w.get("components") or [None])[0]
+    where = cached_path(w["repo"], first) if first else None
+    if where is None:
+        return None
+    snapshot = Path(where).parents[len(Path(first).parts) - 1]
+    if any(any(snapshot.glob(p)) for p in LICENCE_PATTERNS):
+        return None
+    return (f"no licence file beside {w['repo']} in the Hugging Face cache: these weights were fetched before their "
+            "licence travelled with them")
+
+
+def licence_notes(runtime: str) -> list:
+    """The licence notes for this runtime's cached sets, kept apart from weights(), whose every line is a check."""
+    return [note for w in DESCRIPTOR.weights if w.get("runtime", runtime) == runtime and (note := licence_note(w))]
 
 
 # Stability's repository keeps the port's files under MLX/; the port reads them under models/mlx/.
@@ -530,6 +677,8 @@ def provision(repo_dir=None, weights_dir=None, *, device: str = "auto", check_on
     if ok:
         for good, line in weights(root, runtime, weights_dir, check_only=check_only):
             (report.ok if good else report.bad)(line)
+        for note in licence_notes(runtime):
+            report.note(note)
     return report
 
 
