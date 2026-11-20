@@ -73,12 +73,32 @@ def engine_env(root, **extra: str) -> dict:
             "WANDB_MODE": "disabled", **extra}
 
 
+# ── how a child is started ────────────────────────────────────────────────────
+
+LAUNCHER = Path(__file__).with_name("launch.py")
+_CONTRACT = LAUNCHER.parent.parent
+
+
+def _ours(script) -> bool:
+    try:
+        return Path(script).resolve().is_relative_to(_CONTRACT.resolve())
+    except OSError:
+        return False
+
+
+def command(python, script, *args) -> list:
+    """The argv that runs ``script`` in ``python``: a script of the contract's own goes through the launcher, so it
+    runs on this room's contract, never an engine environment's copy; anyone else's script runs directly."""
+    head = [str(python), str(LAUNCHER)] if _ours(script) else [str(python)]
+    return [*head, str(script), *(str(a) for a in args)]
+
+
 # ── one request, one reply ────────────────────────────────────────────────────
 
 def _start(python: Path, script: Path, *, cwd: Path, env: dict, stderr, args=()) -> subprocess.Popen:
     """The worker, in its host's process group so the host's own signals reach it, and marked so its tree is found."""
     mark = secrets.token_hex(8)
-    proc = subprocess.Popen([str(python), str(script), *(str(a) for a in args)], cwd=str(cwd), env={**env, MARK_ENV: mark},
+    proc = subprocess.Popen(command(python, script, *args), cwd=str(cwd), env={**env, MARK_ENV: mark},
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, text=True, errors="replace")
     proc.khaos_mark = mark
     return proc

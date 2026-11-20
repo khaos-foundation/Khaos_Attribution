@@ -9,6 +9,11 @@ import csv
 import json
 from pathlib import Path
 
+if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
+    import pathlib
+    import runpy
+    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")
+
 LOSSES_CSV = "khaos_losses.csv"
 METADATA_MODULE = '''from pathlib import Path
 

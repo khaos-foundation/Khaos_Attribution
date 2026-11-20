@@ -16,9 +16,6 @@ import khaos_attribution
 from khaos_attribution.engines import launch as L
 
 PACKAGE = Path(khaos_attribution.__file__).resolve().parent
-# The stub every contract script that runs in an engine interpreter starts with.
-STUB = ('import pathlib, runpy\n'
-        'runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")\n')
 NO_PY311 = "no Python 3.11 on this machine to load the contract under"
 
 
@@ -42,7 +39,7 @@ def decoy(tmp_path) -> Path:
 
 def _script(room: Path, name: str, body: str) -> Path:
     path = room / "engines" / "toy" / name
-    path.write_text("from __future__ import annotations\n" + STUB + textwrap.dedent(body))
+    path.write_text("from __future__ import annotations\n\n" + L.STUB + textwrap.dedent(body))
     return path
 
 
@@ -53,8 +50,8 @@ def _env(decoy: Path | None = None, **extra) -> dict:
     return {**env, **extra}
 
 
-def _launch(room: Path, script: Path, *args, python=None, env=None) -> subprocess.CompletedProcess:
-    return subprocess.run([str(python or sys.executable), str(room / "engines" / "launch.py"), str(script), *args],
+def _launch(room: Path, script: Path, *args, env=None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(room / "engines" / "launch.py"), str(script), *args],
                           capture_output=True, text=True, env=env, timeout=120)
 
 
@@ -197,3 +194,18 @@ def test_the_contract_and_its_launcher_load_under_python_311(tmp_path):
     assert done.returncode == 0, f"modules that Python 3.11 cannot compile:\n{done.stdout}{done.stderr}"
     usage = subprocess.run([python, str(PACKAGE / "engines" / "launch.py")], capture_output=True, text=True, timeout=60)
     assert usage.returncode == 2 and "usage" in usage.stderr
+
+
+def test_the_contracts_own_scripts_start_through_the_launcher_and_anyone_elses_directly(tmp_path):
+    from khaos_attribution.engines import worker_process as W
+    ours = PACKAGE / "engines" / "sa3" / "worker.py"
+    assert W.command("py", ours, "--x", 1) == ["py", str(PACKAGE / "engines" / "launch.py"), str(ours), "--x", "1"]
+    theirs = tmp_path / "optimized" / "mlx" / "scripts" / "pre_encode_mlx.py"
+    assert W.command("py", theirs, "-i", "c") == ["py", str(theirs), "-i", "c"]
+
+
+def test_a_contract_copy_refuses_to_load_in_a_process_started_on_another(room, decoy):
+    """A stray child of a launched script that finds another copy of this contract on its path stops there."""
+    done = subprocess.run([sys.executable, "-c", "import khaos_attribution"], capture_output=True, text=True, timeout=60,
+                          env=_env(PYTHONPATH=str(room.parent), **{L.PACKAGE_ENV: str(decoy / "khaos_attribution")}))
+    assert done.returncode != 0 and "ImportError: this process runs the room's contract at" in done.stderr

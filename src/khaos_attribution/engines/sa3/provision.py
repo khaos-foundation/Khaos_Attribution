@@ -18,6 +18,8 @@ from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, runtime_for, venv_python
 from khaos_attribution.engines.sa3.train import BASE_NPZ
 from khaos_attribution.engines import environment as shared_environment
+from khaos_attribution.engines.contract_guard import requirements_into, requirements_missing
+# Rooms from before the launcher read the engine environment's own contract through these names.
 from khaos_attribution.engines.contract_guard import (CONTRACT_FINGERPRINT, CONTRACT_REPO, CONTRACT_SRC_ENV,  # noqa: F401
                                                       CONTRACT_WHEEL_ENV, contract_fingerprint, contract_into,
                                                       contract_mismatch, contract_present, contract_spec,
@@ -224,12 +226,13 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
                     return False, f"the MLX environment at {python} {stale}: provision again to rebuild it"
                 if not stale:
                     note = "the MLX runtime imports" + ("" if build_record(root, "mlx") else unrecorded)
-                    # The MLX measure worker projects its features with the contract, as the torch one does.
-                    if contract_present(python):
+                    # The MLX measure worker loads the room's contract, as the torch one does.
+                    lacks = requirements_missing(python)
+                    if lacks is None:
                         return True, note
                     if check_only:
-                        return False, f"the MLX environment at {python} runs the engine but {contract_mismatch(python)}"
-                    return contract_into(python, root)
+                        return False, f"the MLX environment at {python} runs the engine but {lacks}"
+                    return requirements_into(python)
         if check_only:
             return False, f"no MLX environment at {python}"
         done = _run(["bash", "install.sh", "-y"], cwd=mlx, env={**host_env(), "UV": uv_path()})
@@ -238,7 +241,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         _run([uv_path(), "pip", "install", "-q", "--python", python, "safetensors"])
         if not python.is_file():
             return False, "the MLX runtime did not install"
-        ok, note = contract_into(python, root)
+        ok, note = requirements_into(python)
         if ok:
             _write_build_record(root, "mlx")
         return ok, ("the MLX runtime installed; " + note) if ok else note
@@ -255,11 +258,12 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
                 return False, f"the environment at {python} {stale}: provision again to rebuild it"
             if not stale:
                 note = probe_note + ("" if build_record(root, "torch") else unrecorded)
-                if contract_present(python):
+                lacks = requirements_missing(python)
+                if lacks is None:
                     return True, note
                 if check_only:
-                    return False, f"the environment at {python} runs the engine but {contract_mismatch(python)}"
-                ok, cnote = contract_into(python, root)
+                    return False, f"the environment at {python} runs the engine but {lacks}"
+                ok, cnote = requirements_into(python)
                 return ok, (note + "; " + cnote) if ok else cnote
         elif check_only:
             return False, f"the environment at {python} cannot run the engine: {probe.stderr.strip()[-200:]}"
@@ -299,7 +303,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         done = _run(cmd, cwd=root)
         if done.returncode != 0:
             return False, f"environment step failed ({' '.join(str(c) for c in cmd[:4])}…): {done.stderr.strip()[-300:]}"
-    ok, note = contract_into(python, root)
+    ok, note = requirements_into(python)
     if not ok:
         return False, f"the engine's environment installed; {note}"
     probe = _run([python, "-c", probe_code])

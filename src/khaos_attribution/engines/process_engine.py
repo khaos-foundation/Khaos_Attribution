@@ -90,7 +90,9 @@ class ProcessSession:
         (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
         log_file = (self.save_dir / "trainer_stdout.log").open("ab")
         # In the job's own process group, so the room's Stop and Pause signals reach the trainer as they do the job.
-        self.process = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=log_file, stderr=subprocess.STDOUT)
+        # The record keeps the trainer's own command; a contract driver is started through the launcher.
+        self.process = subprocess.Popen(W.command(*cmd), cwd=str(cwd), env=env, stdout=log_file,
+                                        stderr=subprocess.STDOUT)
         try:
             yield from follow()
         finally:

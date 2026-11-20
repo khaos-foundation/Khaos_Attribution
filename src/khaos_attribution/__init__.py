@@ -1,6 +1,15 @@
 """khaos_attribution — the contract the Khaos rooms share: record schemas and validators, the watermark codec, the
 attribution estimators, Content Credentials, the seal, the Guild Register's client and service, and the engine socket."""
 
+import os as _os
+
+# Set by engines/launch.py: a process started on one room's contract never goes on to import another copy.
+_ROOM = _os.environ.get("KHAOS_CONTRACT_PACKAGE", "").strip()
+_HERE = _os.path.dirname(__file__)
+if _ROOM and _os.path.normcase(_os.path.realpath(_ROOM)) != _os.path.normcase(_os.path.realpath(_HERE)):
+    raise ImportError(f"this process runs the room's contract at {_ROOM}, not the copy at {_HERE}: start it through "
+                      "the contract's engines/launch.py")
+
 from khaos_attribution.validation import (
     AttributionValidationError,
     WrittenByNewerContract,

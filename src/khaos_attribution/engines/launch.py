@@ -18,6 +18,12 @@ from pathlib import Path
 
 PACKAGE_ENV = "KHAOS_CONTRACT_PACKAGE"
 CHECK_NAME = "khaos_contract_check"
+# The first statement after the imports of every contract script that runs in an engine interpreter.
+STUB = ('if __name__ in ("__main__", "__mp_main__"):  # the room\'s contract, only through engines/launch.py\n'
+        '    import pathlib\n'
+        '    import runpy\n'
+        '    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), '
+        'run_name="khaos_contract_check")\n')
 REFUSED_EXIT = 3
 NAME = "khaos_attribution"
 PACKAGE = Path(__file__).resolve().parent.parent

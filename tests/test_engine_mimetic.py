@@ -75,7 +75,7 @@ def test_check_wants_each_weight_set_at_its_pinned_revision(tmp_path, monkeypatc
         return _done(0, "ok")
     monkeypatch.setattr(P, "_run", fake_run)
     monkeypatch.setattr(P, "git_usable", lambda: True)
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
     asked = []
     have = set()
     monkeypatch.setattr(P, "cached", lambda repo, files, rev: asked.append((repo, rev)) or repo in have)

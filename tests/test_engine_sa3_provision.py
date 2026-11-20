@@ -12,6 +12,41 @@ from khaos_attribution.engines import environment as EN
 from khaos_attribution.engines.sa3 import provision as P
 
 
+@pytest.fixture(autouse=True)
+def confined(tmp_path, monkeypatch):
+    """Removal, move and replace raise for any path outside tmp_path, so these tests cannot reach the machine even
+    against broken provisioning code; an rmtree's own relative steps (dir_fd) are inside the path it was given."""
+    import os
+    import shutil
+    root = os.path.realpath(tmp_path)
+
+    def inside(p) -> bool:
+        real = os.path.realpath(os.fspath(p))
+        return real == root or real.startswith(root + os.sep)
+
+    def guard(fn, n):
+        def wrapped(*a, **k):
+            if k.get("dir_fd") is None and k.get("src_dir_fd") is None:
+                for p in a[:n]:
+                    if not inside(p):
+                        raise PermissionError(f"confined: {fn.__name__} outside tmp_path: {p}")
+            return fn(*a, **k)
+        return wrapped
+
+    monkeypatch.setattr(shutil, "rmtree", guard(shutil.rmtree, 1))
+    monkeypatch.setattr(shutil, "move", guard(shutil.move, 2))
+    for name, n in (("unlink", 1), ("remove", 1), ("rmdir", 1), ("rename", 2), ("replace", 2)):
+        monkeypatch.setattr(os, name, guard(getattr(os, name), n))
+
+
+def test_the_confinement_refuses_a_path_outside_tmp_path(tmp_path):
+    import shutil
+    with pytest.raises(PermissionError, match="confined"):
+        shutil.rmtree(tmp_path.parent / "not-this-tests")
+    (tmp_path / "x").mkdir()
+    shutil.rmtree(tmp_path / "x")
+
+
 def _patch(monkeypatch, name, fake):
     """A shared environment helper, patched both where sa3's provision binds it and in the shared module."""
     monkeypatch.setattr(P, {"run": "_run"}.get(name, name), fake)
@@ -44,7 +79,7 @@ def test_check_compares_the_pin_and_the_environment_and_each_weight(tmp_path, mo
             return _done(0, "ok")
         return _done()
     _patch(monkeypatch, "run", fake_run)
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
     (root / ".venv" / "bin").mkdir(parents=True)
     (root / ".venv" / "bin" / "python").write_text("")
     have = set()
@@ -78,7 +113,7 @@ def test_an_install_fills_the_cache_through_the_engines_own_downloader(tmp_path,
             return _done(1, err="Connection timed out") if calls and sum("snapshot_download" in " ".join(c) for c, _ in calls) > 1 else _done()
         return _done()
     _patch(monkeypatch, "run", fake_run)
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
     monkeypatch.setattr(P, "cached", lambda repo, files: any("snapshot_download" in " ".join(c) and c[-2] == repo for c, _ in calls))
     report = P.provision(root, tmp_path / "w", device="cuda")
     text = report.text()
@@ -135,10 +170,11 @@ def test_the_mlx_runtime_wants_the_exported_base_weights(tmp_path, monkeypatch):
     weights = tmp_path / "w"
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
     mlx = root / "optimized" / "mlx"
-    monkeypatch.setattr(P, "contract_present", lambda python: False)
-    assert "runs the engine but holds" in P.provision(root, weights, device="mps", check_only=True).text(), \
-        "the MLX measure worker projects with the contract, so an MLX environment without it is not ready"
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
+    monkeypatch.setattr(P, "requirements_missing", lambda python: "cannot load the room's contract (no jsonschema)")
+    assert "runs the engine but cannot load the room's contract" in P.provision(root, weights, device="mps",
+                                                                                check_only=True).text(), \
+        "the MLX measure worker loads the room's contract, so an MLX environment that cannot is not ready"
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
     (root / P.MLX_TRAINER).parent.mkdir(parents=True, exist_ok=True)
     (root / P.MLX_TRAINER).write_text("lac = mx.array(\n    " + P.TRAINER_MASK_ONES + "\n    np.zeros((1, 256, crop_len)))\n")
     assert "all-ones inpaint mask" in P.provision(root, weights, device="mps", check_only=True).text()
@@ -383,8 +419,8 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
         return _done()
     _patch(monkeypatch, "run", fake_run)
     _patch(monkeypatch, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
-    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
+    monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
     report = P.provision(root, tmp_path / "w", device="cuda")
     assert report.passed, report.text()
@@ -529,7 +565,7 @@ def test_where_uv_cannot_get_the_pinned_python_the_running_one_stands_in(tmp_pat
         return _done(0, "ok")
     _patch(monkeypatch, "run", fake_run)
     _patch(monkeypatch, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     monkeypatch.setattr(P, "WINDOWS", True)
     ok, note = P.environment(root, "torch")
     assert ok, note
@@ -597,7 +633,7 @@ def test_an_environment_whose_interpreter_cannot_start_is_made_again(tmp_path, m
         return _done()
     _patch(monkeypatch, "run", fake_run)
     _patch(monkeypatch, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     P.environment(root, "torch")
     venv_at = next(i for i, c in enumerate(seen) if "venv" in c)
     assert any("pip" in c and "install" in c for c in seen[venv_at:]), "the install runs into the venv made again"
@@ -634,8 +670,8 @@ def _built_env(tmp_path, monkeypatch, record=None, lock=b"lock v1\n"):
         return _done(0, "ok")
     _patch(monkeypatch, "run", fake_run)
     _patch(monkeypatch, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
-    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
+    monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     return root, seen
 
 
@@ -694,7 +730,7 @@ def test_a_fresh_build_pins_every_extra_and_records_itself(tmp_path, monkeypatch
         return _done(0, "ok")
     _patch(monkeypatch, "run", fake_run)
     _patch(monkeypatch, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     ok, note = P.environment(root, "torch")
     assert ok, note
     extras = next(c for c in _installs(seen) if any(x.startswith("psutil") for x in c))
@@ -799,8 +835,8 @@ def test_an_mlx_environment_built_at_another_pin_fails_the_check_and_runs_the_po
     seen = []
     _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: seen.append([str(c) for c in cmd]) or _done(0, "ok"))
     _patch(monkeypatch, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
-    monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
+    monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     ok, note = P.environment(root, "mlx", check_only=True)
     assert not ok and "built at 111111111111" in note and not any("install.sh" in c for c in seen)
     assert P.environment(root, "mlx")[0] and any("install.sh" in c for c in seen)

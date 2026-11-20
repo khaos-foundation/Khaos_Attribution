@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from khaos_attribution.engines import process_engine as PE
+from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.mimetic import DESCRIPTOR as MIMETIC
 from khaos_attribution.engines.mimetic import train as MT
 from khaos_attribution.engines.sa3 import train as ST
@@ -38,8 +39,8 @@ def test_mimetics_rate_comes_from_the_recipe_else_its_descriptor_and_the_driver_
     cmd = MT.trainer_command(api, {**cfg, "learning_rate": 3e-4}, tensor_dir=tmp_path, save_dir=tmp_path, steps=steps,
                              seed=1, device="cpu")
     assert cmd[cmd.index("--lr") + 1] == "0.0003"
-    done = subprocess.run([sys.executable, str(MT.TRAIN_DRIVER), "--clips", "c", "--save-dir", "s", "--steps", "1",
-                           "--checkpoint-every", "1"], capture_output=True, text=True)
+    done = subprocess.run(W.command(sys.executable, MT.TRAIN_DRIVER, "--clips", "c", "--save-dir", "s", "--steps", "1",
+                           "--checkpoint-every", "1"), capture_output=True, text=True)
     assert done.returncode != 0 and "--rank" in done.stderr and "--lr" in done.stderr
 
 

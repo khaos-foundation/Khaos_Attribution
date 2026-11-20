@@ -17,6 +17,7 @@ from khaos_attribution.engines.sa3 import render as R  # noqa: E402
 from khaos_attribution.engines.sa3 import render_driver_mlx as M  # noqa: E402
 from khaos_attribution.engines.sa3 import rework as RW  # noqa: E402
 from khaos_attribution.engines.sa3 import worker as WK  # noqa: E402
+from khaos_attribution.engines import worker_process as W  # noqa: E402
 
 SR, FRAME = 44100, 4096
 
@@ -232,7 +233,8 @@ def test_the_mlx_worker_runs_a_fix_under_the_driver_and_a_take_through_the_scrip
     WK.render_mlx({**base, "mode": "text2music"})
     WK.render_mlx({**base, "model": "medium"})
     fix, take, fresh, distilled = seen
-    assert all(c[1].endswith("render_driver_mlx.py") and c[2].endswith("sa3_mlx.py") for c in seen)
+    assert all(c[1] == str(W.LAUNCHER) and c[2].endswith("render_driver_mlx.py") and c[3].endswith("sa3_mlx.py")
+               for c in seen), "the driver is the contract's own, so it starts through the launcher"
     assert fix[fix.index("--khaos-regions") + 1] == "8.0,10.0;20.0,21.0"
     assert fix[fix.index("--inpaint-range") + 1] == "8.0,21.0", "the script's own separator, over the parts' span"
     assert fix[fix.index("--init-noise-level") + 1] == "0.6"
@@ -406,7 +408,7 @@ def test_the_mlx_driver_puts_its_step_reports_round_the_scripts_sampler(tmp_path
     for rel, text in FAKE_STABILITY.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(text)
-    done = subprocess.run([sys.executable, M.__file__, str(tmp_path / "scripts" / "sa3_mlx.py"), "--prompt", "p"],
+    done = subprocess.run(W.command(sys.executable, M.__file__, tmp_path / "scripts" / "sa3_mlx.py", "--prompt", "p"),
                           capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     rows = [json.loads(line[len("khaos-row "):]) for line in done.stdout.splitlines() if line.startswith("khaos-row ")]
