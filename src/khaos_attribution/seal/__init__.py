@@ -20,7 +20,7 @@ from typing import Sequence
 
 __all__ = [
     "CHARSET", "COLOURWAYS", "SealRefused", "artist_mark_of", "render_seal", "render_marks_row",
-    "seal_for_provenance", "marks_row_for_provenance", "provenance_values",
+    "seal_for_provenance", "marks_row_for_provenance", "provenance_values", "model_seal_document",
 ]
 
 # ── the seal's canvas (SPEC.md is the reference; these are its numbers) ────
@@ -377,11 +377,31 @@ def artist_mark_of(name: str) -> str:
     return letters
 
 
+NO_REGISTER_SERIAL = ("this model's watermark is a derived bucket, not a register serial: the seal is struck once the "
+                      "model is registered")
+
+
+def model_seal_document(card: dict, *, serial: int | None, verified: bool, derived: bool) -> dict:
+    """What a model's seal is struck from, in every room: its card, and the Register serial the ring reads. A model
+    from before the Register rings its own watermark ID; a derived bucket, many models' at once, never rings."""
+    if serial is None and derived:
+        return {"record": {}, "embedded_agrees_with_sidecar": False, "refused": NO_REGISTER_SERIAL}
+    record = {"artist_name": card.get("artist_name"), "schema_version": card.get("schema_version"),
+              "timestamp": card.get("training_date"), "artist_mark": card.get("artist_mark"),
+              "standard_version": card.get("standard_version"), "date_letter": card.get("date_letter")}
+    if serial is not None:
+        record["register_serial"] = serial
+    else:
+        record["watermark_id"] = card.get("watermark_id")
+    return {"record": record, "embedded_agrees_with_sidecar": bool(verified)}
+
+
 def provenance_values(document: dict, *, number_key: str = "watermark_id") -> dict:
     """The four values a mark is struck with, read from a verified document.
 
     Refuses unless ``embedded_agrees_with_sidecar`` is literally ``True``.
-    ``number`` is ``record[number_key]`` as given, never reformatted;
+    ``number`` is ``record["register_serial"]`` when the record carries one,
+    else ``record[number_key]``, as given, never reformatted;
     ``artist_mark`` is ``record["artist_mark"]`` or the initials of
     ``artist_name``; ``standard_version`` is ``record["standard_version"]``
     or ``schema_version`` as major.minor; ``date_letter`` is
@@ -390,11 +410,13 @@ def provenance_values(document: dict, *, number_key: str = "watermark_id") -> di
     """
     if not isinstance(document, dict):
         raise SealRefused("a provenance document is a JSON object")
+    if document.get("refused"):
+        raise SealRefused(str(document["refused"]))
     if document.get("embedded_agrees_with_sidecar") is not True:
         raise SealRefused("the mark asserts that the embedded watermark agrees with the sidecar, "
                           "and this document does not say so — not drawn")
     record = document.get("record") if isinstance(document.get("record"), dict) else document
-    number = record.get(number_key)
+    number = record.get("register_serial") if record.get("register_serial") not in (None, "") else record.get(number_key)
     if number is None or number == "":
         raise SealRefused(f"the record carries no {number_key!r} to seal")
     mark = record.get("artist_mark") or artist_mark_of(str(record.get("artist_name") or ""))
