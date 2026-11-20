@@ -106,10 +106,6 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
 
 # ── preprocessing: Khaos's dataset into the trainer's clips ─────────────────────
 
-def _resample_stereo(audio, sr: int, target_sr: int):
-    return PT.resample_stereo(audio, sr, target_sr, engine_name="mimetic-a0", unavailable=TrainingUnavailable)
-
-
 def write_clips(dataset_json: Path | str, out_dir: Path | str) -> dict:
     """Every sample of a Khaos dataset.json as a clip beside its caption, at the engine's rate."""
     return PT.write_clips(dataset_json, out_dir, sample_rate=DESCRIPTOR.sample_rate, pair_suffix=PAIR_SUFFIX,

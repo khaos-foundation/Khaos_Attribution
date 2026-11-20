@@ -11,9 +11,6 @@ import numpy as np
 
 from khaos_attribution.engines.render import RenderFailed
 
-REPAINT_MODES = ("conservative", "balanced", "aggressive")
-
-
 def _soundfile():
     try:
         import soundfile as sf  # noqa: PLC0415

@@ -19,7 +19,7 @@ def get_custom_metadata(info, audio):
 
 
 def model_config(base_config: dict, args) -> dict:
-    """Mick's config with the training section his release leaves out: the adapter, the rate, no previews."""
+    """The release's config with the training section it leaves out: the adapter, the rate, no previews."""
     cfg = json.loads(json.dumps(base_config))
     cfg["training"] = {
         "learning_rate": float(args.lr),

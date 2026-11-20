@@ -1,4 +1,4 @@
-"""mimetic-a0 as a Khaos engine: the descriptor is data (engine.json); the slots drive Mick Grierson's checkout and
+"""mimetic-a0 as a Khaos engine: the descriptor is data (engine.json); the slots drive the engine's checkout and
 stable-audio-tools in the engine's own environment only when called."""
 
 from __future__ import annotations

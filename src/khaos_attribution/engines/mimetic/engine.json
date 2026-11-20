@@ -8,7 +8,7 @@
   "code": {
     "repo": "https://github.com/micknoise/mimetic-a0.git",
     "commit": "9f91b67cba7b50b6b05e619d649b965666882f7f",
-    "commit_note": "Mick Grierson's release 0.1 (cc0-sampler v4). Its lock pins stable-audio-tools at 3241adba, whose train.py trains the adapters."
+    "commit_note": "Release 0.1 (cc0-sampler v4). Its lock pins stable-audio-tools at 3241adba, whose train.py trains the adapters."
   },
   "licence": {
     "name": "MIT License",
@@ -90,7 +90,7 @@
         "guidance_scale": 6.0,
         "apg_scale": 1.0
       },
-      "note": "The one checkpoint, at the settings Mick tested it with (50 steps, CFG 6). Adapters train and render on it."
+      "note": "The one checkpoint, at the settings its release was tested with (50 steps, CFG 6). Adapters train and render on it."
     }
   },
   "default_variant": "base",

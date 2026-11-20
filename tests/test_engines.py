@@ -1,6 +1,7 @@
 """The socket: every known engine ships a descriptor the schema accepts, read without importing its code; the
 ACE-Step descriptor says what both rooms used to carry as constants; the pins helper reads a checkout and nothing
 else."""
+import re
 import subprocess
 
 import pytest
@@ -21,7 +22,7 @@ def test_every_known_engine_has_a_valid_descriptor_read_as_data():
 
 def test_the_acestep_descriptor_carries_the_facts_the_rooms_pinned_as_constants():
     d = E.descriptor("acestep-1.5")
-    assert d.commit == "ca1e85fe9430179831e6bc6be790c332190a3866" and pins.is_sha(d.commit)
+    assert d.commit == "ca1e85fe9430179831e6bc6be790c332190a3866"
     assert d.variant_config("turbo") == "acestep-v15-turbo" and d.variant_config("base") == "acestep-v15-base"
     assert d.render_defaults("turbo") == {"steps": 20, "shift": 3.0, "guidance_scale": 7.0, "cfg_interval_start": 0.0,
                                           "cfg_interval_end": 1.0, "dcw_enabled": False}
@@ -110,7 +111,7 @@ def test_the_pins_helper_reads_a_checkout_and_never_guesses(tmp_path, monkeypatc
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
     sha = pins.checkout_commit(tmp_path)
-    assert pins.is_sha(sha)
+    assert re.fullmatch(r"[0-9a-f]{40}", sha)
     monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere"))
     assert "GIT_DIR" not in pins.git_env() and pins.checkout_commit(tmp_path) == sha, "an inherited GIT_DIR never redirects the question"
 
