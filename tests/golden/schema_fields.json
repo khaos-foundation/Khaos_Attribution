@@ -123,6 +123,37 @@
    "version": "1.0.0"
   }
  ],
+ "evidence_review": [
+  {
+   "fields": [
+    "artist_id",
+    "run_id",
+    "schema_version",
+    "tracks",
+    "tracks[].evidence",
+    "tracks[].evidence.at_utc",
+    "tracks[].evidence.kind",
+    "tracks[].evidence.note",
+    "tracks[].evidence.says",
+    "tracks[].matches",
+    "tracks[].matches[].artists",
+    "tracks[].matches[].releases",
+    "tracks[].matches[].title",
+    "tracks[].names",
+    "tracks[].names.matched",
+    "tracks[].names.ours",
+    "tracks[].names.theirs",
+    "tracks[].state",
+    "tracks[].title",
+    "tracks[].track_id",
+    "tracks[].workshop_review",
+    "tracks[].workshop_review.at_utc",
+    "tracks[].workshop_review.by",
+    "written_at_utc"
+   ],
+   "version": "1.0.0"
+  }
+ ],
  "model_card": [
   {
    "fields": [

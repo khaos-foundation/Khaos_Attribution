@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence_review.schema.json",
+  "title": "EvidenceReview",
+  "description": "Written by the Workshop into every published run: its training tracks that matched a commercial release and were cleared on the importer's word, each reviewed by the person who published. A Listening Space serves the model only once its operator approves each one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artist_id",
+    "run_id",
+    "written_at_utc",
+    "tracks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "const": "1.0.0"
+    },
+    "artist_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "written_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tracks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "track_id",
+          "title",
+          "state",
+          "matches",
+          "names",
+          "evidence",
+          "workshop_review"
+        ],
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "evidence_given",
+              "not_a_match"
+            ],
+            "description": "How the importer cleared the match: evidence that it is theirs, or their word that it is another recording."
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "title",
+                "artists",
+                "releases"
+              ],
+              "properties": {
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "artists": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "releases": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "description": "What AcoustID matched, strongest first."
+          },
+          "names": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ours",
+              "theirs",
+              "matched"
+            ],
+            "properties": {
+              "ours": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "theirs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "matched": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Whether a name AcoustID gives is the catalogue's own; null when AcoustID names nobody."
+              }
+            }
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "says",
+              "note",
+              "at_utc"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "says": {
+                "type": "string",
+                "minLength": 1
+              },
+              "note": {
+                "type": "string"
+              },
+              "at_utc": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "workshop_review": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "by",
+              "at_utc"
+            ],
+            "properties": {
+              "by": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "at_utc": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

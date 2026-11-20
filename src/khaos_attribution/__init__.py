@@ -6,6 +6,8 @@ from khaos_attribution.validation import (
     load_schema,
     validate_attribution_estimate,
     validate_catalogue_delivery,
+    validate_evidence_review,
+    evidence_review_key,
     validate_model_card,
     validate_provenance_record,
     validate_tombstone,
@@ -19,12 +21,14 @@ PROVENANCE_SCHEMA_VERSION = "1.0.0"
 MODEL_CARD_SCHEMA_VERSION = "1.1.0"  # writers stamp the newest; 1.0.0 still validates
 TRACK_RIGHTS_SCHEMA_VERSION = "1.0.0"
 CATALOGUE_DELIVERY_SCHEMA_VERSION = "1.0.0"
+EVIDENCE_REVIEW_SCHEMA_VERSION = "1.0.0"
 ATTRIBUTION_ESTIMATE_SCHEMA_VERSION = "1.1.0"  # 1.0.0 still validates
 
 __all__ = [
     "ATTRIBUTION_ESTIMATE_SCHEMA_VERSION",
     "AttributionValidationError",
     "CATALOGUE_DELIVERY_SCHEMA_VERSION",
+    "EVIDENCE_REVIEW_SCHEMA_VERSION",
     "MODEL_CARD_SCHEMA_VERSION",
     "PROVENANCE_SCHEMA_VERSION",
     "TRACK_RIGHTS_SCHEMA_VERSION",
@@ -32,6 +36,8 @@ __all__ = [
     "load_schema",
     "validate_attribution_estimate",
     "validate_catalogue_delivery",
+    "validate_evidence_review",
+    "evidence_review_key",
     "validate_model_card",
     "validate_provenance_record",
     "validate_tombstone",
