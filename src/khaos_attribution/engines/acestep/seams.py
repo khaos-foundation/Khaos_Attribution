@@ -1,7 +1,8 @@
 """The seams Khaos patches in ACE-Step, read from a checkout's source and never imported, so an installer's --check
-can run it with no torch: the step normalisation the renderer un-clamps, the codec dtype rule it forces, the base
-checkpoint's turbo flag, the trainer's precision selector, the training step's loss, the preprocessor's codec loader
-and the data module's loader. A source that cannot be read fails, never passes.
+can run it with no torch: the step normalisation the renderer un-clamps, the codec dtype rule it forces, the DiT's
+precision it holds at bf16 on Apple silicon, the base checkpoint's turbo flag, the trainer's precision selector, the
+training step's loss, the preprocessor's codec loader and the data module's loader. A source that cannot be read
+fails, never passes.
 Usage: python -m khaos_attribution.engines.acestep.seams <ACE-Step checkout>"""
 
 from __future__ import annotations
@@ -47,10 +48,21 @@ def _names_in(node: ast.AST) -> set:
         {n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
 
 
+def _on_self(tree: ast.AST, name: str, ctx) -> bool:
+    return any(isinstance(n, ast.Attribute) and n.attr == name and isinstance(n.value, ast.Name) and n.value.id == "self"
+               and isinstance(n.ctx, ctx) for n in ast.walk(tree))
+
+
 def problems(root) -> list:
     """Every seam the checkout at ``root`` no longer offers as Khaos patches it, in words; empty when all hold."""
     root, found = Path(root), []
     handlers = _handler_sources(root, found)
+    # force_mps_bf16 answers the DiT's precision through a property on the class, which only an attribute the
+    # handler both sets and reads as self.dtype goes through.
+    if handlers and not (any(_on_self(t, "dtype", ast.Store) for t in handlers)
+                         and any(_on_self(t, "dtype", ast.Load) for t in handlers)):
+        found.append("the handler does not keep the DiT's precision as self.dtype: it cannot be held at bf16 on "
+                     "Apple silicon")
     normalise = [f for t in handlers for f in _functions(t, "_normalize_service_generate_inputs")]
     if handlers and not normalise:
         found.append("the handler has no _normalize_service_generate_inputs: the turbo step clamp cannot be lifted")

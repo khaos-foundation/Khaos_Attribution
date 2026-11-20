@@ -6,7 +6,23 @@ import pytest
 
 from khaos_attribution.engines.acestep import seams as S
 
-SIBLING = Path(__file__).resolve().parents[1].parent / "ACE-Step-1.5"
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _siblings_root(repo: Path) -> Path:
+    """The folder holding the main checkout and its siblings: a worktree's .git file names the main checkout."""
+    marker = repo / ".git"
+    if marker.is_file():
+        text = marker.read_text(encoding="utf-8", errors="replace").strip()
+        if text.startswith("gitdir:"):
+            gitdir = Path(text[len("gitdir:"):].strip())
+            gitdir = gitdir if gitdir.is_absolute() else (repo / gitdir).resolve()
+            if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
+                return gitdir.parents[2].parent
+    return repo.parent
+
+
+SIBLING = _siblings_root(REPO) / "ACE-Step-1.5"
 
 FILES = {
     "acestep/core/generation/handler/service_generate_request.py":
@@ -15,6 +31,8 @@ FILES = {
     "acestep/core/generation/handler/memory_utils.py": "class M:\n    def _get_vae_dtype(self, device=None):\n        return 1\n",
     "acestep/core/generation/handler/vae_decode.py": "class M:\n    def decode(self):\n        return self._get_vae_dtype('cpu')\n",
     "acestep/core/generation/handler/init_service_catalog.py": "class M:\n    def is_turbo_model(self):\n        return True\n",
+    "acestep/core/generation/handler/init_service_orchestrator.py":
+        "class M:\n    def initialize_service(self, device):\n        self.dtype = 1\n        return self.dtype\n",
     "acestep/training_v2/fixed_lora_module.py":
         "import torch.nn.functional as F\n\ndef _select_compute_dtype(device_type, requested_precision='auto'):\n    return 1\n\n"
         "class FixedLoRAModule:\n    def training_step(self, batch):\n        return F.mse_loss(batch, batch)\n",
@@ -55,6 +73,8 @@ def test_a_checkout_holding_every_seam_passes(tmp_path):
     ("acestep/training_v2/preprocess.py", "from acestep.training_v2.model_loader import load_vae\n", "load_vae"),
     ("acestep/training/data_module.py", "class PreprocessedDataModule:\n    pass\n", "collate_preprocessed_batch"),
     ("acestep/core/generation/handler/init_service_catalog.py", "class M:\n    pass\n", "is_turbo_model"),
+    ("acestep/core/generation/handler/init_service_orchestrator.py",
+     "class M:\n    def initialize_service(self, device):\n        self.precision = 1\n", "self.dtype"),
 ])
 def test_a_moved_seam_is_named(tmp_path, rel, text, words):
     found = S.problems(_checkout(tmp_path, **{rel: text}))
@@ -78,3 +98,13 @@ def test_the_command_line_reports_and_exits_by_the_verdict(tmp_path, capsys):
 @pytest.mark.skipif(not (SIBLING / "acestep").is_dir(), reason="no ACE-Step checkout beside this one")
 def test_the_pinned_checkout_holds_every_seam_khaos_patches():
     assert S.problems(SIBLING) == []
+
+
+def test_a_worktree_finds_the_siblings_beside_its_main_checkout(tmp_path):
+    """From a worktree the pinned checkout is looked for beside the main checkout, so the test above runs there too."""
+    main = tmp_path / "Khaos" / "Khaos_Attribution"
+    (main / ".git" / "worktrees" / "fix").mkdir(parents=True)
+    tree = main / ".claude" / "worktrees" / "fix" / "Khaos_Attribution"
+    tree.mkdir(parents=True)
+    (tree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'fix'}\n")
+    assert _siblings_root(tree) == tmp_path / "Khaos" and _siblings_root(main) == tmp_path / "Khaos"
