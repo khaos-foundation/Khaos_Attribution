@@ -26,7 +26,8 @@ FIRST_SERIAL = 65536   # above every 16-bit codeword a seal struck before the re
 PUBLIC_VIEWS = ("model", "tracks", "writers")
 OUTBOX_DIR = ".register_outbox"
 MACHINE_KEY_FILE = ".register_machine_key.pem"
-MACHINE_KEY_PUBLIC_FILE = ".register_machine_key.pub"   # the key file's stem with .pub
+# Writer shares are fractions of a track; rights add up to 100 within 0.01 points, so these add up to 1 within this.
+SHARE_SUM_TOLERANCE = 0.0001 + 1e-9
 
 
 def canonical_bytes(doc: dict) -> bytes:
@@ -75,11 +76,11 @@ class SigningKey:
         pem = key._private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                          serialization.NoEncryption())
         tmp = path.with_suffix(".new")
-        tmp.write_bytes(pem)
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
+        tmp.unlink(missing_ok=True)
+        # Private from its first byte: created 0600, never written first and narrowed after.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(pem)
         os.replace(tmp, path)
         path.with_suffix(".pub").write_text(key.public_pem(), encoding="utf-8")
         return key
@@ -211,6 +212,12 @@ def record_problems(record: dict) -> list:
                 if (not isinstance(w, dict) or not isinstance(w.get("name"), str) or not w["name"]
                         or not isinstance(w.get("share"), (int, float)) or isinstance(w.get("share"), bool)):
                     out.append(f"training_set.tracks[{i}].writers[{j}] must have a name and a numeric share")
+                elif math.isfinite(w["share"]) and not 0 <= w["share"] <= 1:
+                    out.append(f"training_set.tracks[{i}].writers[{j}].share is a fraction of the track, 0 to 1")
+            shares = [w["share"] for w in writers if isinstance(w, dict) and isinstance(w.get("share"), (int, float))
+                      and not isinstance(w.get("share"), bool) and math.isfinite(w["share"])]
+            if sum(shares) > 1 + SHARE_SUM_TOLERANCE:
+                out.append(f"training_set.tracks[{i}]'s writer shares add up to {sum(shares):g}, more than the whole track")
     if "rights_sha256" in ts and ts["rights_sha256"] is not None and not _is_sha256(ts["rights_sha256"]):
         out.append("training_set.rights_sha256 must be a sha256 hex digest or null")
     decl = ts.get("declaration")
@@ -294,6 +301,17 @@ def _outbox_lock(directory: Path) -> threading.Lock:
         return _OUTBOX_LOCKS.setdefault(key, threading.Lock())
 
 
+FIRST = "00000000"   # the sequence an entry sent ahead of every other takes, before its own number
+SEQ_FILE = ".seq"
+
+
+def _seq_of(name: str) -> int:
+    """The number in an entry's file name, ``<seq>-<id>.json`` or ``00000000-<seq>-<id>.json``; 0 when there is none."""
+    parts = name.split("-")
+    number = parts[1] if parts[0] == FIRST and len(parts) > 2 else parts[0]
+    return int(number) if number.isdigit() else 0
+
+
 class Outbox:
     """Records a machine made while offline, kept in order until the register has taken each one."""
 
@@ -302,19 +320,42 @@ class Outbox:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = _outbox_lock(self.dir)
 
-    def append(self, kind: str, body: dict) -> str:
+    def append(self, kind: str, body: dict, first: bool = False) -> str:
+        """The entry, in order behind every pending one; with ``first``, ahead of all of them (and of the firsts before
+        it), and an equal entry already pending is moved there. An entry already sent or set aside is never written again."""
         entry = {"kind": kind, "body": body, "created_at": time.time()}
         entry_id = sha256_hex(canonical_bytes({"kind": kind, "body": body}))
         with self._lock:
-            return self._append_locked(kind, entry, entry_id)
+            return self._append_locked(kind, entry, entry_id, first)
 
-    def _append_locked(self, kind: str, entry: dict, entry_id: str) -> str:
-        existing = sorted(self.dir.glob("*.json")) + sorted((self.dir / "sent").glob("*.json"))
-        if any(p.name.endswith(f"-{entry_id[:12]}.json") for p in existing):
+    def _next_seq_locked(self, existing: list) -> int:
+        """Each number is given once, whatever became of its entry: the counter outlives every file it names."""
+        counter = self.dir / SEQ_FILE
+        try:
+            last = int(counter.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            last = 0
+        seq = max([last, *(_seq_of(p.name) for p in existing)]) + 1
+        tmp = counter.with_name(f"{SEQ_FILE}.new")
+        tmp.write_text(str(seq), encoding="ascii")
+        os.replace(tmp, counter)
+        return seq
+
+    def _append_locked(self, kind: str, entry: dict, entry_id: str, first: bool = False) -> str:
+        pending = sorted(self.dir.glob("*.json"))
+        done = sorted((self.dir / "sent").glob("*.json")) + sorted((self.dir / "refused").glob("*.json"))
+        suffix = f"-{entry_id[:12]}.json"
+        if any(p.name.endswith(suffix) for p in done):
             return entry_id   # the same record twice is one entry
+        waiting = next((p for p in pending if p.name.endswith(suffix)), None)
+        if waiting is not None and (not first or waiting.name.startswith(FIRST + "-")):
+            return entry_id
         # Order is the sequence number, never the clock: two appends in one tick still keep their order.
-        seq = max((int(p.name.split("-", 1)[0]) for p in existing if p.name.split("-", 1)[0].isdigit()), default=0) + 1
-        path = self.dir / f"{seq:08d}-{entry_id[:12]}.json"
+        seq = self._next_seq_locked(pending + done)
+        path = self.dir / (f"{FIRST}-{seq:08d}{suffix}" if first else f"{seq:08d}{suffix}")
+        if waiting is not None:
+            os.replace(waiting, path)
+            return entry_id
         tmp = path.with_suffix(".new")
         tmp.write_text(json.dumps({"id": entry_id, **entry}, sort_keys=True), encoding="utf-8")
         os.replace(tmp, path)
@@ -350,6 +391,18 @@ class Outbox:
         """An entry the register refused for what it is (not for being unreachable): set aside, never retried."""
         self._move(path, "refused", answer)
 
+    def hold(self, path: Path, answer: dict) -> None:
+        """An entry the register refused for now (not allowed yet): kept pending, with the answer beside it."""
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        doc["held"] = {**answer, "at": time.time()}
+        tmp = Path(path).with_suffix(".new")
+        tmp.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+
+    def held(self) -> list:
+        """The pending entries the register last answered with 'not yet', each with that answer under ``held``."""
+        return [entry for _, entry in self.pending() if entry.get("held")]
+
     def sent_entries(self) -> list:
         out = []
         for p in sorted((self.dir / "sent").glob("*.json")):
@@ -380,9 +433,22 @@ class Outbox:
         dest = self.dir / folder
         dest.mkdir(exist_ok=True)
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        doc.pop("held", None)
         doc["answer"] = answer
         (dest / Path(path).name).write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
         Path(path).unlink()
+
+
+def _hold_keys(kind: str, body: dict) -> set:
+    """What a held entry holds back with it: later entries of its kind for its model, and anything naming its piece,
+    so a removal never overtakes the release it removes."""
+    keys = set()
+    for field in ("serial", "record_sha256"):
+        if body.get(field) is not None:
+            keys.add((kind, field, str(body[field])))
+    if body.get("generation_id") is not None:
+        keys.add(("piece", str(body["generation_id"])))
+    return keys
 
 
 # ---- the client ----
@@ -504,24 +570,36 @@ class RegisterClient:
         return self._post("/api/served", {"serial": serial, "space_url": space_url, "state": state, "nonce": nonce or secrets.token_hex(8)})
 
     def sync(self, outbox: Outbox, register_public_pem: str | None = None, on_answer=None) -> list:
-        """Every pending entry, in order; stops at the first the register refuses so order is kept.
+        """Every pending entry, in order; stops at the first the register cannot take now, so order is kept.
+        A 403 (not allowed yet) is held and its model's or piece's later entries wait with it for the next sync.
         With the register's pinned key, a publish answer whose countersignature is not that key's is refused
         before it is marked sent; `on_answer(entry, answer)` runs for each accepted answer."""
-        done = []
+        sends = {"publish": self.publish, "withdraw": lambda b: self.withdraw(**b), "served": lambda b: self.served(**b),
+                 "release": lambda b: self.release(**b), "remove_output": lambda b: self.remove_output(**b),
+                 "claim": lambda b: self.claim(**b)}
+        done, waiting = [], set()
         for path, entry in outbox.pending():
             kind, body = entry["kind"], entry["body"]
+            if kind not in sends:
+                outbox.refuse(path, {"status": None, "message": f"this client does not know an entry of kind {kind!r}"})
+                continue
+            keys = _hold_keys(kind, body)
+            if keys & waiting:
+                continue
             try:
-                answer = {"publish": self.publish, "withdraw": lambda b: self.withdraw(**b),
-                          "served": lambda b: self.served(**b), "release": lambda b: self.release(**b),
-                          "remove_output": lambda b: self.remove_output(**b),
-                          "claim": lambda b: self.claim(**b)}[kind](body)
+                answer = sends[kind](body)
             except RegisterError as e:
                 # Not enrolled, a replay of another body, too many calls this minute, or the register itself failing:
                 # stop and keep order.
-                # A refusal of this entry for what it is (wrong account, no such serial, a record it will not take)
-                # is set aside so the entries behind it are not held for ever.
                 if e.status in (401, 409, 429) or e.status >= 500:
                     raise
+                # Not allowed yet (a Space's release before its serving report has landed): kept, and tried again.
+                if e.status == 403:
+                    outbox.hold(path, {"status": e.status, "message": str(e)})
+                    waiting |= keys
+                    continue
+                # A refusal of this entry for what it is (no such serial, a record it will not take)
+                # is set aside so the entries behind it are not held for ever.
                 outbox.refuse(path, {"status": e.status, "message": str(e)})
                 continue
             if kind == "publish" and register_public_pem is not None:
