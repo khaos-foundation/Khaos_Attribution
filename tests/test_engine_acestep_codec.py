@@ -143,3 +143,65 @@ def test_the_training_door_installs_the_codec_rule(monkeypatch, tmp_path):
     package.model_loader.load_vae("c", "mps", "bf16")
     assert asked == [("vae", "mps", "fp32")]
     assert api.preprocess is package.preprocess.preprocess_audio_files
+
+
+@pytest.mark.parametrize("version, expected", [("0.45.8rc1", "fp32"), ("0.45.7.dev3", "bf16"), ("v0.46.0", "fp32")])
+def test_a_version_with_a_suffix_is_read_by_its_numbers(version, expected):
+    from khaos_attribution.engines.acestep import train as T
+    assert T.codec_precision_for(version) == expected
+
+
+def test_a_revision_whose_precision_selectors_take_no_requested_precision_is_refused(monkeypatch):
+    """The pinned trainer honours the run's precision; one that cannot is refused rather than patched by guesswork."""
+    _fake_torch(monkeypatch)
+    asked = []
+    package = _fake_training_v2(monkeypatch, asked)
+    package.fixed_lora_module._select_compute_dtype = lambda device_type: "fp16"
+    from khaos_attribution.engines.acestep import train as T
+    monkeypatch.setattr(package.fixed_lora_module, "_khaos_mps_precision_patched", False, raising=False)
+    with pytest.raises(T.TrainingUnavailable, match="requested_precision"):
+        T.patch_mps_precision()
+
+
+def test_a_constructor_taking_any_keyword_takes_them_all():
+    from khaos_attribution.engines.acestep import train as T
+
+    def anything(**kw):
+        return kw
+    assert T.accepted_kwargs(anything, {"a": 1, "b": 2}) == {"a": 1, "b": 2}
+
+
+def _api(training_fields, adapter_fields):
+    from khaos_attribution.engines.acestep import train as T
+
+    def cls(fields):
+        def build(**kw):
+            return kw
+        import inspect
+        build.__signature__ = inspect.Signature([inspect.Parameter(f, inspect.Parameter.KEYWORD_ONLY, default=None)
+                                                 for f in fields])
+        return build
+    return T.TrainingApi(preprocess=None, Trainer=lambda model, adapter, train: (adapter, train),
+                         TrainingConfig=cls(training_fields), LoRAConfig=cls(adapter_fields),
+                         LoKRConfig=cls(adapter_fields), load_decoder=lambda *a: "model", save_final=None)
+
+
+RECIPE = {"adapter_type": "lokr", "model_variant": "turbo", "adapter_rank": 8, "adapter_alpha": 8, "factor": 4,
+          "weight_decompose": False, "attention_type": "both", "target_modules": None, "learning_rate": 1e-4,
+          "batch_size": 1, "max_epochs": 2, "gradient_checkpointing": False, "num_workers": 0, "pin_memory": False,
+          "persistent_workers": False, "prefetch_factor": 2, "checkpoint_every_n_epochs": 1, "lr_schedule": "constant",
+          "gradient_accumulation_steps": 1}
+
+
+def test_a_training_field_the_revision_does_not_take_refuses_the_run_never_trains_without_it():
+    """The run's record keeps the recipe's value, so a field the trainer would not take stops the run."""
+    from khaos_attribution.engines.acestep import train as T
+    training = list(T.training_config_kwargs(RECIPE, checkpoint_root="c", tensor_dir="t", output_dir="o", device="cpu",
+                                             precision="bf16", seed=1))
+    adapter = ["linear_dim", "linear_alpha", "factor", "weight_decompose", "attention_type", "target_modules"]
+    kw = dict(checkpoint_root="c", tensor_dir="t", output_dir="o", device="cpu", precision="bf16", seed=1)
+    assert T.open_session(_api(training, adapter), RECIPE, **kw).trainer[1]["weight_decay"] == 0.01
+    with pytest.raises(T.TrainingUnavailable, match="weight_decay"):
+        T.open_session(_api([f for f in training if f != "weight_decay"], adapter), RECIPE, **kw)
+    with pytest.raises(T.TrainingUnavailable, match="factor"):
+        T.open_session(_api(training, [f for f in adapter if f != "factor"]), RECIPE, **kw)

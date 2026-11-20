@@ -175,6 +175,11 @@ class Descriptor:
         return self.doc["measure"]["feature_version"]
 
     @property
+    def latent_fps(self) -> float | None:
+        """Latent frames a second of audio, for an engine whose seams cut its latents by time; None where unstated."""
+        return self.doc.get("latent_fps")
+
+    @property
     def train(self) -> dict:
         """The engine's own training defaults for a recipe; empty when the room's defaults apply."""
         return dict(self.doc.get("train") or {})
