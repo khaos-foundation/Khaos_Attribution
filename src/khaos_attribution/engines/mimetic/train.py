@@ -4,12 +4,8 @@ and gives it the same session the other engines give it. Khaos counts in epochs,
 
 from __future__ import annotations
 
-import json
 import logging
-import shutil
-import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from khaos_attribution.engines.train import NoLossHooks
@@ -17,10 +13,11 @@ from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import WINDOWS, find_root, python_for, worker_env
 from khaos_attribution.engines.render import RenderFailed
+from khaos_attribution.engines import process_engine as PE
 from khaos_attribution.engines import process_trainer as PT
+from khaos_attribution.engines.process_engine import HeldoutEvaluator, TrainingApi  # noqa: F401
 from khaos_attribution.engines.heldout import DEFAULT_BUCKETS, bucket_timesteps, summarise  # noqa: F401
 from khaos_attribution.engines.train import TrainingUnavailable
-from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
 
 log = logging.getLogger(__name__)
@@ -39,14 +36,6 @@ HELDOUT_ON_CHECKPOINTS = True
 __all__ = ["HELDOUT_ON_CHECKPOINTS",
            "LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs", "heldout_summary",
            "open_module", "open_session", "pair_files", "preprocess_pairs", "run_refusal", "training_api"]
-
-
-@dataclass(frozen=True)
-class TrainingApi:
-    """Where the engine's environment is; nothing of stable-audio-tools is imported here."""
-    root: Path
-    runtime: str
-    python: Path
 
 
 def training_api(repo_dir=None, device: str = "auto") -> TrainingApi:
@@ -135,7 +124,8 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
     return [str(api.python), str(TRAIN_DRIVER), "--clips", str(tensor_dir), "--save-dir", str(save_dir),
             "--steps", str(steps["total"]), "--checkpoint-every", str(steps["checkpoint_every"]),
             "--rank", str(a["rank"]), "--alpha", str(a["alpha"]), "--adapter-type", adapter_type,
-            "--lr", str(float(cfg.get("learning_rate") or 1e-4)),
+            # The rate, rank and alpha come from the recipe, else the descriptor's train block; nowhere else.
+            "--lr", str(float(cfg.get("learning_rate") or DESCRIPTOR.train["learning_rate"])),
             "--batch-size", str(max(1, int(cfg.get("batch_size") or 1))),
             # stable-audio-tools keeps its loader's workers alive between epochs, which needs at least one.
             "--num-workers", "1" if WINDOWS else "2", "--seed", str(int(seed)), "--device", device]
@@ -150,34 +140,21 @@ def checkpoint_step(path: Path) -> int | None:
     return PT.checkpoint_step(path)
 
 
-class Session:
+class Session(PE.ProcessSession):
     """One training run, driven as a process: losses read from the driver's file, each checkpoint laid out as
     ``checkpoints/epoch_<n>_loss_<x>/adapter_model.safetensors``, the held-out loss taken by a worker."""
+    label = "mimetic-a0"
+    descriptor = DESCRIPTOR
+    trainer_dirname = TRAINER_DIRNAME
 
     def __init__(self, api: TrainingApi, cfg: dict, *, checkpoint_root: Path, tensor_dir: Path, output_dir: Path,
                  seed: int, device: str = "auto") -> None:
-        self.api = api
-        self.cfg = cfg
-        self.checkpoint_root = Path(checkpoint_root)
-        self.tensor_dir = Path(tensor_dir)
-        self.output_dir = Path(output_dir)
-        self.seed = int(seed)
+        super().__init__(api, cfg, checkpoint_root=checkpoint_root, tensor_dir=tensor_dir, output_dir=output_dir,
+                         seed=seed, steps=steps_for(cfg, len(pair_files(tensor_dir))))
         self.device = device
-        self.save_dir = self.output_dir / TRAINER_DIRNAME
-        self.steps = steps_for(cfg, len(pair_files(self.tensor_dir)))
-        self.latest_adapter: Path | None = None
-        self.latest_epoch = 0
-        self.start_epoch = 0
-        self.epoch_done = 0
-        self.checkpoint_by_epoch: dict = {}
-        self._sizes: dict = {}
-        self.module = None
-        self.training_config = None
-        self.process: subprocess.Popen | None = None
 
-    def install_hooks(self, *, start_epoch: int = 0, stem_ids=(), record_into: dict | None = None) -> LossHooks:
-        self.start_epoch = max(0, int(start_epoch or 0))
-        return LossHooks(record_into=record_into)
+    def pair_files(self, tensor_dir: Path) -> list:
+        return pair_files(tensor_dir)
 
     def command(self) -> list:
         return trainer_command(self.api, self.cfg, tensor_dir=self.tensor_dir, save_dir=self.save_dir, steps=self.steps,
@@ -186,26 +163,11 @@ class Session:
     def _checkpoints(self) -> dict:
         return {step: f for f in self.save_dir.glob("*.ckpt") if (step := checkpoint_step(f))}
 
-    def _settled(self, path: Path, final: bool) -> bool:
-        return PT.settled(self._sizes, path, final)
-
-    def _epoch_of(self, step: int) -> int:
-        return PT.epoch_of(self.start_epoch, self.steps["per_epoch"], step)
-
     def _lay_out(self, step: int, source: Path, loss: float) -> Path:
         """The checkpoint in the Workshop's layout, as a float32 safetensors adapter."""
-        epoch = self._epoch_of(step)
-        target_dir = self.output_dir / "checkpoints" / f"epoch_{epoch}_loss_{loss:.4f}"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / DESCRIPTOR.adapter["filenames"][0]
-        code, _stdout, stderr = W.call(self.api.python, CONVERT_WORKER, [source, target], cwd=self.api.root,
-                                       env=_env(self.api), label="mimetic-a0 converter", timeout=None)
-        if code != 0 or not target.is_file():
-            raise TrainingUnavailable("converting the checkpoint to safetensors failed: "
-                                      + "\n".join(stderr.strip().splitlines()[-4:]))
-        self.latest_adapter = target
-        self.latest_epoch = epoch
-        self.checkpoint_by_epoch[epoch] = target
+        epoch, target_dir, target = self._checkpoint_target(step, loss)
+        self._convert(CONVERT_WORKER, source, target, _env(self.api))
+        self._laid_out(epoch, target)
         return target_dir
 
     def train(self):
@@ -220,36 +182,16 @@ class Session:
         self._sizes = {}
         cmd = self.command()
         record = {"command": cmd, "steps": self.steps, "precision": "float32", "device": self.device}
-        (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
-        log_file = (self.save_dir / "trainer_stdout.log").open("ab")
-        # In the job's own process group, so the room's Stop reaches the trainer as it does the job.
-        self.process = subprocess.Popen(cmd, cwd=str(self.api.root), env=_env(self.api), stdout=log_file,
-                                        stderr=subprocess.STDOUT)
-        try:
-            yield from self._follow(self.start_epoch)
-        finally:
-            stop_tree(self.process)
-            log_file.close()
+        yield from self._run_trainer(cmd, record, cwd=self.api.root, env=_env(self.api),
+                                     follow=lambda: self._follow(self.start_epoch), stop_tree=stop_tree)
 
     def _follow(self, offset: int):
         return PT.follow(self, offset, started="[OK] mimetic-a0 trainer started",
                          losses=PT.CsvLossTail(self.save_dir / LOSSES_CSV), run_steps=self.steps, poll=POLL_SECONDS)
 
-    def heldout_evaluator(self, tensor_val_dir: Path | str, *, n_buckets: int):
-        return HeldoutEvaluator(self, Path(tensor_val_dir), n_buckets=int(n_buckets))
-
-    def save_final(self, final_dir: Path | str) -> Path:
-        """The last epoch's checkpoint, as the adapter the run exports; an older one is refused."""
-        if self.latest_adapter is None or not self.latest_adapter.is_file():
-            raise RuntimeError("mimetic-a0 wrote no checkpoint to export")
-        if self.latest_epoch < self.steps["epochs"]:
-            raise RuntimeError(f"the last checkpoint is epoch {self.latest_epoch} of {self.steps['epochs']}; "
-                               "the final weights were not written")
-        final_dir = Path(final_dir)
-        final_dir.mkdir(parents=True, exist_ok=True)
-        target = final_dir / DESCRIPTOR.adapter["filenames"][0]
-        shutil.copy2(self.latest_adapter, target)
-        return target
+    def heldout(self, clips_dir: Path, adapter: Path | None, timesteps: list) -> dict:
+        return heldout_summary(self.api, clips_dir, adapter, seed=self.seed, timesteps=timesteps,
+                               checkpoint_root=self.checkpoint_root)
 
 
 def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, output_dir, device: str,
@@ -269,40 +211,11 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
 
 # ── the held-out loss, by a worker ───────────────────────────────────────────
 
-class HeldoutEvaluator:
-    """The trainer's velocity MSE on the held-out clips at fixed timesteps with seeded noise, under the adapter
-    named, else the checkpoint of the epoch just finished."""
-
-    def __init__(self, session: Session, tensor_val_dir: Path, *, n_buckets: int) -> None:
-        self.session = session
-        self.tensor_val_dir = Path(tensor_val_dir).resolve()
-        self.timesteps = bucket_timesteps(n_buckets)
-        self.adapter: Path | None = None
-        self.samples = pair_files(tensor_val_dir)
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def load_adapter_weights(self, weights_path: Path | str) -> bool:
-        self.adapter = Path(weights_path)
-        return True
-
-    def evaluate(self) -> dict:
-        adapter = PT.scored_adapter(self.session, self.adapter, DESCRIPTOR.name)
-        return heldout_summary(self.session.api, self.tensor_val_dir, adapter, seed=self.session.seed,
-                               timesteps=self.timesteps, checkpoint_root=self.session.checkpoint_root)
-
-
 def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str | None, *, seed: int,
                     timesteps: list, checkpoint_root: Path | str | None = None, device: str | None = None) -> dict:
     """The held-out record of the clips under ``clips_dir`` under ``adapter`` (the base alone when None): what the
     trainer's held-out curve and a datamodel's subset losses both read."""
     request = {"clips_dir": str(Path(clips_dir).resolve()), "adapter": str(Path(adapter).resolve()) if adapter else None,
                "timesteps": list(timesteps), "seed": int(seed), "device": device}
-    # No limit: a held-out pass over a run's clips has no measured bound, and the room's stop reaches the tree.
-    try:
-        reply = W.run(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="mimetic-a0 held-out",
-                      timeout=None, required="per_sample")
-    except W.WorkerFailed as exc:
-        raise RuntimeError(f"the mimetic-a0 held-out worker failed: {exc.why}") from exc
-    return summarise(reply["per_sample"], list(timesteps))
+    return PE.heldout_record(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="mimetic-a0",
+                             timesteps=timesteps)

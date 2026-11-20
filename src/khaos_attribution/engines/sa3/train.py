@@ -10,9 +10,7 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from khaos_attribution.engines.train import NoLossHooks
@@ -23,7 +21,9 @@ from khaos_attribution.engines.sa3 import train_driver as TD
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, python_for, runtime_for
 from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
+from khaos_attribution.engines import process_engine as PE
 from khaos_attribution.engines import process_trainer as PT
+from khaos_attribution.engines.process_engine import HeldoutEvaluator, TrainingApi  # noqa: F401
 from khaos_attribution.engines.heldout import DEFAULT_BUCKETS, HIGH_NOISE_T, bucket_timesteps, summarise  # noqa: F401
 from khaos_attribution.engines.train import TrainingUnavailable
 
@@ -53,14 +53,6 @@ HELDOUT_ON_CHECKPOINTS = True
 __all__ = ["HELDOUT_ON_CHECKPOINTS",
            "LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs", "heldout_summary",
            "open_module", "open_session", "pair_files", "preprocess_pairs", "run_refusal", "training_api"]
-
-
-@dataclass(frozen=True)
-class TrainingApi:
-    """Where the engine's environment is for this machine's runtime; nothing of Stability's is imported here."""
-    root: Path
-    runtime: str
-    python: Path
 
 
 def training_api(repo_dir=None, device: str = "auto") -> TrainingApi:
@@ -339,41 +331,29 @@ def checkpoint_step(path: Path) -> int | None:
     return PT.checkpoint_step(path)
 
 
-class Session:
+class Session(PE.ProcessSession):
     """One training run on Stability's trainer, driven as a process: losses read from its logs, each of its
     checkpoints laid out as ``checkpoints/epoch_<n>_loss_<x>/adapter_model.safetensors``, the held-out loss taken
     by a worker on the latest checkpoint."""
 
+    label = "Stable Audio 3"
+    descriptor = DESCRIPTOR
+    trainer_dirname = TRAINER_DIRNAME
+
     def __init__(self, api: TrainingApi, cfg: dict, *, checkpoint_root: Path, tensor_dir: Path, output_dir: Path,
                  seed: int, resume_from: Path | None = None) -> None:
-        self.api = api
-        self.cfg = cfg
-        self.checkpoint_root = Path(checkpoint_root)
-        self.tensor_dir = Path(tensor_dir)
-        self.output_dir = Path(output_dir)
-        self.seed = int(seed)
+        super().__init__(api, cfg, checkpoint_root=checkpoint_root, tensor_dir=tensor_dir, output_dir=output_dir,
+                         seed=seed, steps=steps_for(cfg, len(pair_files(tensor_dir))))
         # The room names a checkpoint by its folder; the trainer wants the adapter file inside it.
         resume = Path(resume_from) if resume_from else None
         if resume is not None and resume.is_dir():
             resume = resume / DESCRIPTOR.adapter["filenames"][0]
         self.resume_from = resume
-        self.save_dir = self.output_dir / TRAINER_DIRNAME
-        self.steps = steps_for(cfg, len(pair_files(self.tensor_dir)))
         self.window_seconds = float(cfg.get("window_sec") or 0.0) or longest_clip_seconds(self.tensor_dir)
-        self.latest_adapter: Path | None = None
-        self.latest_epoch = 0
-        self.start_epoch = 0
-        self.epoch_done = 0
-        self.checkpoint_by_epoch: dict = {}
-        self._sizes: dict = {}
         self._loss_tail = None
-        self.module = None
-        self.training_config = None
-        self.process: subprocess.Popen | None = None
 
-    def install_hooks(self, *, start_epoch: int = 0, stem_ids=(), record_into: dict | None = None) -> LossHooks:
-        self.start_epoch = max(0, int(start_epoch or 0))
-        return LossHooks(record_into=record_into)
+    def pair_files(self, tensor_dir: Path) -> list:
+        return pair_files(tensor_dir)
 
     def run_steps(self) -> dict:
         """The steps this process runs: the epochs left after a resume, at the planned cadence."""
@@ -414,29 +394,14 @@ class Session:
                 found[step] = f
         return found
 
-    def _settled(self, path: Path, final: bool) -> bool:
-        return PT.settled(self._sizes, path, final)
-
-    def _epoch_of(self, step: int) -> int:
-        return PT.epoch_of(self.start_epoch, self.steps["per_epoch"], step)
-
     def _lay_out(self, step: int, source: Path, loss: float) -> Path:
         """The checkpoint in the Workshop's layout, converted to safetensors when the trainer wrote a .ckpt."""
-        epoch = self._epoch_of(step)
-        target_dir = self.output_dir / "checkpoints" / f"epoch_{epoch}_loss_{loss:.4f}"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / DESCRIPTOR.adapter["filenames"][0]
+        epoch, target_dir, target = self._checkpoint_target(step, loss)
         if source.suffix == ".ckpt":
-            code, _stdout, stderr = W.call(self.api.python, CONVERT_WORKER, [source, target], cwd=self.api.root,
-                                           env=_env(self.api), label="Stable Audio 3 converter", timeout=None)
-            if code != 0 or not target.is_file():
-                raise TrainingUnavailable("converting the checkpoint to safetensors failed: "
-                                          + "\n".join(stderr.strip().splitlines()[-4:]))
+            self._convert(CONVERT_WORKER, source, target, _env(self.api))
         else:
             shutil.copy2(source, target)
-        self.latest_adapter = target
-        self.latest_epoch = epoch
-        self.checkpoint_by_epoch[epoch] = target
+        self._laid_out(epoch, target)
         return target_dir
 
     def train(self):
@@ -456,38 +421,16 @@ class Session:
             from khaos_attribution.engines.sa3.provision import trainer_mask  # noqa: PLC0415
             record["mlx_inpaint_mask"] = mask_to_record(trainer_mask(self.api.root), self.output_dir,
                                                         resuming=self.resume_from is not None)
-        (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
-        log_file = (self.save_dir / "trainer_stdout.log").open("ab")
-        # In the job's own process group, so the room's Stop and Pause signals reach the trainer as they do the job.
-        self.process = subprocess.Popen(cmd, cwd=str(self.save_dir), env=_env(self.api), stdout=log_file,
-                                        stderr=subprocess.STDOUT)
-        try:
-            yield from self._follow(offset)
-        finally:
-            # Whatever ends the loop (a consumer that stops reading, a conversion that fails), no trainer is left running.
-            stop_tree(self.process)
-            log_file.close()
+        yield from self._run_trainer(cmd, record, cwd=self.save_dir, env=_env(self.api),
+                                     follow=lambda: self._follow(offset), stop_tree=stop_tree)
 
     def _follow(self, offset: int):
         return PT.follow(self, offset, started=f"[OK] Stable Audio 3 trainer started ({self.api.runtime})",
                          losses=self._losses, run_steps=self.run_steps(), poll=POLL_SECONDS)
 
-    def heldout_evaluator(self, tensor_val_dir: Path | str, *, n_buckets: int):
-        return HeldoutEvaluator(self, Path(tensor_val_dir), n_buckets=int(n_buckets))
-
-    def save_final(self, final_dir: Path | str) -> Path:
-        """The last epoch's checkpoint, as the adapter the run exports; an older one is refused so the room's
-        salvage path records what it really took."""
-        if self.latest_adapter is None or not self.latest_adapter.is_file():
-            raise RuntimeError("Stable Audio 3 wrote no checkpoint to export")
-        if self.latest_epoch < self.steps["epochs"]:
-            raise RuntimeError(f"the last checkpoint is epoch {self.latest_epoch} of {self.steps['epochs']}; "
-                               "the final weights were not written")
-        final_dir = Path(final_dir)
-        final_dir.mkdir(parents=True, exist_ok=True)
-        target = final_dir / DESCRIPTOR.adapter["filenames"][0]
-        shutil.copy2(self.latest_adapter, target)
-        return target
+    def heldout(self, clips_dir: Path, adapter: Path | None, timesteps: list) -> dict:
+        return heldout_summary(self.api, clips_dir, adapter, seed=self.seed, timesteps=timesteps,
+                               checkpoint_root=self.checkpoint_root)
 
 
 def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, output_dir, device: str,
@@ -517,31 +460,6 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
 
 # ── the held-out loss, by a worker on the latest checkpoint ──────────────────
 
-class HeldoutEvaluator:
-    """The rectified-flow velocity MSE on the held-out clips at fixed timesteps with seeded noise, taken by a
-    worker in the engine's environment on the adapter named, else the checkpoint of the epoch just finished."""
-
-    def __init__(self, session: Session, tensor_val_dir: Path, *, n_buckets: int) -> None:
-        self.session = session
-        # The worker runs in the engine's checkout, so every path it is handed is absolute.
-        self.tensor_val_dir = Path(tensor_val_dir).resolve()
-        self.timesteps = bucket_timesteps(n_buckets)
-        self.adapter: Path | None = None
-        self.samples = pair_files(tensor_val_dir)
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def load_adapter_weights(self, weights_path: Path | str) -> bool:
-        self.adapter = Path(weights_path)
-        return True
-
-    def evaluate(self) -> dict:
-        adapter = PT.scored_adapter(self.session, self.adapter, DESCRIPTOR.name)
-        return heldout_summary(self.session.api, self.tensor_val_dir, adapter, seed=self.session.seed,
-                               timesteps=self.timesteps, checkpoint_root=self.session.checkpoint_root)
-
-
 def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str | None, *, seed: int,
                     timesteps: list, checkpoint_root: Path | str | None) -> dict:
     """The held-out record of the clips under ``clips_dir`` scored under ``adapter`` (the base alone when None), by
@@ -553,10 +471,5 @@ def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str
                "latents_dir": str(clips_dir / LATENTS_DIRNAME), "adapter": str(adapter) if adapter else None,
                "timesteps": list(timesteps), "seed": int(seed), "high_noise_t": HIGH_NOISE_T,
                "checkpoint_root": str(root.resolve()), "base_npz": str((root / BASE_NPZ).absolute())}
-    # No limit: a held-out pass over a run's clips has no measured bound, and the room's stop reaches the tree.
-    try:
-        reply = W.run(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="Stable Audio 3 held-out",
-                      timeout=None, required="per_sample")
-    except W.WorkerFailed as exc:
-        raise RuntimeError(f"the Stable Audio 3 held-out worker failed: {exc.why}") from exc
-    return summarise(reply["per_sample"], list(timesteps))
+    return PE.heldout_record(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="Stable Audio 3",
+                             timesteps=timesteps)

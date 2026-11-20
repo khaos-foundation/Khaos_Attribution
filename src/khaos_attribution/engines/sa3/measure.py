@@ -11,6 +11,7 @@ from typing import Any
 
 from khaos_attribution.engines.memory import (LOW_MEMORY_OVERRIDE_ENV, SYSTEM_RESERVE_GB,  # noqa: F401
                                              process_memory_plan, process_scorer_need_gb)
+from khaos_attribution.engines import process_engine as PE
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.worker_process import ROW_PREFIX  # noqa: F401 — the workers read it here
 
@@ -73,8 +74,7 @@ def _env(handle: Handle) -> dict:
     return engine_env(handle.root, SA3_ROOT=str(handle.root))
 
 
-_REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("rows", "matrix"), "feature": ("feature",),
-               "loss": ("with", "without"), "latent_stats": ("transform",),
+_REPLY_KEYS = {**PE.REPLY_KEYS, "latent_stats": ("transform",),
                "tid_factors": ("tid_version", "modules", "live_tensors", "dropped_tensors"),
                "tid_invert": ("tid_version", "inverses", "factors"),
                "tid_kernels": ("kernels", "draws_done", "grid", "live_tensors", "dropped_tensors", "normaliser_zero", "seconds")}
@@ -83,16 +83,9 @@ _REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("
 def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
     """The worker's reply; its ``khaos-row`` lines reach ``on_progress`` as they come, so a long index shows its
     progress while the worker runs."""
-    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
-    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
-    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
-    contract_guard.require(handle.python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=GradientUnavailable)
     worker = MEASURE_WORKER_MLX if handle.runtime == "mlx" else MEASURE_WORKER
-    try:
-        return W.stream(handle.python, worker, request, cwd=handle.root, env=_env(handle), label="Stable Audio 3 measure",
-                        on_row=on_progress, required=_REPLY_KEYS.get(request.get("command"), ()))
-    except W.WorkerFailed as exc:
-        raise GradientUnavailable(str(exc)) from exc
+    return PE.measure_reply(handle.python, worker, request, cwd=handle.root, env=_env(handle), label="Stable Audio 3",
+                            descriptor=DESCRIPTOR, engine="Stable Audio 3", reply_keys=_REPLY_KEYS, on_progress=on_progress)
 
 
 def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:
@@ -183,13 +176,7 @@ def latent_stats(handle: Handle, files, *, kind: str, variance: float = 0.9) -> 
 
 
 def _index_refusal(index_meta: dict) -> str | None:
-    """Why an index cannot be read against this measure's features, or None: it must have been built by this
-    feature version, since the noise and the parameter order are part of what a row means."""
-    built = index_meta.get("feature_version")
-    if built != DESCRIPTOR.feature_version:
-        return (f"the influence index was built by {DESCRIPTOR.name}'s measure {built or 'before it was versioned'}, "
-                f"and this one is {DESCRIPTOR.feature_version}; rebuild the index")
-    return None
+    return PE.index_refusal(DESCRIPTOR, index_meta)
 
 
 def output_feature(handle: Handle, index_meta: dict, files, *, groups_out=None):

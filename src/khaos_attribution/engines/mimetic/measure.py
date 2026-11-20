@@ -67,22 +67,16 @@ def _env(handle: Handle) -> dict:
     return worker_env(handle.root)
 
 
-_REPLY_KEYS = {"parameters": ("n_params", "n_tensors", "signature"), "index": ("rows", "matrix"), "feature": ("feature",),
-               "loss": ("with", "without")}
+# The research options this engine's worker has built: none.
+BUILT_OPTIONS: frozenset = frozenset()
 
 
 def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
     """The worker's reply; its ``khaos-row`` lines reach ``on_progress`` as they come, so a long index shows its
     progress while the worker runs."""
-    from khaos_attribution.engines import contract_guard  # noqa: PLC0415
-    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
-    from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
-    contract_guard.require(handle.python, engine=DESCRIPTOR.name, engine_id=DESCRIPTOR.id, error=GradientUnavailable)
-    try:
-        return W.stream(handle.python, MEASURE_WORKER, request, cwd=handle.root, env=_env(handle), label="mimetic-a0 measure",
-                        on_row=on_progress, required=_REPLY_KEYS.get(request.get("command"), ()))
-    except W.WorkerFailed as exc:
-        raise GradientUnavailable(str(exc)) from exc
+    from khaos_attribution.engines import process_engine as PE  # noqa: PLC0415
+    return PE.measure_reply(handle.python, MEASURE_WORKER, request, cwd=handle.root, env=_env(handle), label="mimetic-a0",
+                            descriptor=DESCRIPTOR, engine=DESCRIPTOR.name, on_progress=on_progress)
 
 
 def _base(handle: Handle, index_meta: dict, files, command: str) -> dict:
@@ -104,23 +98,11 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
                param_groups: str | None = None, groups_out=None, on_row=None) -> tuple:
     """(matrix, rows) of an index through the worker: the matrix lands beside the files in a file of this call's own."""
     import numpy as np  # noqa: PLC0415
-    from khaos_attribution import gradient as _G  # noqa: PLC0415
     from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
-    if param_groups or groups_out:
-        raise _G.GradientUnavailable("block sketches are not built on the mimetic-a0 worker")
-    if _G.research_int(latent_pool, "latent_pool") > 1 or _G.research_int(noise_draws, "noise_draws") > 1:
-        raise _G.GradientUnavailable("latent pooling and noise draws are not built on the mimetic-a0 worker")
-    if noise_shared:
-        raise _G.GradientUnavailable("shared noise is not built on the mimetic-a0 worker")
-    if latent_transform:
-        from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
-        raise GradientUnavailable("a latent transform is not built on the mimetic-a0 worker")
-    if timestep_norm:
-        from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
-        raise GradientUnavailable("per-timestep normalisation is not built on the mimetic-a0 worker")
-    if param_filter:
-        from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
-        raise GradientUnavailable("a parameter filter is not built on the mimetic-a0 worker")
+    from khaos_attribution.engines import process_engine as PE  # noqa: PLC0415
+    PE.refuse_unbuilt("mimetic-a0", built=BUILT_OPTIONS, timestep_norm=timestep_norm, param_filter=param_filter,
+                      latent_transform=latent_transform, latent_pool=latent_pool, noise_draws=noise_draws,
+                      noise_shared=noise_shared, param_groups=param_groups, groups_out=groups_out)
     seen = set()
 
     def progress(row: dict) -> None:
@@ -149,13 +131,8 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
 
 
 def _index_refusal(index_meta: dict) -> str | None:
-    """Why an index cannot be read against this measure's features, or None: it must have been built by this
-    feature version, since the noise and the parameter order are part of what a row means."""
-    built = index_meta.get("feature_version")
-    if built != DESCRIPTOR.feature_version:
-        return (f"the influence index was built by {DESCRIPTOR.name}'s measure {built or 'before it was versioned'}, "
-                f"and this one is {DESCRIPTOR.feature_version}; rebuild the index")
-    return None
+    from khaos_attribution.engines import process_engine as PE  # noqa: PLC0415
+    return PE.index_refusal(DESCRIPTOR, index_meta)
 
 
 def output_feature(handle: Handle, index_meta: dict, files, *, groups_out=None):
