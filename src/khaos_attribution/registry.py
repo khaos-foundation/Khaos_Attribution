@@ -12,6 +12,7 @@ import json
 import math
 
 from khaos_attribution.base_model import is_base_model_id
+from khaos_attribution import canonical
 import os
 import base64
 import secrets
@@ -32,7 +33,7 @@ SHARE_SUM_TOLERANCE = 0.0001 + 1e-9
 
 def canonical_bytes(doc: dict) -> bytes:
     """One byte form for one document, so a signature over it means one thing everywhere."""
-    return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return canonical.compact(doc)
 
 
 def sha256_hex(data: bytes) -> str:

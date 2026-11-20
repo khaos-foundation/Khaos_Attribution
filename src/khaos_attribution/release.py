@@ -11,6 +11,8 @@ import json
 import tarfile
 from pathlib import Path, PurePosixPath
 
+from khaos_attribution.canonical import compact_ascii
+
 BUNDLE_VERSION = "khaos.release_bundle/1"
 MANIFEST_NAME = "release.json"
 MAX_MEMBERS = 4000
@@ -44,7 +46,7 @@ def bundle_id(files: dict, meta: dict) -> str:
     key = {"files": {k: v["sha256"] for k, v in sorted(files.items())},
            "artist_id": meta.get("artist_id"), "run_id": meta.get("run_id"), "checkpoint": meta.get("checkpoint"),
            "serial": meta.get("serial"), "record_sha256": meta.get("record_sha256")}
-    return hashlib.sha256(json.dumps(key, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return hashlib.sha256(compact_ascii(key)).hexdigest()
 
 
 def manifest_for(files: dict, meta: dict) -> dict:

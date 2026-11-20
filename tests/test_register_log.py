@@ -354,6 +354,20 @@ def test_the_browser_verifier_proves_the_same_mirror_and_refuses_a_changed_body_
     assert wrong_key[0].startswith("bad|Not proved: the head is signed by key")
 
 
+def test_the_browser_verifier_rehashes_a_pasted_signed_record_as_the_command_does(register, tmp_path):
+    """A full signed record is rehashed in its own form, whole floats and all; one whose record no longer hashes to
+    its record_sha256 is refused, as khaos-log-verify refuses it."""
+    app, store, http = register
+    _, _, signed, _ = _publish(register)
+    pem = store.log.signer.public_pem()
+    changed = json.loads(json.dumps(signed))
+    changed["record"]["model"]["run_id"] = "another run"
+    whole, refused = run_page_verifier(tmp_path, [(_mirror(app), json.dumps(signed, indent=2), pem),
+                                                  (_mirror(app), json.dumps(changed), pem)])
+    assert whole[0].startswith("ok|Proved: the admit entry for No. 65536") and "rehashed here" in whole[1]
+    assert refused[0].startswith("bad|Not proved: the signed record's hash is not over its own record") and "50.0 as 50" in refused[0]
+
+
 def test_the_opentimestamps_backend_round_trips_a_receipt_with_its_calendars_stood_in_for(monkeypatch):
     """stamp then upgrade through the library's own types; the calendars are local stand-ins, never the network."""
     pytest.importorskip("opentimestamps")
