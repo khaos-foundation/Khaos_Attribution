@@ -308,8 +308,8 @@ class Store:
             if not row:
                 raise KeyError(f"no record {serial}")
             mach = self.machine(key_id)
-            if not mach or mach["account_id"] != row["account_id"]:
-                raise PermissionError("only a machine of the account that published a model may withdraw it")
+            if not mach or mach["account_id"] != row["account_id"] or mach["role"] != "workshop":
+                raise PermissionError("only a Workshop of the account that published a model may withdraw it")
             if row["state"] == "withdrawn":
                 return {"serial": serial, "state": "withdrawn", "withdrawn_at": row["withdrawn_at"]}
             at = now_utc()
@@ -476,11 +476,14 @@ class Store:
             return {**out, "model": {"serial": moved[0], "state": moved[1]}} if moved else out
 
     def log_withhold(self, leaf_hex: str, reason: str) -> dict:
-        """The operator's withhold: the body leaves public view, the withholding is itself an entry."""
+        """The operator's withhold: the body leaves public view, the withholding is itself an entry with a ledger row
+        that names the leaves, never the reason."""
         if self.log.off:
             raise LogOff(self.log.off)
         with self._tx():
-            return self.log.withhold_locked(leaf_hex, reason)
+            out = self.log.withhold_locked(leaf_hex, reason)
+            self._ledger("log-withhold", None, None, None, {"withholds": leaf_hex, "leaf_hash": out["leaf_hash"], "index": out["index"]})
+            return out
 
     # ---- the ledger ----
 

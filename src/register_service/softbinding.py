@@ -178,11 +178,17 @@ def add_routes(app: FastAPI, index, public_url: str) -> None:
 
         def work():
             from khaos_attribution.fingerprint import query_phases  # noqa: PLC0415
-            with _decoding, tempfile.TemporaryDirectory(prefix="register-softbinding-") as tmp:
-                path = Path(tmp) / "content"
-                path.write_bytes(raw)
-                audio, sr = decode(path)
-                phases = query_phases(audio, sr)
+            # Two decodes at a time, and a third asks again later: a waiter would hold a pool thread and its body.
+            if not _decoding.acquire(blocking=False):
+                raise HTTPException(429, "the lookup is decoding other audio; try again shortly", headers={"Retry-After": "5"})
+            try:
+                with tempfile.TemporaryDirectory(prefix="register-softbinding-") as tmp:
+                    path = Path(tmp) / "content"
+                    path.write_bytes(raw)
+                    audio, sr = decode(path)
+                    phases = query_phases(audio, sr)
+            finally:
+                _decoding.release()
             return matches(phases, payload, n, hashlib.sha256(raw).hexdigest())
 
         return await run_in_threadpool(work)

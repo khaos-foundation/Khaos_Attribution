@@ -7,11 +7,13 @@ REGISTER_LOG_ENABLE=1 (the owner's word that a log never started here may start)
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from importlib import resources
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -29,6 +31,7 @@ from register_service.store import NOT_SERVED, Store, now_utc
 from register_service.translog import EntryRefused, LogBlocked, LogOff, export as export_log, export_lock, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
+ENROL_MAX_BODY = 16_000   # an enrolment is read before its sender is known: an invite, a name and a public key
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
 CLAIM_MAX_BODY = 24_000_000   # a twelve-minute track's four phases, with room
 DEFAULT_PORT = 8912   # 8900 is the Engine Room's
@@ -198,6 +201,20 @@ def write_ledger(store, path: Path, whole: bool = False) -> None:
         write_whole(path, "".join(line(r) for r in store.ledger()).encode("utf-8"))
 
 
+def space_origin(value) -> str:
+    """A Space's address as the register keeps and links it: an https origin, or http on loopback for development."""
+    parts = urlsplit(str(value or "").strip())
+    host = (parts.hostname or "").lower()
+    try:
+        port = parts.port
+    except ValueError:
+        port, host = None, ""
+    if not host or parts.scheme not in ("https", "http") or (parts.scheme == "http" and host not in LOOPBACK_HOSTS):
+        raise HTTPException(422, "space_url is the Space's https address")
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
+
 def public_view(record: dict) -> dict:
     """The record as the artist chose to show it: model alone, with tracks, or with writers' shares."""
     view = record.get("public_view", "model")
@@ -213,26 +230,32 @@ def public_view(record: dict) -> dict:
     return out
 
 
-class RateLimit:
-    """A token bucket per client address: the public doors take a bounded number of calls a minute each."""
+def client_of(address: str) -> str:
+    """The address a limit counts: an IPv6 host by its /64, which one machine holds whole; anything else as given."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False)) if ip.version == 6 and not ip.ipv4_mapped else str(ip)
 
-    def __init__(self, per_minute: int):
-        self.per_minute, self._buckets, self._lock = per_minute, {}, threading.Lock()
+
+class RateLimit:
+    """A token bucket per client: the public doors take a bounded number of calls a minute each. The table holds at
+    most ``max_clients``, the least recently seen going first, so no call ever scans it."""
+
+    def __init__(self, per_minute: int, max_clients: int = 50_000):
+        self.per_minute, self.max_clients, self._buckets, self._lock = per_minute, max_clients, OrderedDict(), threading.Lock()
 
     def allow(self, client: str, now: float | None = None) -> bool:
         now = time.time() if now is None else now
         with self._lock:
-            tokens, last = self._buckets.get(client, (float(self.per_minute), now))
+            tokens, last = self._buckets.pop(client, (float(self.per_minute), now))
             tokens = min(float(self.per_minute), tokens + (now - last) * self.per_minute / 60.0)
-            if tokens < 1.0:
-                self._buckets[client] = (tokens, now)
-                return False
-            self._buckets[client] = (tokens - 1.0, now)
-            if len(self._buckets) > 10000:
-                stale = [k for k, (_, t) in self._buckets.items() if now - t > 600]
-                for k in stale:
-                    del self._buckets[k]
-            return True
+            allowed = tokens >= 1.0
+            self._buckets[client] = (tokens - 1.0 if allowed else tokens, now)
+            while len(self._buckets) > self.max_clients:
+                self._buckets.popitem(last=False)
+            return allowed
 
 
 PUBLIC_LIMITS = {"/api/verify": 20, "/api/enrol": 6}
@@ -278,10 +301,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     app = FastAPI(title="Guild Register", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.index, app.state.key, app.state.cfg = store, index, key, cfg
 
-    async def signed_body(request: Request, enrolling: bool = False, limit: int = MAX_BODY) -> tuple:
-        raw = await request.body()
-        if len(raw) > limit:
-            raise HTTPException(413, "too large")
+    def parsed(raw: bytes) -> dict:
         try:
             body = json.loads(raw)
         except ValueError:
@@ -290,26 +310,36 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             raise HTTPException(400, "the body must be a JSON object")
         if R.canonical_bytes(body) != raw:
             raise HTTPException(400, "the body must be canonical JSON (sorted keys, no spaces)")
+        return body
+
+    async def signed_body(request: Request, enrolling: bool = False, limit: int = MAX_BODY) -> tuple:
+        """The caller is known and its signature checked over the raw bytes before the body is read, and the reading
+        is off the event loop: no stranger's megabytes are parsed, and no body stalls another request."""
+        raw = await request.body()
+        if len(raw) > (ENROL_MAX_BODY if enrolling else limit):
+            raise HTTPException(413, "too large")
         key_id = request.headers.get("X-Machine-Key-Id", "")
         sig = request.headers.get("X-Machine-Signature", "")
-        if enrolling:
-            pem = body.get("public_key_pem", "")
-            try:
-                if R.key_id_of(R.public_raw(R.load_public_pem(pem))) != key_id:
-                    raise HTTPException(401, "the key id is not the public key's")
-            except HTTPException:
-                raise
-            except Exception:  # noqa: BLE001 — any malformed key is the same refusal
-                raise HTTPException(400, "public_key_pem is not an Ed25519 public key") from None
-            machine = None
-        else:
+        if not enrolling:
             machine = store.machine(key_id)
             if not machine:
                 raise HTTPException(401, "this machine is not enrolled")
-            pem = machine["public_pem"]
+            if not await run_in_threadpool(R.verify, machine["public_pem"], raw, sig):
+                raise HTTPException(401, "the signature is not this machine's over this body")
+            return await run_in_threadpool(parsed, raw), machine, key_id, machine["public_pem"]
+        # An enrolment names its key in its body, so a small one is read first.
+        body = await run_in_threadpool(parsed, raw)
+        pem = body.get("public_key_pem", "")
+        try:
+            if R.key_id_of(R.public_raw(R.load_public_pem(pem))) != key_id:
+                raise HTTPException(401, "the key id is not the public key's")
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — any malformed key is the same refusal
+            raise HTTPException(400, "public_key_pem is not an Ed25519 public key") from None
         if not R.verify(pem, raw, sig):
             raise HTTPException(401, "the signature is not this machine's over this body")
-        return body, machine, key_id, pem
+        return body, None, key_id, pem
 
     mirror_lock = threading.Lock()
 
@@ -394,7 +424,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.middleware("http")
     async def rate_limited(request: Request, call_next):
         # Caddy appends the real address to whatever the client sent, so the LAST entry is the one to trust.
-        client = (request.headers.get("x-forwarded-for", "").split(",")[-1].strip() or (request.client.host if request.client else "?"))
+        client = client_of(request.headers.get("x-forwarded-for", "").split(",")[-1].strip()
+                           or (request.client.host if request.client else "?"))
         path = request.url.path
         lookup = softbinding.limit_key(path)
         if lookup is not None:
@@ -429,6 +460,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.post("/api/records")
     async def records(request: Request):
         signed, machine, key_id, pem = await signed_body(request)
+        if machine["role"] != "workshop":
+            raise HTTPException(403, "only a Workshop publishes its account's models")
         presented = signed.pop("countersignature", None)
         problems = R.signed_problems(signed, pem)
         if problems:
@@ -504,7 +537,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 raise HTTPException(410, f"the model is {rec['state']}; a Space does not serve it")
             review = bool(rec and state == "serving" and rec["serial"] in store.unresolved_serials())
             try:
-                out = store.served(serial_of(body), key_id, str(body.get("space_url", ""))[:200], state)
+                out = store.served(serial_of(body), key_id, space_origin(body.get("space_url")), state)
             except KeyError as e:
                 raise HTTPException(404, e.args[0]) from None
             except PermissionError as e:
@@ -527,6 +560,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 raise HTTPException(404, "no such model")
             if rec["state"] in NOT_SERVED:
                 raise HTTPException(410, f"the model is {rec['state']}; its outputs are not released into the index")
+            if machine["role"] not in ("workshop", "space"):
+                raise HTTPException(403, "only a Workshop or a Space releases a piece")
             if machine["role"] == "workshop" and rec["account_id"] != machine["account_id"]:
                 raise HTTPException(403, "a Workshop releases outputs of its own account's models only")
             if machine["role"] == "space" and not any(s["key_id"] == key_id and s["state"] == "serving" for s in rec["served"]):
@@ -634,9 +669,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     async def claims_check(request: Request):
         """Whether a recording already trains a registered model (nobody's, this account's, or also another account's)
         and whether it is a released output: the Workshop's one question at import."""
-        body, machine, _, _ = await signed_body(request)
+        body, machine, _, _ = await signed_body(request, limit=CLAIM_MAX_BODY)
         workshop_only(machine)
-        return await run_in_threadpool(index.check_claim, query_phases_in(body), machine["account_id"])
+        return await run_in_threadpool(lambda: index.check_claim(query_phases_in(body), machine["account_id"]))
 
     @app.get("/api/models/{serial}/claims")
     def model_claims(serial: int):
@@ -652,27 +687,29 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         raw = await request.body()
         if len(raw) > MAX_BODY:
             raise HTTPException(413, "too large")
-        try:
-            body = json.loads(raw)
-        except ValueError:
-            raise HTTPException(400, "not JSON") from None
-        if not isinstance(body, dict):
-            raise HTTPException(400, "the body must be a JSON object")
-        phases = query_phases_in(body)
-        payload = None
-        codeword = body.get("watermark_id")
-        if codeword is not None:
+
+        def question() -> tuple:
+            # Read off the event loop: a body of megabytes would otherwise stall every other request.
             try:
-                decoded = decode_codeword(int(codeword))
-            except (TypeError, ValueError):
-                decoded = None
-            if decoded is None:
-                raise HTTPException(422, "watermark_id is not a codeword")
-            payload = decoded[0]
-        try:
-            sha256 = sha256_of(body.get("sha256"))
-        except ValueError as e:
-            raise HTTPException(422, str(e)) from None
+                body = json.loads(raw)
+            except ValueError:
+                raise HTTPException(400, "not JSON") from None
+            if not isinstance(body, dict):
+                raise HTTPException(400, "the body must be a JSON object")
+            phases, payload, codeword = query_phases_in(body), None, body.get("watermark_id")
+            if codeword is not None:
+                try:
+                    decoded = decode_codeword(int(codeword))
+                except (TypeError, ValueError):
+                    decoded = None
+                if decoded is None:
+                    raise HTTPException(422, "watermark_id is not a codeword")
+                payload = decoded[0]
+            try:
+                return phases, payload, sha256_of(body.get("sha256"))
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from None
+        phases, payload, sha256 = await run_in_threadpool(question)
         answer = await run_in_threadpool(index.verify, phases, payload, sha256)
         if answer["grade"] == "output":
             rec = store.record(int(answer["output"]["serial"]))
@@ -1001,7 +1038,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/health")
     def health():
-        return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": store.count(), "outputs": index.count(),
+        from khaos_attribution import __version__  # noqa: PLC0415
+        return JSONResponse({"ok": True, "version": __version__, "ledger_ok": store.ledger_status()["ok"], "models": store.count(),
+                             "outputs": index.count(),
                              "log_blocked": store.log.blocked, "log": "off" if store.log.off else "on",
                              "development": bool(cfg["dev_key"])})
 
