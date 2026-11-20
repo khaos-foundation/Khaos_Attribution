@@ -315,7 +315,9 @@ class Store:
             at = now_utc()
             self.db.execute("UPDATE records SET state = 'withdrawn', withdrawn_at = ?, withdraw_reason = ? WHERE serial = ?",
                             (at, reason[:400], serial))
-            self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
+            # The reason stays in this private table and the log's revoke, where a withhold reaches it; the ledger and
+            # the mirror are public for good, so they never carry it.
+            self._ledger("withdraw", serial, row["record_sha256"], key_id, {})
             if self.log.off:
                 # The log's first start strikes it with the reason the record keeps.
                 return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
