@@ -70,10 +70,10 @@ GREEN="$GITDIR/khaos-gate.green"
 # Per worktree: each checkout remembers its own last quick run, and the test files a quick run had to skip.
 QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
 OWED="$QUICK.owed"
-# The pins this checkout's branch turned red ("<holder> <test id>"), and those a run had to skip ("<holder> <why>"):
-# each later stop names them, and only a run of them settles them.
-PINS_RED="$QUICK.pins"
-PINS_OWED="$QUICK.pins.owed"
+# The pins this branch turned red ("<holder> <test id>"), and those a run had to skip ("<holder> <why>"), one pair of
+# files per branch: each later stop on it names them, and only a run of them settles them.
+PINS_RED="$QUICK.pins.$( { git symbolic-ref --short -q HEAD || git rev-parse --short HEAD; } | tr -d '\n' | tr -c 'A-Za-z0-9._-' '_')"
+PINS_OWED="$PINS_RED.owed"
 # The gate that runs every test file: only a green run of it, or of --changed, settles what is owed.
 SUITE_GATE=pytest
 # A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
@@ -259,9 +259,23 @@ record_get() {
   grep "^$2 " "$1" 2> /dev/null | cut -d' ' -f2-
 }
 
+# Clears the records of a holder no longer beside this checkout, or holding no pin on it, saying so once.
+pins_prune() {
+  local holders holder
+  [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ] || return 0
+  holders=$(pin_holders | while IFS= read -r holder; do basename "$holder"; done)
+  for holder in $(cut -d' ' -f1 "$PINS_RED" "$PINS_OWED" 2> /dev/null | sort -u); do
+    printf '%s\n' "$holders" | grep -qxF "$holder" && continue
+    record_set "$PINS_RED" "$holder"
+    record_set "$PINS_OWED" "$holder"
+    echo "SKIP pins $holder: no longer beside this checkout holding pins on it; its record is cleared"
+  done
+}
+
 # Each line of what the pins records still hold, as a stop names it.
 pins_reminder() {
   local holder ids why
+  pins_prune
   if [ -s "$PINS_RED" ]; then
     cut -d' ' -f1 "$PINS_RED" | sort -u | while IFS= read -r holder; do
       ids=$(record_get "$PINS_RED" "$holder" | tr '\n' ' ')
@@ -290,6 +304,12 @@ red_before() {
   began=$(date +%s)
   tmp=$(mktemp -d) || return 1
   mkdir "$tmp/$me"
+  # Where a link is made as a copy (Git Bash on Windows), the copy would hold a venv and every sibling: not made.
+  if ! ln -s "$tmp/$me" "$tmp/link-probe" 2> /dev/null || [ ! -L "$tmp/link-probe" ]; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -f "$tmp/link-probe"
   if with_timeout "$secs" bash -c 'git archive --format=tar "$1" | tar -x -C "$2"' _ "$base" "$tmp/$me"; then
     # The copy holds what git tracks; a pin may also read the venv beside it, which no change to the files moves.
     [ -e .venv ] && ln -s "$PWD/.venv" "$tmp/$me/.venv"
@@ -529,6 +549,7 @@ case "$MODE" in
     began=$(date +%s)
     rc=0
     worse() { [ "$rc" -eq 0 ] && rc=$1; }
+    pins_prune
     while IFS= read -r holder; do
       name=$(basename "$holder")
       left=0
