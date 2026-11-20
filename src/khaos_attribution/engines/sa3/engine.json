@@ -25,7 +25,9 @@
       "patterns": [
         "model.safetensors",
         "model_config.json",
-        "t5gemma-b-b-ul2/*"
+        "t5gemma-b-b-ul2/*",
+        "LICENSE*",
+        "NOTICE*"
       ],
       "components": [
         "model.safetensors",
