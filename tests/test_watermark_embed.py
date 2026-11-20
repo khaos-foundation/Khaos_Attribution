@@ -94,16 +94,22 @@ def test_a_long_recordings_mark_reads_back_across_windows(monkeypatch):
     assert W.Watermarker.detect_array(marked, SR)[1:] == (WATERMARK_ID, False)
 
 
-def test_one_window_is_audioseals_own_whole_reading_with_the_real_detector():
-    """With the real 16-bit detector, a short recording's reading equals AudioSeal's detect_watermark exactly."""
+@pytest.mark.parametrize("marked_s", [0, 5])
+def test_one_window_is_audioseals_own_whole_reading_with_the_real_detector(marked_s):
+    """With the real 16-bit detector, a short recording's reading equals AudioSeal's detect_watermark exactly, unmarked
+    and with half its frames marked."""
     try:
         _, detector = W._load_models()
     except Exception as exc:  # noqa: BLE001 — the weights are fetched by the rooms' installers, not by this suite
         pytest.skip(f"AudioSeal's weights are not here: {exc}")
     audio = (np.random.default_rng(7).standard_normal((10 * SR, 2)) * 0.1).astype(np.float32)
+    if marked_s:
+        audio[: marked_s * SR] = W.Watermarker.embed_array(audio[: marked_s * SR], SR, WATERMARK_ID)
     mono = torch.from_numpy(audio).float().T.mean(dim=0, keepdim=True).unsqueeze(0)
     with torch.inference_mode():
         probability, message = detector.detect_watermark(mono, SR)
+    if marked_s:
+        assert 0.2 < float(probability) < 0.8, "the half-marked clip must read some frames each way"
     raw = 0
     for bit in message[0].tolist():
         raw = (raw << 1) | int(bit)
