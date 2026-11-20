@@ -41,3 +41,9 @@ def test_mimetics_rate_comes_from_the_recipe_else_its_descriptor_and_the_driver_
     done = subprocess.run([sys.executable, str(MT.TRAIN_DRIVER), "--clips", "c", "--save-dir", "s", "--steps", "1",
                            "--checkpoint-every", "1"], capture_output=True, text=True)
     assert done.returncode != 0 and "--rank" in done.stderr and "--lr" in done.stderr
+
+
+def test_options_are_read_in_order_so_an_earlier_refusal_is_not_hidden_by_a_later_bad_value():
+    """Block sketches are refused before a malformed pool is read, as the engine's own chain did."""
+    with pytest.raises(GradientUnavailable, match="block sketches"):
+        PE.refuse_unbuilt("toy", built=frozenset(), param_groups="blocks", latent_pool="many")

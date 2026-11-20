@@ -7,6 +7,7 @@ from typing import Any
 
 from khaos_attribution.engines.memory import (LOW_MEMORY_OVERRIDE_ENV, SYSTEM_RESERVE_GB,  # noqa: F401
                                              process_memory_plan, process_scorer_need_gb)
+from khaos_attribution.engines import process_engine as PE
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 
 __all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
@@ -74,7 +75,6 @@ BUILT_OPTIONS: frozenset = frozenset()
 def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
     """The worker's reply; its ``khaos-row`` lines reach ``on_progress`` as they come, so a long index shows its
     progress while the worker runs."""
-    from khaos_attribution.engines import process_engine as PE  # noqa: PLC0415
     return PE.measure_reply(handle.python, MEASURE_WORKER, request, cwd=handle.root, env=_env(handle), label="mimetic-a0",
                             descriptor=DESCRIPTOR, engine=DESCRIPTOR.name, on_progress=on_progress)
 
@@ -99,7 +99,6 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
     """(matrix, rows) of an index through the worker: the matrix lands beside the files in a file of this call's own."""
     import numpy as np  # noqa: PLC0415
     from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
-    from khaos_attribution.engines import process_engine as PE  # noqa: PLC0415
     PE.refuse_unbuilt("mimetic-a0", built=BUILT_OPTIONS, timestep_norm=timestep_norm, param_filter=param_filter,
                       latent_transform=latent_transform, latent_pool=latent_pool, noise_draws=noise_draws,
                       noise_shared=noise_shared, param_groups=param_groups, groups_out=groups_out)
@@ -131,7 +130,6 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
 
 
 def _index_refusal(index_meta: dict) -> str | None:
-    from khaos_attribution.engines import process_engine as PE  # noqa: PLC0415
     return PE.index_refusal(DESCRIPTOR, index_meta)
 
 

@@ -189,17 +189,16 @@ def index_refusal(descriptor, index_meta: dict) -> str | None:
 
 def refuse_unbuilt(worker_name: str, *, built: frozenset, timestep_norm=False, param_filter=None, latent_transform=None,
                    latent_pool=None, noise_draws=None, noise_shared=False, param_groups=None, groups_out=None) -> None:
-    """GradientUnavailable for the first research option asked of a worker that has not built it; ``built`` names
-    the ones it has, so an option added to the index is refused everywhere until a worker builds it."""
+    """GradientUnavailable for the first research option in this table asked of a worker that has not built it;
+    ``built`` names the ones it has, so an option added here is refused by every engine that does not claim it."""
     from khaos_attribution.gradient import GradientUnavailable, research_int  # noqa: PLC0415
-    asked = [("param_groups", bool(param_groups or groups_out), "block sketches"),
-             ("latent_pool", research_int(latent_pool, "latent_pool") > 1 or research_int(noise_draws, "noise_draws") > 1,
-              "latent pooling and noise draws"),
-             ("noise_shared", bool(noise_shared), "shared noise"),
-             ("latent_transform", bool(latent_transform), "a latent transform"),
-             ("timestep_norm", bool(timestep_norm), "per-timestep normalisation"),
-             ("param_filter", bool(param_filter), "a parameter filter")]
+    asked = [("param_groups", lambda: bool(param_groups or groups_out), "block sketches are"),
+             ("latent_pool", lambda: research_int(latent_pool, "latent_pool") > 1
+              or research_int(noise_draws, "noise_draws") > 1, "latent pooling and noise draws are"),
+             ("noise_shared", lambda: bool(noise_shared), "shared noise is"),
+             ("latent_transform", lambda: bool(latent_transform), "a latent transform is"),
+             ("timestep_norm", lambda: bool(timestep_norm), "per-timestep normalisation is"),
+             ("param_filter", lambda: bool(param_filter), "a parameter filter is")]
     for option, on, words in asked:
-        if on and option not in built:
-            verb = "are" if words in ("block sketches", "latent pooling and noise draws") else "is"
-            raise GradientUnavailable(f"{words} {verb} not built on the {worker_name} worker")
+        if option not in built and on():
+            raise GradientUnavailable(f"{words} not built on the {worker_name} worker")

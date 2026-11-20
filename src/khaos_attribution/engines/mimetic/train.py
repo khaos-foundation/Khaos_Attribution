@@ -124,7 +124,7 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
     return [str(api.python), str(TRAIN_DRIVER), "--clips", str(tensor_dir), "--save-dir", str(save_dir),
             "--steps", str(steps["total"]), "--checkpoint-every", str(steps["checkpoint_every"]),
             "--rank", str(a["rank"]), "--alpha", str(a["alpha"]), "--adapter-type", adapter_type,
-            # The rate, rank and alpha come from the recipe, else the descriptor's train block; nowhere else.
+            # The rate comes from the recipe, else the descriptor's train block; the driver has no default of its own.
             "--lr", str(float(cfg.get("learning_rate") or DESCRIPTOR.train["learning_rate"])),
             "--batch-size", str(max(1, int(cfg.get("batch_size") or 1))),
             # stable-audio-tools keeps its loader's workers alive between epochs, which needs at least one.
