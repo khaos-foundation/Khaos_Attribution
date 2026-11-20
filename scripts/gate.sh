@@ -408,8 +408,13 @@ case "$MODE" in
     [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
     now=$(branch_files)
     fresh=$(comm -23 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
-    [ -z "$fresh" ] && finish 0
     remember() { printf '%s\n' "$now" > "$QUICK.tmp" && mv "$QUICK.tmp" "$QUICK"; }
+    if [ -z "$fresh" ]; then
+      # A change undone counts for a pin it had turned red: the pins run again to see.
+      undone=$(comm -13 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
+      if [ -s "$PINS_RED" ] && [ -n "$undone" ]; then fresh=$undone; remember; pins_then_finish 0; fi
+      finish 0
+    fi
     tests=$(printf '%s\n' "$fresh" | quick_tests)
     [ -z "$tests" ] && { remember; pins_then_finish 0; }
     count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
