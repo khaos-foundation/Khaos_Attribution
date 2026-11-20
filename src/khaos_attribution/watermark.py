@@ -410,6 +410,18 @@ def reset_history() -> list[dict]:
     return copy.deepcopy(_RESETS)
 
 
+def issued_codewords() -> frozenset:
+    """Every codeword on record as embedded before derived buckets: the frozen legacy list and every reset's IDs."""
+    out = set(legacy_watermark_ids())
+    for entry in reset_history():
+        for value in [*entry.get("freed", []), *entry.get("kept_active", {}), *(c for v in entry.get("sources", {}).values() for c in v)]:
+            try:
+                out.add(int(value))
+            except (TypeError, ValueError):
+                continue
+    return frozenset(out)
+
+
 def reset_before(codeword: int) -> dict | None:
     """The most recent reset that freed ``codeword`` (it was in play before
     that date and nothing carrying it survived), or None. A codeword kept by

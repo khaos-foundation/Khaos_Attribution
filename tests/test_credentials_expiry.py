@@ -155,9 +155,9 @@ def test_a_time_stamped_file_is_not_told_it_carries_no_timestamp():
     assert V.VERDICTS["expired"] == said
 
 
-def test_every_verdict_is_one_of_six():
+def test_every_verdict_is_one_of_seven():
     """Guards the rooms and the agents' tool, which name the verdict kinds: a new one is adopted there too."""
-    assert set(V.VERDICTS) == {"confirmed", "signed", "expired", "tampered", "marked", "none"}
+    assert set(V.VERDICTS) == {"confirmed", "signed", "expired", "tampered", "marked", "foreign", "none"}
 
 
 def test_an_in_date_signature_is_signed_not_expired(tmp_path, no_detector):

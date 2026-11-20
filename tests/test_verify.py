@@ -314,3 +314,40 @@ def test_a_record_that_names_no_watermark_is_not_detected_by_any_watermark(tmp_p
                 version="0", timestamp_url=None)
     r = V.verify_file(wav)
     assert r["verdict"] == "signed" and r["status"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize("codeword", [None, W.encode_payload(5)])
+def test_an_audioseal_mark_without_a_khaos_id_is_never_called_khaos(tmp_path, detector, codeword):
+    """Other services mark with AudioSeal too: a mark whose word does not decode to a Khaos bucket is named as theirs."""
+    detector["codeword"] = codeword
+    r = V.verify_file(_wav(tmp_path / "plain.wav"))
+    assert r["verdict"] == "foreign" and r["status"] == "INCONCLUSIVE"
+    assert "Khaos watermark" not in r["message"] and "AudioSeal" in r["message"]
+    assert r["watermark"]["detected"] is False and r["watermark"]["audioseal"] is True and r["watermark"]["watermark_id"] is None
+    assert "no Khaos ID" in V._line(r)
+
+
+def test_a_khaos_shaped_mark_is_named_as_a_format_not_as_proof(tmp_path, detector):
+    r = V.verify_file(_wav(tmp_path / "plain.wav"))
+    assert r["verdict"] == "marked" and "Khaos's ID format" in r["message"] and "AudioSeal too" in r["message"]
+    assert r["watermark"]["payload"] in W.DERIVED_PAYLOADS
+
+
+def test_no_id_khaos_ever_embedded_reads_as_foreign(tmp_path, detector):
+    """Every ID on record (the legacy list, every reset's, and each machine band's ends) reads as Khaos-shaped."""
+    ids = set(W.issued_codewords()) | set(W.legacy_watermark_ids())
+    ids |= {W.encode_payload(p) for band in W.MACHINE_BANDS.values() if band.start >= W.DERIVED_PAYLOADS.start for p in (band.start, band.stop - 1)}
+    assert W.encode_payload(27) in ids, "a pre-bucket platform ID below the derived range is on record"
+    wav = _wav(tmp_path / "plain.wav")
+    for codeword in sorted(ids):
+        detector["codeword"] = codeword
+        r = V.verify_file(wav)
+        assert r["verdict"] == "marked" and r["watermark"]["watermark_id"] == codeword, codeword
+
+
+def test_a_foreign_mark_asks_the_register_with_no_codeword(tmp_path, detector, monkeypatch):
+    detector["codeword"] = None
+    asked = {}
+    monkeypatch.setattr(V, "ask_register", lambda url, audio, sr, codeword, **k: asked.setdefault("codeword", codeword) or {"grade": "none"})
+    V.verify_file(_wav(tmp_path / "plain.wav"), register_url="https://register.example")
+    assert asked == {"codeword": None}

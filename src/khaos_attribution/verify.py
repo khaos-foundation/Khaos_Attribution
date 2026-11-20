@@ -35,10 +35,15 @@ VERDICTS = {
     "expired": ("Carries an intact signed record that claims to come from Khaos. Its signing certificate is past its "
                 "date, so this alone does not prove Khaos made it."),
     "tampered": "Carries a Khaos record whose signature no longer holds: the file was changed after it was signed.",
-    "marked": "A Khaos watermark is present. A watermark alone does not prove Khaos made it.",
+    "marked": ("A watermark in Khaos's ID format is present. A watermark alone does not prove Khaos made it: other "
+               "services mark with AudioSeal too."),
+    "foreign": ("An AudioSeal watermark is present, but it carries no Khaos ID: another service's mark, or one too "
+                "damaged to read. It says nothing about Khaos."),
     "none": "No Khaos mark found. That is not proof a person made it: marks can be removed or never added.",
 }
 # The verdict in five words. DETECTED means a Khaos mark was found, never that Khaos is proven to have made the audio.
+# A mark is Khaos-shaped when its word decodes to a derived bucket or is an ID Khaos issued before buckets;
+# any other AudioSeal mark is 'foreign'.
 STATUSES = ("DETECTED", "NOT_DETECTED", "INCONCLUSIVE", "NOT_SUPPORTED", "ERROR")
 
 
@@ -114,17 +119,20 @@ def read_credentials(path: Path | str) -> dict:
 
 
 def _watermark(audio, sample_rate: int) -> dict:
-    from khaos_attribution.watermark import Watermarker, decode_codeword  # noqa: PLC0415
+    """`audioseal`: the detector heard a mark; `detected`: and its word decodes to a Khaos bucket, or is an ID
+    Khaos embedded before buckets."""
+    from khaos_attribution.watermark import DERIVED_PAYLOADS, Watermarker, decode_codeword, issued_codewords  # noqa: PLC0415
     if not Watermarker.available():
         return {"checked": False, "reason": "the watermark detector (audioseal) is not installed"}
     if not len(audio):
         return {"checked": False, "reason": "the file holds no audio"}
     probability, codeword, corrected = Watermarker.detect_array(audio, sample_rate)
-    detected = probability >= WATERMARK_THRESHOLD
-    decoded = decode_codeword(codeword) if detected and codeword is not None else None
-    return {"checked": True, "detected": detected, "confidence": round(float(probability), 3),
-            "watermark_id": codeword if detected else None, "corrected": bool(corrected) if detected else False,
-            "payload": decoded[0] if decoded else None}
+    heard = probability >= WATERMARK_THRESHOLD
+    decoded = decode_codeword(codeword) if heard and codeword is not None else None
+    khaos = decoded is not None and (decoded[0] in DERIVED_PAYLOADS or decoded[1] in issued_codewords())
+    return {"checked": True, "detected": khaos, "audioseal": heard, "confidence": round(float(probability), 3),
+            "watermark_id": codeword if khaos else None, "corrected": bool(corrected) if khaos else False,
+            "payload": decoded[0] if khaos else None}
 
 
 def ask_register(url: str, audio, sample_rate: int, codeword: int | None, *, key: str | None = None,
@@ -162,6 +170,8 @@ def verdict(credentials: dict, watermark: dict, register: dict | None) -> str:
         return "tampered"
     if watermark.get("detected"):
         return "marked"
+    if watermark.get("audioseal"):
+        return "foreign"
     return "none"
 
 
@@ -174,7 +184,7 @@ def status(kind: str, credentials: dict, watermark: dict, register: dict | None)
     if kind in ("signed", "expired"):
         # A signature anyone can make is DETECTED only when the watermark it names is heard as well.
         return "DETECTED" if watermark.get("detected") and watermark.get("matches_record") is True else "INCONCLUSIVE"
-    if kind in ("tampered", "marked"):
+    if kind in ("tampered", "marked", "foreign"):
         return "INCONCLUSIVE"
     if not credentials.get("checked", True):
         return "NOT_SUPPORTED"
@@ -236,7 +246,9 @@ def _line(result: dict) -> str:
                      f"{', model ' + str(rec['adapter_version']) if rec.get('adapter_version') else ''}")
     else:
         parts.append("  Content Credentials: none")
-    if mark.get("checked"):
+    if mark.get("checked") and mark.get("audioseal") and not mark.get("detected"):
+        parts.append(f"  Watermark: an AudioSeal mark with no Khaos ID (confidence {mark['confidence']})")
+    elif mark.get("checked"):
         parts.append(f"  Watermark: {'present' if mark['detected'] else 'not found'} (confidence {mark['confidence']})"
                      + (f", ID {mark['watermark_id']}" if mark.get("watermark_id") is not None else "")
                      + ({True: ", matches the record", False: ", DOES NOT match the record"}
