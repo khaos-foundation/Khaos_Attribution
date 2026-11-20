@@ -70,8 +70,10 @@ GREEN="$GITDIR/khaos-gate.green"
 # Per worktree: each checkout remembers its own last quick run, and the test files a quick run had to skip.
 QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
 OWED="$QUICK.owed"
-# The pins a quick run found red since this change, named at each later stop until a change runs them again.
+# The pins this checkout's branch turned red ("<holder> <test id>"), and those a run had to skip ("<holder> <why>"):
+# each later stop names them, and only a run of them settles them.
 PINS_RED="$QUICK.pins"
+PINS_OWED="$QUICK.pins.owed"
 # The gate that runs every test file: only a green run of it, or of --changed, settles what is owed.
 SUITE_GATE=pytest
 # A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
@@ -243,6 +245,36 @@ pin_holders() {
   done
 }
 
+# Sets the lines of the record $1 for the holder $2 to the rest of the arguments, one line each; none clears them.
+record_set() {
+  local file=$1 holder=$2 item
+  shift 2
+  { grep -v "^$holder " "$file" 2> /dev/null; for item in "$@"; do printf '%s %s\n' "$holder" "$item"; done; } > "$file.tmp"
+  mv "$file.tmp" "$file"
+  [ -s "$file" ] || rm -f "$file"
+}
+
+# The record $1's entries for the holder $2, one per line.
+record_get() {
+  grep "^$2 " "$1" 2> /dev/null | cut -d' ' -f2-
+}
+
+# Each line of what the pins records still hold, as a stop names it.
+pins_reminder() {
+  local holder ids why
+  if [ -s "$PINS_RED" ]; then
+    cut -d' ' -f1 "$PINS_RED" | sort -u | while IFS= read -r holder; do
+      ids=$(record_get "$PINS_RED" "$holder" | tr '\n' ' ')
+      echo "SKIP pins $holder: ${ids}red since an earlier run on this branch; scripts/gate.sh --changed shows it"
+    done
+  fi
+  if [ -s "$PINS_OWED" ]; then
+    while IFS=' ' read -r holder why; do
+      echo "SKIP pins $holder: not run ($why); scripts/gate.sh --changed runs them"
+    done < "$PINS_OWED"
+  fi
+}
+
 # The test ids a pytest_by_folder run reported red, each once.
 red_ids() {
   grep -E '^(FAILED|ERROR) ' | awk '{ print $2 }' | sort -u
@@ -251,13 +283,20 @@ red_ids() {
 # Of the pins $2 (test ids) the repository at $1 holds on this one, those red on this checkout's committed base too,
 # run beside the same siblings within $3 seconds (0: no limit). Fails when that run could not be made.
 red_before() {
-  local holder=$1 ids=$2 secs=$3 ws me base tmp sibling out rc
+  local holder=$1 ids=$2 secs=$3 ws me base tmp sibling out rc began
   ws=$(cd .. && pwd)
   me=$(basename "$PWD")
   base=$(git merge-base HEAD origin/main 2> /dev/null) || base=HEAD
+  began=$(date +%s)
   tmp=$(mktemp -d) || return 1
   mkdir "$tmp/$me"
-  if git archive --format=tar "$base" | tar -x -C "$tmp/$me"; then
+  if with_timeout "$secs" bash -c 'git archive --format=tar "$1" | tar -x -C "$2"' _ "$base" "$tmp/$me"; then
+    # The copy holds what git tracks; a pin may also read the venv beside it, which no change to the files moves.
+    [ -e .venv ] && ln -s "$PWD/.venv" "$tmp/$me/.venv"
+    if [ "$secs" -gt 0 ]; then
+      secs=$(( secs - ($(date +%s) - began) ))
+      [ "$secs" -lt 1 ] && secs=1
+    fi
     for sibling in "$ws"/*/; do
       sibling=${sibling%/}
       if [ "$(basename "$sibling")" != "$me" ] && [ -e "$sibling/.git" ]; then ln -s "$sibling" "$tmp/$(basename "$sibling")"; fi
@@ -378,28 +417,27 @@ case "$MODE" in
         owed=$(wc -l < "$OWED" | tr -d ' ')
         [ "$owed" -gt 0 ] && echo "SKIP quick: $owed test files were never run; scripts/gate.sh --changed runs them"
       fi
-      [ "$pins_ran" -eq 0 ] && [ -s "$PINS_RED" ] && cat "$PINS_RED"
+      [ "$pins_ran" -eq 0 ] && pins_reminder
       exit "$1"
     }
-    # The pins siblings hold on this repository run after its own tests, inside the same seconds. A pin this change
-    # turned red blocks once, then is named at each stop until a change runs the pins again; one red before never blocks.
+    # The pins siblings hold on this repository run after its own tests, inside the same seconds. Only a pin newly red
+    # on this branch blocks, once; the pins run keeps the records later stops name.
     pins_then_finish() {
-      local left out prc
+      local left out prc holder
       if [ -z "$(printf '%s\n' "$fresh" | code_paths)" ] || [ -z "$(pin_holders)" ]; then finish "$1"; fi
       left=$(( secs - ($(date +%s) - began) ))
       if [ "$left" -lt 3 ]; then
         echo "SKIP pins: the stop's seconds are spent; scripts/gate.sh --changed runs them"
+        while IFS= read -r holder; do
+          record_set "$PINS_OWED" "$(basename "$holder")" "no time left in a stop"
+        done < <(pin_holders)
         finish "$1"
       fi
       out=$(bash "$SELF" --pins --budget "$left" < /dev/null 2>&1)
       prc=$?
       pins_ran=1
       [ -n "$out" ] && printf '%s\n' "$out"
-      if [ "$prc" -eq 1 ]; then
-        printf '%s\n' "$out" | sed -n 's/^FAIL pins \([^ ]*\).*/SKIP pins \1: red since an earlier stop; scripts\/gate.sh --changed shows it/p' > "$PINS_RED"
-        finish 1
-      fi
-      rm -f "$PINS_RED"
+      [ "$prc" -eq 1 ] && finish 1
       finish "$1"
     }
     pins_ran=0
@@ -412,7 +450,11 @@ case "$MODE" in
     if [ -z "$fresh" ]; then
       # A change undone counts for a pin it had turned red: the pins run again to see.
       undone=$(comm -13 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
-      if [ -s "$PINS_RED" ] && [ -n "$undone" ]; then fresh=$undone; remember; pins_then_finish 0; fi
+      if { [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ]; } && [ -n "$undone" ]; then
+        fresh=$undone
+        remember
+        pins_then_finish 0
+      fi
       finish 0
     fi
     tests=$(printf '%s\n' "$fresh" | quick_tests)
@@ -478,7 +520,6 @@ case "$MODE" in
     if [ -n "$pins" ]; then
       run_gates pins
       prc=$?
-      [ "$prc" -eq 0 ] && rm -f "$PINS_RED"
       if [ "$prc" -eq 1 ]; then rc=1; elif [ "$prc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=3; fi
     fi
     exit "$rc" ;;
@@ -493,43 +534,68 @@ case "$MODE" in
       left=0
       if [ "$BUDGET" -gt 0 ]; then
         left=$(( BUDGET - ($(date +%s) - began) ))
-        if [ "$left" -lt 2 ]; then echo "SKIP pins $name: no time left; scripts/gate.sh --changed runs them"; worse 3; continue; fi
+        if [ "$left" -lt 2 ]; then
+          echo "SKIP pins $name: no time left; scripts/gate.sh --changed runs them"
+          record_set "$PINS_OWED" "$name" "no time left"
+          worse 3
+          continue
+        fi
       fi
       start=$(date +%s)
       out=$(bash "$holder/scripts/gate.sh" --pins-for "$me" --workspace "$ws" --budget "$left" < /dev/null 2>&1)
       hrc=$?
       took=$(( $(date +%s) - start ))
       case "$hrc" in
-        0|5) echo "PASS pins $name (${took}s): $(printf '%s\n' "$out" | tail -1)" ;;
+        0|5)
+          echo "PASS pins $name (${took}s): $(printf '%s\n' "$out" | tail -1)"
+          record_set "$PINS_RED" "$name"
+          record_set "$PINS_OWED" "$name" ;;
         1)
           ids=$(printf '%s\n' "$out" | red_ids)
           [ "$BUDGET" -gt 0 ] && left=$(( BUDGET - ($(date +%s) - began) ))
           if [ -z "$ids" ]; then
             echo "SKIP pins $name (${took}s): red without naming a test; scripts/gate.sh --changed shows it"
             printf '%s\n' "$out" | tail -30
+            record_set "$PINS_OWED" "$name" "red without naming a test"
             worse 3
           elif [ "$BUDGET" -gt 0 ] && [ "$left" -lt 2 ]; then
-            echo "SKIP pins $name (${took}s): red, with no time left to read them before this change: $(printf '%s ' $ids)"
+            echo "SKIP pins $name (${took}s): red, unconfirmed: no time left to run them on this branch's base: $(printf '%s ' $ids)"
+            record_set "$PINS_OWED" "$name" "red, unconfirmed against this branch's base"
             worse 3
           elif ! before=$(red_before "$holder" "$(printf '%s ' $ids)" "$left"); then
-            echo "SKIP pins $name (${took}s): red, and how they stood before this change could not be read: $(printf '%s ' $ids)"
+            echo "SKIP pins $name (${took}s): red, unconfirmed: they could not be run on this branch's base: $(printf '%s ' $ids)"
+            record_set "$PINS_OWED" "$name" "red, unconfirmed against this branch's base"
             worse 3
           else
             new=$(comm -23 <(printf '%s\n' "$ids") <(printf '%s\n' "$before" | sort -u))
-            if [ -n "$new" ]; then
-              echo "FAIL pins $name (${took}s): red since this change: $(printf '%s ' $new)"
+            added=$(comm -23 <(printf '%s\n' "$new") <(record_get "$PINS_RED" "$name" | sort -u))
+            record_set "$PINS_OWED" "$name"
+            # shellcheck disable=SC2086
+            record_set "$PINS_RED" "$name" $new
+            if [ -n "$added" ]; then
+              echo "FAIL pins $name (${took}s): red since this change: $(printf '%s ' $added)"
               printf '%s\n' "$out" | tail -60
               rc=1
+            elif [ -n "$new" ]; then
+              echo "SKIP pins $name (${took}s): $(printf '%s ' $new)red since an earlier run on this branch; settled by a change here or in $name"
+              worse 3
             else
               echo "SKIP pins $name (${took}s): red before this change too, so not this change's to fix: $(printf '%s ' $ids)"
               worse 3
             fi
           fi ;;
-        3) printf '%s\n' "$out" | grep -E '^SKIP '; worse 3 ;;
-        124) echo "SKIP pins $name: ran past the time left; scripts/gate.sh --changed runs them"; worse 3 ;;
+        3)
+          printf '%s\n' "$out" | grep -E '^SKIP '
+          record_set "$PINS_OWED" "$name" "$(printf '%s\n' "$out" | grep -E '^SKIP ' | head -1 | sed 's/^SKIP pins [^:]*: //')"
+          worse 3 ;;
+        124)
+          echo "SKIP pins $name: ran past the time left; scripts/gate.sh --changed runs them"
+          record_set "$PINS_OWED" "$name" "ran past the time left"
+          worse 3 ;;
         *)
           echo "SKIP pins $name: its gate.sh could not run them (exit $hrc)"
           printf '%s\n' "$out" | tail -10
+          record_set "$PINS_OWED" "$name" "its gate.sh could not run them (exit $hrc)"
           worse 3 ;;
       esac
     done < <(pin_holders)
