@@ -304,16 +304,13 @@ def run(req: dict) -> dict:
 
 
 def main() -> int:
-    req = json.loads(sys.stdin.read())
-    try:
+    from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
+
+    def work(req: dict) -> dict:
         reply = run(req)
         mx, _nn = _imports()
-        reply["peak_gb"] = _peak_gb(mx)
-    except Exception as exc:  # noqa: BLE001 — the reply carries it
-        reply = {"error": f"{type(exc).__name__}: {exc}"}
-    sys.stdout.write("\n" + json.dumps(reply) + "\n")
-    sys.stdout.flush()
-    return 0 if not reply.get("error") else 1
+        return {**reply, "peak_gb": _peak_gb(mx)}
+    return answer(work)
 
 
 if __name__ == "__main__":

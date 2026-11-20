@@ -4,7 +4,6 @@ and gives it the same session the other engines give it. Khaos counts in epochs,
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import shutil
@@ -20,6 +19,7 @@ from khaos_attribution.engines.render import RenderFailed
 from khaos_attribution.engines.sa3.train import bucket_timesteps, summarise  # noqa: F401
 from khaos_attribution.engines import process_trainer as PT
 from khaos_attribution.engines.train import TrainingUnavailable
+from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
 
 log = logging.getLogger(__name__)
@@ -167,15 +167,7 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
 
 def losses_from_csv(save_dir: Path) -> list:
     """(step, loss) rows the driver wrote so far."""
-    rows = []
-    try:
-        with (save_dir / LOSSES_CSV).open(newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                if row.get("loss") not in (None, ""):
-                    rows.append((int(float(row.get("step") or 0)), float(row["loss"])))
-    except (OSError, ValueError):
-        return rows
-    return rows
+    return PT.CsvLossTail(Path(save_dir) / LOSSES_CSV)()
 
 
 def checkpoint_step(path: Path) -> int | None:
@@ -230,11 +222,11 @@ class Session:
         target_dir = self.output_dir / "checkpoints" / f"epoch_{epoch}_loss_{loss:.4f}"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / DESCRIPTOR.adapter["filenames"][0]
-        done = subprocess.run([str(self.api.python), str(CONVERT_WORKER), str(source), str(target)],
-                              cwd=str(self.api.root), capture_output=True, text=True, env=_env(self.api))
-        if done.returncode != 0 or not target.is_file():
+        code, _stdout, stderr = W.call(self.api.python, CONVERT_WORKER, [source, target], cwd=self.api.root,
+                                       env=_env(self.api), label="mimetic-a0 converter", timeout=None)
+        if code != 0 or not target.is_file():
             raise TrainingUnavailable("converting the checkpoint to safetensors failed: "
-                                      + "\n".join(done.stderr.strip().splitlines()[-4:]))
+                                      + "\n".join(stderr.strip().splitlines()[-4:]))
         self.latest_adapter = target
         self.latest_epoch = epoch
         self.checkpoint_by_epoch[epoch] = target
@@ -265,7 +257,7 @@ class Session:
 
     def _follow(self, offset: int):
         return PT.follow(self, offset, started="[OK] mimetic-a0 trainer started",
-                         losses=lambda: losses_from_csv(self.save_dir), run_steps=self.steps, poll=POLL_SECONDS)
+                         losses=PT.CsvLossTail(self.save_dir / LOSSES_CSV), run_steps=self.steps, poll=POLL_SECONDS)
 
     def heldout_evaluator(self, tensor_val_dir: Path | str, *, n_buckets: int):
         return HeldoutEvaluator(self, Path(tensor_val_dir), n_buckets=int(n_buckets))
@@ -331,14 +323,10 @@ def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str
     trainer's held-out curve and a datamodel's subset losses both read."""
     request = {"clips_dir": str(Path(clips_dir).resolve()), "adapter": str(Path(adapter).resolve()) if adapter else None,
                "timesteps": list(timesteps), "seed": int(seed), "device": device}
-    done = subprocess.run([str(api.python), str(HELDOUT_WORKER)], input=json.dumps(request), cwd=str(api.root),
-                          capture_output=True, text=True, env=_env(api))
-    last = (done.stdout or "").strip().splitlines()[-1:] or [""]
+    # No limit: a held-out pass over a run's clips has no measured bound, and the room's stop reaches the tree.
     try:
-        reply = json.loads(last[0])
-    except ValueError:
-        reply = None
-    if done.returncode != 0 or not isinstance(reply, dict) or reply.get("error"):
-        why = (reply or {}).get("error") if isinstance(reply, dict) else "\n".join((done.stderr or "").splitlines()[-6:])
-        raise RuntimeError(f"the mimetic-a0 held-out worker failed: {why}")
+        reply = W.run(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="mimetic-a0 held-out",
+                      timeout=None, required="per_sample")
+    except W.WorkerFailed as exc:
+        raise RuntimeError(f"the mimetic-a0 held-out worker failed: {exc.why}") from exc
     return summarise(reply["per_sample"], list(timesteps))

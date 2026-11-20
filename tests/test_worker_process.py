@@ -376,3 +376,118 @@ def test_on_windows_the_tree_is_taken_by_taskkill_and_a_failure_is_said(monkeypa
     with caplog.at_level("WARNING", logger=W.log.name):
         W._stop_windows(left)
     assert left.killed and any("taskkill" in r.getMessage() for r in caplog.records)
+
+
+CHATTY = ("import json, os, sys, time\nsys.stdin.read()\nopen(%r, 'w').write(str(os.getpid()))\n"
+          "for i in range(10000):\n    print('khaos-row ' + json.dumps({'row': i}), flush=True)\n    time.sleep(0.05)\n")
+
+
+def test_a_streaming_worker_is_stopped_when_asked_even_while_its_rows_keep_coming(tmp_path):
+    """A stop is read between rows as well as between polls, so a worker that never falls silent still stops."""
+    pidfile, script = tmp_path / "pid", tmp_path / "chatty.py"
+    script.write_text(CHATTY % str(pidfile))
+    rows = []
+    with pytest.raises(W.WorkerCancelled):
+        W.stream(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test",
+                 on_row=rows.append, should_stop=lambda: len(rows) >= 3)
+    assert 3 <= len(rows) < 50 and _gone(int(pidfile.read_text()))
+
+
+def test_a_streaming_worker_past_its_deadline_is_stopped(tmp_path):
+    script, pidfile = _sleeper(tmp_path)
+    start = time.monotonic()
+    with pytest.raises(W.WorkerFailed, match="time limit"):
+        W.stream(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test", timeout=0.5)
+    assert time.monotonic() - start < 15 and _gone(int(pidfile.read_text()))
+
+
+RAISES = ("import json, sys, traceback\nsys.stdin.read()\n"
+          "try:\n    1 / 0\nexcept Exception as exc:\n    traceback.print_exc()\n"
+          "    print(json.dumps({'error': f'{type(exc).__name__}: {exc}'}))\n    sys.exit(1)\n")
+
+
+def test_a_failing_workers_traceback_reaches_the_debug_log_and_only_its_last_line_the_error_log(tmp_path, caplog):
+    """The reply's one line is what a caller shows; the file and line it failed at go to the log at DEBUG, since a
+    traceback can hold a request's words, and only the last line at ERROR."""
+    script = tmp_path / "raises.py"
+    script.write_text(RAISES)
+    for ask in (W.run, W.stream):
+        caplog.clear()
+        with caplog.at_level("DEBUG", logger=W.log.name), pytest.raises(W.WorkerFailed) as failed:
+            ask(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test")
+        assert "Traceback" not in str(failed.value) and "ZeroDivisionError" in str(failed.value), ask.__name__
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        debug = "\n".join(r.getMessage() for r in caplog.records if r.levelname == "DEBUG")
+        assert errors == ["the test worker failed: ZeroDivisionError: division by zero"], (ask.__name__, errors)
+        assert "Traceback" in debug and "1 / 0" in debug, ask.__name__
+
+
+def test_a_failure_carries_its_bare_reason_for_a_caller_that_words_it_itself(tmp_path):
+    script = tmp_path / "quiet.py"
+    script.write_text("import json, sys\nsys.stdin.read()\nsys.stderr.write('out of memory\\n')\n"
+                      "print(json.dumps({'note': 'no error key'}))\nsys.exit(1)\n")
+    with pytest.raises(W.WorkerFailed) as failed:
+        W.run(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test")
+    assert failed.value.why == "out of memory" and "the test worker failed (1)" in str(failed.value)
+    script.write_text(RAISES)
+    with pytest.raises(W.WorkerFailed) as failed:
+        W.run(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test")
+    assert failed.value.why == "ZeroDivisionError: division by zero"
+
+
+def test_a_plain_command_is_answered_and_a_stop_reaches_what_it_started(tmp_path):
+    """A command with arguments and no JSON reply (a converter, a pre-encoder) runs through the same loop."""
+    echo = tmp_path / "echo.py"
+    echo.write_text("import sys\nprint('|'.join(sys.argv[1:]))\nsys.stderr.write('said\\n')\nsys.exit(4)\n")
+    code, out, err = W.call(Path(sys.executable), echo, ["a b", "c"], cwd=tmp_path, env=dict(os.environ), label="test")
+    assert (code, out.strip(), err.strip()) == (4, "a b|c", "said")
+    if not POSIX:
+        return
+    child_file, script = tmp_path / "child", tmp_path / "parent.py"
+    script.write_text("import subprocess, sys, time\n"
+                      "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                      f"open({str(child_file)!r}, 'w').write(str(child.pid))\ntime.sleep(120)\n")
+    try:
+        with pytest.raises(W.WorkerCancelled):
+            W.call(Path(sys.executable), script, [], cwd=tmp_path, env=dict(os.environ), label="test",
+                   should_stop=lambda: child_file.exists() and bool(child_file.read_text()))
+        assert _gone(int(child_file.read_text()))
+    finally:
+        _kill(int(child_file.read_text()) if child_file.exists() and child_file.read_text() else None)
+
+
+def test_a_worker_answers_its_request_and_writes_its_traceback_when_its_work_fails(monkeypatch, capsys):
+    import io
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"n": 2})))
+    assert W.answer(lambda req: {"twice": req["n"] * 2}) == 0
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1]) == {"twice": 4}
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+    assert W.answer(lambda req: req["missing"]) == 1
+    out, err = capsys.readouterr()
+    assert json.loads(out.strip().splitlines()[-1]) == {"error": "KeyError: 'missing'"}
+    assert "Traceback" in err and "req[\"missing\"]" in err
+
+
+WORKERS = [("khaos_attribution.engines.sa3.worker", "render_torch"),
+           ("khaos_attribution.engines.sa3.heldout_worker", "heldout_torch"),
+           ("khaos_attribution.engines.sa3.measure_worker", "run"),
+           ("khaos_attribution.engines.sa3.measure_worker_mlx", "run"),
+           ("khaos_attribution.engines.mimetic.worker", "render"),
+           ("khaos_attribution.engines.mimetic.heldout_worker", "heldout"),
+           ("khaos_attribution.engines.mimetic.measure_worker", "run")]
+
+
+@pytest.mark.parametrize("module, work", WORKERS)
+def test_every_engine_worker_writes_its_traceback_when_it_fails(module, work, monkeypatch, capsys):
+    import importlib
+    import io
+    mod = importlib.import_module(module)
+
+    def boom(req):
+        raise RuntimeError("inside the engine")
+    monkeypatch.setattr(mod, work, boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+    assert mod.main() == 1
+    out, err = capsys.readouterr()
+    assert json.loads(out.strip().splitlines()[-1]) == {"error": "RuntimeError: inside the engine"}
+    assert "Traceback" in err and "inside the engine" in err

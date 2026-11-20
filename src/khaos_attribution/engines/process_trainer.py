@@ -66,6 +66,92 @@ def steps_for(cfg: dict, n_pairs: int) -> dict:
             "epochs": epochs}
 
 
+class _LogTail:
+    """A log a trainer appends to, read from where the last read stopped, so a poll costs what was appended. A log
+    written again from the start (shorter than what was read, another file, or other first bytes) is read again."""
+    HEAD_BYTES = 64
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.offset = 0
+        self.rows: list = []
+        self._identity: tuple | None = None
+
+    def _reset(self) -> None:
+        self.offset, self.rows = 0, []
+
+    def _new(self) -> bytes | None:
+        import os  # noqa: PLC0415
+        try:
+            with self.path.open("rb") as fh:
+                st = os.fstat(fh.fileno())
+                head = fh.read(self.HEAD_BYTES)
+                if self._identity is not None:
+                    inode, seen = self._identity
+                    if inode != st.st_ino or st.st_size < self.offset or head[:len(seen)] != seen:
+                        self._reset()
+                self._identity = (st.st_ino, head)
+                fh.seek(self.offset)
+                return fh.read()
+        except OSError:
+            return None
+
+
+class CsvLossTail(_LogTail):
+    """(step, loss) rows of a trainer's ``step,loss`` log; a half-written last line waits for its end."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self._columns: list | None = None
+
+    def _reset(self) -> None:
+        super()._reset()
+        self._columns = None
+
+    def __call__(self) -> list:
+        import csv  # noqa: PLC0415
+        new = self._new()
+        if new is None:
+            return self.rows
+        for raw in new.splitlines(keepends=True):
+            if not raw.endswith(b"\n"):
+                break
+            values = next(csv.reader([raw.decode("utf-8", errors="replace")]), [])
+            if self._columns is None:
+                self._columns = values
+            elif values:
+                row = dict(zip(self._columns, values))
+                if row.get("loss") not in (None, ""):
+                    try:
+                        parsed = (int(float(row.get("step") or 0)), float(row["loss"]))
+                    except ValueError:
+                        break   # read again at the next poll, as a whole read would stop here
+                    self.rows.append(parsed)
+            self.offset += len(raw)
+        return self.rows
+
+
+class RecordLossTail(_LogTail):
+    """(step, loss) from a binary log of fixed records (struct ``Iff``: step, t, loss), read by whole records."""
+
+    def __init__(self, path: Path, fmt: str = "Iff") -> None:
+        import struct  # noqa: PLC0415
+        super().__init__(path)
+        self.fmt, self.size = fmt, struct.calcsize(fmt)
+
+    def __call__(self) -> list:
+        import struct  # noqa: PLC0415
+        new = self._new()
+        if new is None:
+            return self.rows
+        whole = len(new) - len(new) % self.size
+        for i in range(0, whole, self.size):
+            step, _t, loss = struct.unpack_from(self.fmt, new, i)
+            self.rows.append((int(step), float(loss)))
+        self.offset += whole
+        return self.rows
+
+
 def checkpoint_step(path: Path) -> int | None:
     """The step a checkpoint's name carries (``…step=1234…``), or None."""
     m = re.search(r"step=(\d+)", Path(path).name)

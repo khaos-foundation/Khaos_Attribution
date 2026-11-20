@@ -155,14 +155,8 @@ def heldout_mlx(req: dict) -> dict:
 
 
 def main() -> int:
-    req = json.loads(sys.stdin.read())
-    try:
-        reply = heldout_mlx(req) if req.get("runtime") == "mlx" else heldout_torch(req)
-    except Exception as exc:  # noqa: BLE001 — the reply carries it
-        reply = {"error": f"{type(exc).__name__}: {exc}"}
-    sys.stdout.write("\n" + json.dumps(reply) + "\n")
-    sys.stdout.flush()
-    return 0 if not reply.get("error") else 1
+    from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
+    return answer(lambda req: heldout_mlx(req) if req.get("runtime") == "mlx" else heldout_torch(req))
 
 
 if __name__ == "__main__":
