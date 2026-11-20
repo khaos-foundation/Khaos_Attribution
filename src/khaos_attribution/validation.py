@@ -189,6 +189,23 @@ def validate_catalogue_delivery(record):
     return record
 
 
+def validate_evidence_review(record):
+    """Validate a run's evidence review; beyond the schema, each track is named once."""
+    _validate(record, "evidence_review.schema.json", "evidence review")
+    ids = [t["track_id"] for t in record["tracks"]]
+    if len(ids) != len(set(ids)):
+        raise AttributionValidationError("Invalid evidence review: a track is named twice")
+    return record
+
+
+def evidence_review_key(track):
+    """What an operator's approval binds to: the matches and the evidence, so new evidence needs a new approval and a
+    change of names or rights does not."""
+    import hashlib  # noqa: PLC0415
+    body = {"track_id": track["track_id"], "state": track["state"], "matches": track["matches"], "evidence": track["evidence"]}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 def validate_attribution_estimate(record):
     """Validate an attribution estimate; raise AttributionValidationError if invalid.
 
