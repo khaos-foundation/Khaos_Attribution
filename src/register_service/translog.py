@@ -36,9 +36,9 @@ CREATE TABLE IF NOT EXISTS log_exports (place TEXT PRIMARY KEY, format INTEGER N
   tree_size INTEGER NOT NULL, pending_from INTEGER);
 """
 PAGE_MAX = 1000
-# The layout of the static export: a proof names the first head under the current key that holds its leaf and a
-# consistency file runs from one head to the next, so neither changes as the log grows.
-EXPORT_FORMAT = 3
+# The layout of the static export: leaf hashes and bodies in tiles of T.TILE, a proof naming the first head under the
+# current key that holds its leaf, and a consistency file from one head to the next; none changes as the log grows.
+EXPORT_FORMAT = 4
 EXPORT_LOCK_TIMEOUT = 30.0   # seconds; a later export catches up with whatever this one skipped
 UNAVAILABLE = "unavailable: recovered without its body"
 TEXT_MAX = 400
@@ -637,8 +637,8 @@ def recover(store, places: list, public_pem: str) -> tuple:
     head, where = behind[0]["head"], behind[0]["where"]
     size, n = int(head["tree_size"]), log.size()
     try:
-        leaves = V.Mirror(where).get("hashes.json")["leaves"][:size]
-    except (V.NotFound, V.Unreadable, KeyError, TypeError) as e:
+        leaves = V.read_leaves(V.Mirror(where), size)
+    except (V.NotFound, V.Unreadable, KeyError, TypeError, AttributeError) as e:
         return False, [f"INCIDENT: the leaf hashes at {where} cannot be read: {e}"]
     if len(leaves) < size or T.Tree.from_leaves([bytes.fromhex(x) for x in leaves]).root(size).hex() != head["root_sha256"]:
         return False, [f"INCIDENT: the leaf hashes at {where} do not make its own signed root"]
@@ -648,8 +648,8 @@ def recover(store, places: list, public_pem: str) -> tuple:
     found = {}
     for place in places:
         try:
-            bundle = V.Mirror(str(place), timeout=5.0).get("bodies.json")["bodies"]
-        except (V.NotFound, V.Unreadable, KeyError, TypeError):
+            bundle, _ = V.read_bodies(V.Mirror(str(place), timeout=5.0), size)
+        except (V.NotFound, V.Unreadable, KeyError, TypeError, AttributeError):
             continue
         for i in range(n, min(size, len(bundle))):
             text = bundle[i]
@@ -816,7 +816,8 @@ def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = Non
            now: datetime | None = None, full: bool = False) -> bool:
     """Everything a verifier needs, under mirror/log/, and under public/log/ the same with new bodies held back for
     `delay_days`: what the entries since the last export add, or all of it with ``full`` and wherever the files are
-    not that export's. False when nothing was written (a blocked log, or the lock not had in time)."""
+    not that export's. A place whose last export already holds this size and delay is left as it is, anchors aside.
+    False when nothing was written (a blocked log, or the lock not had in time)."""
     import logging  # noqa: PLC0415
     if log.blocked:
         return False
@@ -827,19 +828,53 @@ def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = Non
             snap = snapshot(log, nodes=any(d is None for d in done.values()))
             for root, delayed in places:
                 pending = pending_from(snap, delay_days, now) if delayed else None
-                latest = _write_log(root, snap, key_doc, pending, done[root])
-                if latest is not None:
-                    with log.store._tx():
-                        log.db.execute("INSERT OR REPLACE INTO log_exports (place, format, key_id, tree_size, pending_from)"
-                                       " VALUES (?, ?, ?, ?, ?)", (str(root.resolve()), EXPORT_FORMAT, latest["key_id"],
-                                                                   latest["tree_size"], pending))
+                record = done[root]
+                # A withhold is an entry: the same size and delay mean the same files.
+                if not (record and record["tree_size"] == len(snap["leaves"]) and record["pending_from"] == pending):
+                    latest = _write_log(root, snap, key_doc, pending, record)
+                    if latest is not None:
+                        with log.store._tx():
+                            log.db.execute("INSERT OR REPLACE INTO log_exports (place, format, key_id, tree_size, pending_from)"
+                                           " VALUES (?, ?, ?, ?, ?)", (str(root.resolve()), EXPORT_FORMAT, latest["key_id"],
+                                                                       latest["tree_size"], pending))
+                _write_anchors(root, snap["anchors"])
     except ExportBusy as e:
         logging.getLogger("register_service").warning("log export skipped: %s; the next export catches up", e)
         return False
     return True
 
 
-def _owed_to_the_old_head(root: Path, snap: dict, shown: list, done: dict | None, was_size: int) -> tuple:
+def _write_changed(path: Path, data: bytes) -> bool:
+    """write_whole, unless the file already holds these bytes: an export with nothing new writes nothing."""
+    try:
+        if path.read_bytes() == data:
+            return False
+    except OSError:
+        pass
+    write_whole(path, data)
+    return True
+
+
+def _old_first(root: Path) -> int | None:
+    """The first body the last export left outside its sealed tiles, or None where it wrote no tiles."""
+    from khaos_attribution.translog import verify as V  # noqa: PLC0415
+    try:
+        return V.Mirror(str(root.parent)).get("bodies/tail.json")["first"]
+    except (V.NotFound, V.Unreadable, KeyError, TypeError):
+        return None
+
+
+def _old_bodies(root: Path, size: int) -> list | None:
+    """The bodies a reader of the head on disk reads, through the verifier's own reader; None when they cannot be read."""
+    from khaos_attribution.translog import verify as V  # noqa: PLC0415
+    try:
+        texts, _ = V.read_bodies(V.Mirror(str(root.parent)), size)
+    except (V.NotFound, V.Unreadable, KeyError, TypeError, AttributeError):
+        return None
+    return texts if len(texts) >= size else None
+
+
+def _owed_to_the_old_head(snap: dict, shown: list, was_size: int, old_texts) -> tuple:
     """What a reader of the head still on disk needs that this export takes away: bodies whose withhold that head
     does not hold. (kept, waiting): those it could read, as index -> body, stay until the new head is filed; those
     it knew only as inside the delay, as indices, stay explained by the delay until then."""
@@ -854,15 +889,10 @@ def _owed_to_the_old_head(root: Path, snap: dict, shown: list, done: dict | None
     late = [i for i in late if shown[i] is None]
     if not late:
         return {}, []
-    if done is not None:
-        # The last export's own record says where its delay stood.
-        public = {i for i in late if done["pending_from"] is None or i < done["pending_from"]}
-    else:
-        try:
-            old = json.loads((root / "bodies.json").read_text(encoding="utf-8"))["bodies"]
-        except (OSError, ValueError, KeyError, TypeError):
-            return {}, []
-        public = {i for i in late if i < len(old) and old[i] is not None}
+    old = old_texts() if callable(old_texts) else old_texts
+    if old is None:
+        return {}, []
+    public = {i for i in late if old[i] is not None}
     # A leaf put back without its body has none to keep; one the old head held back is still owed the delay.
     return {i: snap["raw"][i] for i in public if snap["raw"][i]}, sorted(set(late) - public)
 
@@ -871,6 +901,7 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
     """The files under ``root``; with ``done`` (the last export's record) only what changed since. Returns the head
     now filed as the newest, or None when the files there are already ahead of this snapshot. In an order that
     verifies wherever it stops: everything a reader of the old head can live with, the new head, then what is taken away."""
+    width = T.TILE
     tree, leaves, n = snap["tree"], snap["leaves"], len(snap["leaves"])
     on_disk, was_size = root / "sth" / "latest.json", 0
     if on_disk.is_file():
@@ -884,22 +915,52 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
     # the record, and a recovery from the public copy alone must not lose it: none waits.
     shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat", "withdraw") else b
              for i, b in enumerate(snap["bodies"])]
+    index_of = {leaf: i for i, leaf in enumerate(leaves)}
+    # Read before any write: a stop at any point leaves what the head on disk needs.
+    old_first = _old_first(root)
+    if done is not None and old_first is None:
+        done = None
     was = 0 if done is None else done["tree_size"]
+    kept, waiting = _owed_to_the_old_head(snap, shown, was_size, lambda: _old_bodies(root, was_size))
+    edge = min([pending if pending is not None else n, *waiting])
+    # A body tile seals only when every leaf in it is below the delay edge stated beside it: before the new head, the
+    # lowest this export states; after it, the delay's own. A sealed tile stays sealed: its bodies are public.
+    first = edge // width * width
+    final_first = (pending if pending is not None else n) // width * width
+    if done is not None:
+        first, final_first = max(first, old_first), max(final_first, old_first)
 
-    def bodies(kept: dict, edge_said: int | None) -> bytes:
-        return _json({"tree_size": n, "pending_from": edge_said,
-                      "bodies": [(kept.get(i) or b).decode("utf-8") if (b is not None or i in kept) else None
-                                 for i, b in enumerate(shown)]})
-    write_whole(root / "key.json", _json(key_doc))
+    def tile_bodies(k: int, with_kept: bool) -> list:
+        return [(kept[i] if with_kept and i in kept else snap["bodies"][i]) for i in range(k * width, (k + 1) * width)]
+
+    def text(b):
+        return b.decode("utf-8") if b is not None else None
+
+    def body_tail(with_kept: bool, edge_said: int | None, start: int) -> bytes:
+        return _json({"tree_size": n, "pending_from": edge_said, "first": start,
+                      "bodies": [text(kept[i] if with_kept and i in kept else shown[i]) for i in range(start, n)]})
+
+    touched = set(range((old_first or 0) // width if done is not None else 0, first // width))
+    for w in range(was, n):
+        if snap["kinds"][w] == "withhold" and index_of.get(snap["refers"][w], n) < first:
+            touched.add(index_of[snap["refers"][w]] // width)
+    touched |= {i // width for i in kept if i < first}
+    _write_changed(root / "key.json", _json(key_doc))
     current = snap["current_sizes"]
     for i in range(was, n):
         at = bisect.bisect_left(current, i + 1)
         size = current[at] if at < len(current) else n
         write_whole(root / "proofs" / f"{leaves[i]}.json",
                     _json({"leaf_hash": leaves[i], "leaf_index": i, "tree_size": size, "audit_path": T.hexes(tree.inclusion(i, size))}))
-    write_whole(root / "hashes.json", _json({"tree_size": n, "leaves": leaves}))
-    kept, waiting = _owed_to_the_old_head(root, snap, shown, done, was_size)
-    write_whole(root / "bodies.json", bodies(kept, min([pending if pending is not None else n, *waiting]) if waiting else pending))
+    full = n // width
+    for k in range(0 if done is None else was // width, full):
+        _write_changed(root / "hashes" / f"{k}.json", _json({"tile": k, "leaves": leaves[k * width:(k + 1) * width]}))
+    for k in sorted(touched):
+        write_whole(root / "bodies" / f"{k}.json", _json({"tile": k, "bodies": [text(b) for b in tile_bodies(k, True)]}))
+    write_whole(root / "bodies" / "tail.json", body_tail(True, edge if waiting else pending, first))
+    # Last of the tiles and tails: a reader takes this layout only once this file is there.
+    write_whole(root / "hashes" / "tail.json", _json({"tile_width": width, "tree_size": n, "first": full * width,
+                                                      "leaves": leaves[full * width:]}))
     latest = before = None
     for head in snap["heads"]:
         if head["tree_size"] > was:
@@ -909,16 +970,20 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
                             _json({"first": before["tree_size"], "second": head["tree_size"],
                                    "proof": T.hexes(tree.consistency(before["tree_size"], head["tree_size"]))}))
         latest = before = head
-    _write_anchors(root, snap["anchors"])
     if latest is not None:
         write_whole(on_disk, _json(latest))
     # From here the new head is the one read, and it proves every withhold: what it hides can go.
     if kept or waiting:
-        write_whole(root / "bodies.json", bodies({}, pending))
+        for k in sorted({i // width for i in kept if i < first} | set(range(first // width, final_first // width))):
+            write_whole(root / "bodies" / f"{k}.json", _json({"tile": k, "bodies": [text(b) for b in tile_bodies(k, False)]}))
+        write_whole(root / "bodies" / "tail.json", body_tail(False, pending, final_first))
     if done is None:
-        # A verifier reads hashes.json and bodies.json; files an earlier layout wrote beside them go.
-        for name in ("records.json", "struck.json", "withheld.json"):
+        # A whole export: what an earlier layout wrote, and any body tile past the sealed ones, go last.
+        for name in ("hashes.json", "bodies.json", "records.json", "struck.json", "withheld.json"):
             _remove(root / name)
+        for tile in (root / "bodies").glob("*.json"):
+            if tile.stem.isdigit() and int(tile.stem) >= final_first // width:
+                _remove(tile)
         if (root / "entries").exists():
             # A removal that fails raises: the export is not recorded, so the next one is whole and tries again.
             shutil.rmtree(root / "entries")
@@ -929,17 +994,18 @@ def _write_anchors(root: Path, anchors: list) -> None:
     rows = []
     for a in anchors:
         name = f"{a['tree_size']}.ots"
-        write_whole(root / "anchors" / name, bytes(a["receipt"]))
+        _write_changed(root / "anchors" / name, bytes(a["receipt"]))
         rows.append({"tree_size": a["tree_size"], "root_sha256": a["root_sha256"], "backend": a["backend"], "state": a["state"],
                      "stamped_at": a["stamped_at"], "completed_at": a["completed_at"], "receipt": f"anchors/{name}"})
-    write_whole(root / "anchors.json", _json(rows))
+    _write_changed(root / "anchors.json", _json(rows))
 
 
-def export_anchors(log: TransLog, mirror: Path) -> None:
-    """The anchor receipts, as OpenTimestamps files, and their list."""
+def export_anchors(log: TransLog, mirror: Path, public: Path | None = None) -> None:
+    """The anchor receipts, as OpenTimestamps files, and their list, in the mirror and the public copy alike."""
     try:
         with export_lock(Path(mirror)):
-            _write_anchors(Path(mirror) / "log", log.anchors())
+            for place in [Path(mirror)] + ([Path(public)] if public is not None else []):
+                _write_anchors(place / "log", log.anchors())
     except ExportBusy:
         pass
 

@@ -105,6 +105,13 @@ since confirmed or struck by the wardens), 5 proved but the newest head is over 
 frozen. The same check runs in a browser at
 `https://register.khaos.dev/verify-entry`.
 
+The mirror's leaf hashes and bodies come in tiles (`log/hashes/<k>.json`, `log/bodies/<k>.json`, each tile the width
+`log/hashes/tail.json` states, then that tail and `log/bodies/tail.json`). A full tile's bytes never change, except a
+body tile under a withhold, so the command keeps a remote mirror's tiles in `~/.khaos/log-cache` (or the folder
+`KHAOS_LOG_CACHE` names) and still checks every one on every run. This is the export's format 4, written by every release after 0.58.0:
+`khaos-log-verify` and the verify page from 0.58.0 or earlier read only the format before it, so upgrade the package
+to check a format-4 mirror. The command and the page still read a format-3 mirror.
+
 What is signed, exactly: an entry is the RFC 8785 canonical JSON of its fields (`version`, `kind` admit/revoke/withhold/
 withdraw/confirm/heartbeat/genesis, `time` in RFC 3339 UTC, a random 128-bit `salt`, and the kind's own fields); its leaf hash is
 SHA-256(0x00 || entry); nodes are SHA-256(0x01 || left || right); a signed tree head is Ed25519 over the RFC 8785 JSON of

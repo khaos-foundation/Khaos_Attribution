@@ -20,6 +20,9 @@ from khaos_attribution import translog as T  # noqa: E402
 from khaos_attribution.translog import verify as V  # noqa: E402
 from register_service.app import create_app  # noqa: E402
 from tests.test_register_service import _machine, _signed, _Transport, register  # noqa: E402,F401
+from tests import log_files as LF  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("tile_widths")
 
 
 def _mirror(app):
@@ -45,12 +48,8 @@ def _copy(app, tmp_path, name="lie"):
 def _drop_body(where, leaf):
     """A mirror that leaves a body out, everywhere it could be read from."""
     (where / "log" / "entries" / f"{leaf}.json").unlink(missing_ok=True)
-    bundle = where / "log" / "bodies.json"
-    if bundle.is_file():
-        doc = json.loads(bundle.read_text())
-        hashes = json.loads((where / "log" / "hashes.json").read_text())["leaves"]
-        doc["bodies"][hashes.index(leaf)] = None
-        bundle.write_text(json.dumps(doc))
+    if (where / "log" / "sth" / "latest.json").is_file():
+        LF.set_body(where / "log", LF.leaves(where / "log").index(leaf), None)
 
 
 # ---- what is proved is the requested record's admit, and a missing body needs a proved withhold ----
@@ -102,8 +101,7 @@ def _export(app):
 def _public_strike(app, leaf: str, kind: str) -> bool:
     """The exported log withholds the struck entry's body and still serves, as a body of its own, the entry naming it."""
     log = _mirror(app) / "log"
-    bodies = json.loads((log / "bodies.json").read_text())["bodies"]
-    leaves = json.loads((log / "hashes.json").read_text())["leaves"]
+    bodies, leaves = LF.bodies(log), LF.leaves(log)
     named = [json.loads(b) for b in bodies if b]
     return bodies[leaves.index(leaf)] is None and any(e.get("kind") == kind and e.get("revokes") == leaf for e in named)
 
@@ -133,8 +131,7 @@ def test_a_withheld_revoke_still_strikes_with_its_reason_withheld(register):
     warden.log_append({"kind": "withhold", "withholds": revoke["leaf_hash"], "reason": "privacy", "sitting": "S1"})
     out = _prove(s1["record_sha256"], _mirror(app), store.log.signer.public_pem())
     assert out["struck"] and out["struck"]["reason"] is None and out["struck"]["reason_withheld"]
-    bodies = json.loads((_mirror(app) / "log" / "bodies.json").read_text())["bodies"]
-    leaves = json.loads((_mirror(app) / "log" / "hashes.json").read_text())["leaves"]
+    bodies, leaves = LF.bodies(_mirror(app) / "log"), LF.leaves(_mirror(app) / "log")
     assert bodies[leaves.index(revoke["leaf_hash"])] is None
     assert any(json.loads(b).get("kind") == "withhold" and json.loads(b).get("revokes") == leaf for b in bodies if b), \
         "a withheld strike still names, in public, the entry it struck"
@@ -198,7 +195,7 @@ def test_log_recover_puts_back_a_leaf_whose_published_body_is_gone_and_marks_it_
     key, client, s1, _, _, _ = _two(register)
     cfg = app.state.cfg
     _restore(app, cfg, tmp_path, client, key)
-    hashes = json.loads((_mirror(app) / "log" / "hashes.json").read_text())["leaves"]
+    hashes = LF.leaves(_mirror(app) / "log")
     for place in (_mirror(app), cfg["data"] / "mirror-public"):
         _drop_body(place, hashes[-1])
     from register_service.__main__ import main
@@ -361,8 +358,7 @@ def test_new_bodies_wait_out_the_grace_period_before_the_public_mirror_and_a_wit
     assert (public / "log" / "sth" / "latest.json").is_file()
 
     def public_body(leaf_hex):
-        hashes = json.loads((public / "log" / "hashes.json").read_text())["leaves"]
-        return json.loads((public / "log" / "bodies.json").read_text())["bodies"][hashes.index(leaf_hex)]
+        return LF.body_of(public / "log", leaf_hex)
     assert public_body(leaf) is None, "a new body waits"
     out = _prove(leaf, public, pem)
     assert out["entry"] is None and out["pending"] and any("not yet public" in w for w in out["warnings"]) and out["held_back_after"] == 1
@@ -371,13 +367,12 @@ def test_new_bodies_wait_out_the_grace_period_before_the_public_mirror_and_a_wit
     from register_service.translog import export
     export(store.log, _mirror(app), log_key_doc(store.log.signer, True), public=public, delay_days=0)
     assert public_body(leaf) is None, "withheld inside the grace period, never public"
-    genesis = json.loads((public / "log" / "hashes.json").read_text())["leaves"][0]
+    genesis = LF.leaves(public / "log")[0]
     assert public_body(genesis) is not None, "after the grace period the body is public"
     lie = tmp_path / "lie"
     shutil.copytree(public, lie)
-    doc = json.loads((lie / "log" / "bodies.json").read_text())
-    doc["pending_from"], doc["bodies"][0] = 0, None
-    (lie / "log" / "bodies.json").write_text(json.dumps(doc))
+    LF.set_pending_from(lie / "log", 0)
+    LF.set_body(lie / "log", 0, None)
     head1 = json.loads((lie / "log" / "sth" / "1.json").read_text())
     old = T.sign_head(1, bytes.fromhex(head1["root_sha256"]), store.log.signer, timestamp="2026-01-01T00:00:00Z")
     (lie / "log" / "sth" / "1.json").write_text(json.dumps(old))
@@ -422,12 +417,9 @@ def test_log_recover_refuses_entries_that_do_not_make_the_signed_root(register, 
     forged = T.make_entry("admit", serial=99999, record_sha256="cd" * 32)
     body = T.jcs(forged)
     for place in (_mirror(app), cfg["data"] / "mirror-public"):
-        hashes_file, bundle_file = place / "log" / "hashes.json", place / "log" / "bodies.json"
-        hashes, bundle = json.loads(hashes_file.read_text()), json.loads(bundle_file.read_text())
-        hashes["leaves"][-1] = T.leaf_hash(body).hex()
-        bundle["bodies"][-1] = body.decode()
-        hashes_file.write_text(json.dumps(hashes))
-        bundle_file.write_text(json.dumps(bundle))
+        last = LF.size(place / "log") - 1
+        LF.set_leaf(place / "log", last, T.leaf_hash(body).hex())
+        LF.set_body(place / "log", last, body.decode())
     from register_service.__main__ import main
     monkeypatch.setenv("REGISTER_DATA_DIR", str(cfg["data"]))
     monkeypatch.setenv("REGISTER_DEV_KEY", "1")

@@ -16,6 +16,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from khaos_attribution import registry as R  # noqa: E402
 from register_service.app import create_app, log_places  # noqa: E402
 from tests.test_register_service import _machine, _signed, _Transport, register  # noqa: E402,F401
+from tests import log_files as LF  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("tile_widths")
 
 FP = [[h, h * 10] for h in range(1, 40)]
 
@@ -355,6 +358,6 @@ def test_a_withdraw_entry_reaches_the_public_copy_without_the_delay(register):
     key, client, space, warden, signed, serial = _published(register)
     _strike(store, warden, signed)
     client.withdraw(serial, "the artist withdrew")
-    public = json.loads((app.state.cfg["data"] / "mirror-public" / "log" / "bodies.json").read_text())
-    entry = json.loads(public["bodies"][store.log.size() - 1])
-    assert entry["kind"] == "withdraw" and public["pending_from"] is not None
+    public = app.state.cfg["data"] / "mirror-public" / "log"
+    entry = json.loads(LF.bodies(public)[store.log.size() - 1])
+    assert entry["kind"] == "withdraw" and LF.pending_from(public) is not None

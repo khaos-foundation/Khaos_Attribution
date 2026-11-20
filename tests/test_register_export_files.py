@@ -12,6 +12,9 @@ pytest.importorskip("rfc8785")
 
 from register_service.app import create_app, export_all  # noqa: E402
 from tests.test_register_service import _machine, _signed, register  # noqa: E402,F401
+from tests import log_files as LF  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("tile_widths")
 
 
 def test_the_export_writes_no_file_no_reader_reads_and_clears_the_old_ones(register):
@@ -27,7 +30,7 @@ def test_the_export_writes_no_file_no_reader_reads_and_clears_the_old_ones(regis
     (log / "entries" / "stale.json").write_text("{}")
     assert export_all(app.state.cfg, store.log, store.log.signer, True, full=True)
     assert not (log / "entries").exists() and not any((log / n).exists() for n in ("struck.json", "withheld.json", "records.json"))
-    assert json.loads((log / "hashes.json").read_text())["tree_size"] == store.log.size()
+    assert LF.size(log) == store.log.size() and not (log / "hashes.json").exists() and not (log / "bodies.json").exists()
 
 
 def test_a_corrupt_local_copy_reads_as_unreadable_and_the_register_still_starts(register):
@@ -94,8 +97,7 @@ def test_an_older_export_is_cleared_by_the_next_export_and_a_later_withhold_serv
     leaf = store.log.admit_leaf_of(store.record(serial)["record_sha256"])
     store.log_withhold(leaf, "a private matter")
     assert export_all(app.state.cfg, store.log, store.log.signer, True)
-    bodies = json.loads((log / "bodies.json").read_text())["bodies"]
-    assert bodies[store.log.leaf(leaf)["idx"]] is None and not (log / "entries").exists()
+    assert LF.bodies(log)[store.log.leaf(leaf)["idx"]] is None and not (log / "entries").exists()
 
 
 def test_a_heads_table_from_before_one_head_per_size_gets_the_rule_and_keeps_both(tmp_path):

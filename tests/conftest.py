@@ -23,12 +23,22 @@ _unexpected: list = []
 
 
 @pytest.fixture(autouse=True)
-def _no_real_weights_mirror(monkeypatch):
+def _no_real_weights_mirror(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("KHAOS_WEIGHTS_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("REGISTER_LOG_WITNESSES", "")
     # Every git a test runs reads no configuration of this machine's.
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # khaos-log-verify's tile cache stays inside the test.
+    monkeypatch.setenv("KHAOS_LOG_CACHE", str(tmp_path_factory.mktemp("log-cache")))
+
+
+@pytest.fixture(params=[256, 4], ids=["tiles256", "tiles4"])
+def tile_widths(request, monkeypatch):
+    """The log's export at its own tile width and at 4, so a test's few leaves fill sealed tiles too."""
+    from khaos_attribution import translog as T
+    monkeypatch.setattr(T, "TILE", request.param)
+    return request.param
 
 
 def _reason(report) -> str | None:

@@ -7,6 +7,7 @@ REGISTER_LOG_ENABLE=1 (the owner's word that a log never started here may start)
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import logging
@@ -1006,15 +1007,21 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         return cached(request, {"anchors": rows}, 300)
 
     @app.api_route("/mirror/log/{name:path}", methods=["GET", "HEAD"])
-    def log_mirror_file(name: str):
-        """The static export, served as the mirror holds it, so the page and the command read the same files."""
+    def log_mirror_file(name: str, request: Request):
+        """The static export, served as the mirror holds it, so the page and the command read the same files. A file
+        is cached ten seconds at most, so a withheld body is not served longer; a reader that has it asks by its tag."""
         log_on_or_404()
         base = (mirror / "log").resolve()
         path = (base / name).resolve()
         if base not in path.parents or not path.is_file() or path.suffix not in (".json", ".ots"):
             raise HTTPException(404, "no such file")
+        data = path.read_bytes()
+        tag = '"' + hashlib.sha256(data).hexdigest() + '"'
+        headers = {"Cache-Control": "public, max-age=10", "ETag": tag}
+        if tag in [t.strip() for t in request.headers.get("if-none-match", "").split(",")]:
+            return Response(status_code=304, headers=headers)
         media = "application/json" if path.suffix == ".json" else "application/octet-stream"
-        return Response(path.read_bytes(), media_type=media, headers={"Cache-Control": "public, max-age=10"})
+        return Response(data, media_type=media, headers=headers)
 
     @app.api_route("/log/verify.js", methods=["GET", "HEAD"])
     def log_verify_js():

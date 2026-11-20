@@ -1,7 +1,8 @@
 """khaos-log-verify: prove an entry is in the Guild Register's log from a mirror alone, with the committed key.
     khaos-log-verify <entry.json | record.json | leaf hash | record hash> [--mirror URL-or-folder] [--key log-key.pub]
 It also checks the newest head is consistent with the last head this machine saw. It reads static files only: the
-register's own mirror first, then the public copy; the register's API is never asked.
+register's own mirror first, then the public copy; the register's API is never asked. A remote mirror's finished
+tiles are kept under ~/.khaos/log-cache (KHAOS_LOG_CACHE names another folder) and checked on every run.
 Exit codes: 0 proved; 1 the proof failed (the log or mirror is not what it claims); 2 not found or bad input;
 3 no key or no mirror could be read; 4 proved, but a strike after it could be hidden (entries not yet public, or lost
 in a recovery); 5 proved, but the newest head is over 48 hours old and this copy may be frozen.
@@ -65,6 +66,122 @@ class Mirror:
             raise Unreadable(f"{self.where}: {e}") from None
 
 
+class CachedMirror(Mirror):
+    """A mirror whose full hash tiles and sealed body tiles are kept under ``base``/<key id>/<tile width>/: a tile's
+    bytes never change except a body tile under a withhold, and every tile read is still checked against the head."""
+
+    def __init__(self, mirror: Mirror, base: Path, key_id: str):
+        self.mirror, self.base, self.key_id, self.width, self.cached = mirror, Path(base), key_id, None, set()
+        self.where, self.timeout, self.local = mirror.where, mirror.timeout, mirror.local
+
+    def _place(self, name: str) -> Path | None:
+        if self.width is None or not name.startswith(("hashes/", "bodies/")) or name.endswith("/tail.json"):
+            return None
+        return self.base / self.key_id / str(self.width) / name
+
+    def get(self, name: str):
+        place = self._place(name)
+        if place is not None and place.is_file():
+            try:
+                doc = json.loads(place.read_text(encoding="utf-8"))
+                self.cached.add(name)
+                return doc
+            except (OSError, ValueError):
+                self.evict(name)
+        doc = self.mirror.get(name)
+        if name == "hashes/tail.json":
+            self.width = doc.get("tile_width") if isinstance(doc, dict) else None
+        elif place is not None:
+            try:
+                place.parent.mkdir(parents=True, exist_ok=True)
+                place.write_text(json.dumps(doc), encoding="utf-8")
+            except OSError:
+                pass
+        return doc
+
+    def evict(self, name: str | None = None) -> None:
+        """One tile, or with no name every tile of this key and width, read from the mirror again next time."""
+        import shutil  # noqa: PLC0415
+        if name is None:
+            if self.width is not None:
+                shutil.rmtree(self.base / self.key_id / str(self.width), ignore_errors=True)
+            self.cached.clear()
+            return
+        place = self._place(name)
+        if place is not None:
+            place.unlink(missing_ok=True)
+        self.cached.discard(name)
+
+
+def cache_base() -> Path:
+    """Where khaos-log-verify keeps tiles; KHAOS_LOG_CACHE names another folder."""
+    return Path(os.environ.get("KHAOS_LOG_CACHE") or Path.home() / ".khaos" / "log-cache")
+
+
+def _width(tail: dict) -> int:
+    w = tail.get("tile_width") if isinstance(tail, dict) else None
+    if not isinstance(w, int) or isinstance(w, bool) or w < 2 or w > 4096 or w & (w - 1):
+        raise Unreadable(f"the mirror's tile width {w!r} is not a power of two from 2 to 4096")
+    return w
+
+
+def _tail(doc, n: int, key: str) -> tuple:
+    """A tail's first index and its items, after the checks every tail must pass."""
+    if not isinstance(doc, dict) or not isinstance(doc.get(key), list) or not isinstance(doc.get("first"), int):
+        raise Unreadable(f"a tail file holds no {key}")
+    first, size = doc["first"], doc.get("tree_size")
+    if not isinstance(size, int) or size < n:
+        raise Unreadable("the mirror changed while it was read; run again")
+    if first < 0 or first > size or len(doc[key]) != size - first:
+        raise Unreadable(f"a tail's first ({first}) and length do not fit its size ({size})")
+    return first, doc[key]
+
+
+def _tiles(mirror: Mirror, folder: str, count: int, width: int, key: str) -> list:
+    out = []
+    for k in range(count):
+        tile = mirror.get(f"{folder}/{k}.json")
+        if not isinstance(tile, dict) or tile.get("tile") != k or not isinstance(tile.get(key), list) or len(tile[key]) != width:
+            raise Unreadable(f"{folder}/{k}.json is not tile {k} of {width}")
+        out.extend(tile[key])
+    return out
+
+
+def read_leaves(mirror: Mirror, n: int) -> list:
+    """The first ``n`` leaf hashes, from the tiles and the tail; from hashes.json where the mirror has no tiles yet."""
+    try:
+        tail = mirror.get("hashes/tail.json")
+    except NotFound:
+        hashes = mirror.get("hashes.json").get("leaves") or []
+        if len(hashes) < n:
+            raise Unreadable("the mirror changed while it was read; run again") from None
+        return hashes[:n]
+    width = _width(tail)
+    first, rest = _tail(tail, n, "leaves")
+    if first % width:
+        raise Unreadable(f"the hash tail's first ({first}) is not a tile's start")
+    return (_tiles(mirror, "hashes", first // width, width, "leaves") + rest)[:n]
+
+
+def read_bodies(mirror: Mirror, n: int) -> tuple:
+    """([body text or None] for the first ``n`` leaves, pending_from), from the sealed tiles and the tail; from
+    bodies.json where the mirror has no tiles yet. Only the tiles' absence falls back: a missing tail is an error."""
+    try:
+        tail = mirror.get("hashes/tail.json")
+    except NotFound:
+        bundle = mirror.get("bodies.json")
+        return list(bundle.get("bodies") or [])[:n], bundle.get("pending_from")
+    width = _width(tail)
+    try:
+        bodies = mirror.get("bodies/tail.json")
+    except NotFound:
+        raise Unreadable("the mirror has hash tiles but no body tail") from None
+    first, rest = _tail(bodies, n, "bodies")
+    if first % width:
+        raise Unreadable(f"the body tail's first ({first}) is not a tile's start")
+    return (_tiles(mirror, "bodies", first // width, width, "bodies") + rest)[:n], bodies.get("pending_from")
+
+
 def head_at(mirror: Mirror, size: int, pem: str) -> dict:
     head = mirror.get(f"sth/{int(size)}.json")
     T.verify_head(head, pem)
@@ -76,17 +193,40 @@ def head_at(mirror: Mirror, size: int, pem: str) -> dict:
 def load_log(mirror: Mirror, pem: str) -> dict:
     """The newest signed head and every leaf and published body, each checked against it: the leaf hashes must make
     the signed root, each body must hash to its leaf, and a missing body needs a proved withhold or the delay."""
+    if not isinstance(mirror, CachedMirror):
+        return _load_log(mirror, pem)
+    try:
+        log = _load_log(mirror, pem)
+    except (T.LogError, Unreadable, KeyError, TypeError, ValueError):
+        if not mirror.cached:
+            raise
+        # A kept tile that no longer checks is read from the mirror again; only the mirror's own copy can fail.
+        mirror.evict()
+        log = _load_log(mirror, pem)
+    stale = {_body_tile(log, leaf, mirror.width) for leaf in log["withheld"]} & mirror.cached
+    if stale:
+        # A body kept before its withhold was proved goes; the mirror's tile holds it null.
+        for name in stale:
+            mirror.evict(name)
+        log = _load_log(mirror, pem)
+    return log
+
+
+def _body_tile(log: dict, leaf: str, width: int | None) -> str | None:
+    i = log["leaves"].index(leaf)
+    return f"bodies/{i // width}.json" if width and log["entries"][i] is not None else None
+
+
+def _load_log(mirror: Mirror, pem: str) -> dict:
     latest = mirror.get("sth/latest.json")
     T.verify_head(latest, pem)
     n = latest["tree_size"]
-    hashes = mirror.get("hashes.json").get("leaves") or []
-    if len(hashes) < n:
+    leaves = read_leaves(mirror, n)
+    if len(leaves) < n:
         raise Unreadable("the mirror changed while it was read; run again")
-    leaves = hashes[:n]
     if not all(T.is_hex256(h) for h in leaves) or T.Tree.from_leaves([bytes.fromhex(h) for h in leaves]).root(n).hex() != latest["root_sha256"]:
         raise T.LogError("the mirror's leaf hashes do not make its signed root")
-    bundle = mirror.get("bodies.json")
-    texts = list(bundle.get("bodies") or [])
+    texts, pending = read_bodies(mirror, n)
     entries = [None] * n
     for i in range(min(n, len(texts))):
         if texts[i] is not None:
@@ -98,7 +238,6 @@ def load_log(mirror: Mirror, pem: str) -> dict:
     for i, e in enumerate(entries):
         if e and e.get("kind") == "withhold" and e.get("withholds") in leaves and leaves.index(e["withholds"]) < i:
             withheld.setdefault(e["withholds"], e)
-    pending = bundle.get("pending_from")
     if pending is not None and int(pending) < n:
         pending = int(pending)
         first = head_at(mirror, pending + 1, pem)
@@ -302,7 +441,10 @@ def main(argv=None) -> int:
     mirrors, last = a.mirror or list(DEFAULT_MIRRORS), None
     for where in mirrors:
         try:
-            out = prove(a.target, Mirror(where), key.public_pem, state.get(where))
+            mirror = Mirror(where)
+            if not mirror.local:
+                mirror = CachedMirror(mirror, cache_base(), T.key_id_of_pem(key.public_pem))
+            out = prove(a.target, mirror, key.public_pem, state.get(where))
         except Unreadable as e:
             last = e
             continue

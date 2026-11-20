@@ -79,7 +79,7 @@ All under `REGISTER_DATA_DIR`:
 |---|---|
 | `register.sqlite3` | accounts, invites, machines, nonces, records, where each is served, the countersigning keys ever used, the hash-chained ledger, and the signed log (leaves, bodies, nodes, heads, reservations, log keys, anchors, export state) |
 | `index.sqlite3` | released pieces, their landmark fingerprints and manifest stores, training-track claims and their fingerprints |
-| `mirror/` | `models/<serial>.json`, `ledger.jsonl` and `log/` (the full export: `sth/`, `hashes.json`, `bodies.json`, `proofs/`, `consistency/`, `key.json`, `anchors/`), pushed to the public repository |
+| `mirror/` | `models/<serial>.json`, `ledger.jsonl` and `log/` (the full export, format 4: `sth/`, the leaf hashes in `hashes/<k>.json` tiles and `hashes/tail.json`, the bodies in sealed `bodies/<k>.json` tiles and `bodies/tail.json`, `proofs/`, `consistency/`, `key.json`, `anchors/`), pushed to the public repository |
 | `mirror-public/log/` | the export with each new body held back up to seven days, which is what reaches public git history |
 | `verify-keys.json` | the hashes of the verify keys issued (a key itself is shown once) |
 | `log-started` | the marker that this register started its log |

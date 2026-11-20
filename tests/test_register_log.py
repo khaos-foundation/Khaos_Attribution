@@ -17,6 +17,9 @@ from khaos_attribution import translog as T  # noqa: E402
 from khaos_attribution.translog import verify as V  # noqa: E402
 from register_service.app import create_app  # noqa: E402
 from tests.test_register_service import _machine, _signed, register  # noqa: E402,F401
+from tests import log_files as LF  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("tile_widths")
 
 
 def _mirror(app):
@@ -148,8 +151,7 @@ def test_verification_succeeds_against_the_static_mirror_alone_and_fails_when_it
     out = json.loads(capsys.readouterr().out)
     assert out["struck"]["reason"] == "x" and out["consistent_since"] == 2
     leaf = store.log.admit_leaf_of(signed["record_sha256"])
-    bundle = copy / "log" / "bodies.json"
-    bundle.write_text(bundle.read_text().replace('\\"serial\\":', '\\"serial\\":1'))
+    LF.edit_bodies(copy / "log", lambda t: t.replace('"serial":', '"serial":1'))
     assert V.main([leaf, "--mirror", str(copy), "--key", str(pem), "--state", "none"]) == V.FAILED
     other = R.SigningKey.generate().public_pem()
     (tmp_path / "other.pub").write_text(other, encoding="ascii")
@@ -341,8 +343,7 @@ def test_the_browser_verifier_proves_the_same_mirror_and_refuses_a_changed_body_
     leaf = store.log.admit_leaf_of(signed["record_sha256"])
     changed = tmp_path / "changed"
     shutil.copytree(_mirror(app), changed)
-    bundle = changed / "log" / "bodies.json"
-    bundle.write_text(bundle.read_text().replace('\\"serial\\":', '\\"serial\\":1'))
+    LF.edit_bodies(changed / "log", lambda t: t.replace('"serial":', '"serial":1'))
     other = R.SigningKey.generate().public_pem()
     first, struck, pasted, tampered, wrong_key = run_page_verifier(tmp_path, [
         (_mirror(app), signed["record_sha256"], pem), (_mirror(app), signed2["record_sha256"], pem),

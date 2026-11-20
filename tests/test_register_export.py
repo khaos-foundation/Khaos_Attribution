@@ -18,6 +18,9 @@ from khaos_attribution import registry as R  # noqa: E402
 from khaos_attribution import translog as T  # noqa: E402
 from khaos_attribution.translog import verify as V  # noqa: E402
 from register_service.store import Store, now_utc  # noqa: E402
+from tests import log_files as LF  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("tile_widths")
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -222,7 +225,7 @@ def _every_leaf_proves(where: Path, pem: str) -> int:
     if not (where / "log" / "sth" / "latest.json").is_file():
         return 0
     n = json.loads((where / "log" / "sth" / "latest.json").read_text())["tree_size"]
-    leaves = json.loads((where / "log" / "hashes.json").read_text())["leaves"][:n]
+    leaves = LF.leaves(where / "log")[:n]
     for leaf in leaves:
         V.prove(leaf, V.Mirror(str(where)), pem)
     return len(leaves)
@@ -265,7 +268,7 @@ def test_a_crash_right_after_a_withhold_leaves_a_copy_that_still_verifies(tmp_pa
     leaf = store.log.admit_leaf_of(shas[1])
     for where in (mirror, public):
         assert not (where / "log" / "entries" / f"{leaf}.json").exists(), "the finished export serves no withheld body"
-        assert json.loads((where / "log" / "bodies.json").read_text())["bodies"][store.log.leaf(leaf)["idx"]] is None
+        assert LF.bodies(where / "log")[store.log.leaf(leaf)["idx"]] is None
 
 
 @pytest.mark.parametrize("seed", range(3))
@@ -298,7 +301,7 @@ def test_an_export_killed_at_any_write_leaves_copies_that_verify(tmp_path, clock
         deaths += _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public)
         _same_as_a_whole_export(store, tmp_path, clock, mirror, public, f"crash-{seed}-{step}")
     assert deaths > 80
-    assert json.loads((public / "log" / "bodies.json").read_text())["pending_from"] not in (None, 0), "some bodies became public"
+    assert LF.pending_from(public / "log") not in (None, 0), "some bodies became public"
 
 
 def _withheld_inside_the_delay(tmp_path, clock) -> tuple:
@@ -312,7 +315,7 @@ def _withheld_inside_the_delay(tmp_path, clock) -> tuple:
     late = store.log.admit_leaf_of(_publish(store, "late"))
     clock.pass_(24 * 6.5)
     assert RT.export(store.log, mirror, _key_doc(store), public=public, delay_days=7, now=clock.now)
-    assert json.loads((public / "log" / "bodies.json").read_text())["bodies"][store.log.leaf(late)["idx"]] is None
+    assert LF.bodies(public / "log")[store.log.leaf(late)["idx"]] is None
     clock.pass_(2)
     store.log_withhold(late, "a private name")
     return store, mirror, public
@@ -359,14 +362,10 @@ def test_whatever_a_crashed_export_left_log_export_makes_the_public_copy_verify(
 
 def test_a_lost_leaf_the_old_head_knew_as_held_back_is_still_owed_the_delay(tmp_path):
     """A leaf a recovery put back without its body: nothing to keep, but the old head's delay still explains it."""
-    root = tmp_path / "log"
-    root.mkdir()
-    (root / "bodies.json").write_text(json.dumps({"tree_size": 3, "pending_from": 2, "bodies": ["{}", "{}", None]}))
     snap = {"leaves": ["l0", "l1", "l2", "l3"], "kinds": ["genesis", "admit", "unavailable", "withhold"],
             "refers": [None, None, None, "l2"], "raw": [b"{}", b"{}", b"", b"{}"]}
     shown = [b"{}", b"{}", None, b"{}"]
-    assert RT._owed_to_the_old_head(root, snap, shown, None, 3) == ({}, [2])
-    assert RT._owed_to_the_old_head(root, snap, shown, {"tree_size": 3, "pending_from": 2}, 3) == ({}, [2])
+    assert RT._owed_to_the_old_head(snap, shown, 3, ["{}", "{}", None]) == ({}, [2])
 
 
 def test_the_first_export_after_a_recovery_killed_anywhere_leaves_copies_that_verify(tmp_path, clock, monkeypatch):

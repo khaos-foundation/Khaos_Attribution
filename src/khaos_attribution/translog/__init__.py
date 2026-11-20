@@ -22,6 +22,9 @@ HEAD_VERSION = "guild.register.log.head/1"
 ENTRY_VERSION = "guild.register.log.entry/1"
 ENTRY_KINDS = ("genesis", "admit", "revoke", "withhold", "heartbeat", "confirm", "withdraw")
 KEY_FILE = "log-key.pub"   # the Foundation's log public key, committed after the ceremony
+# The static export's tile width: a full tile of leaf hashes, or a sealed tile of bodies, is one file. The export
+# states it in hashes/tail.json, which is where every reader takes it from.
+TILE = 256
 SHA256_HEX = 64
 
 
