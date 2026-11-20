@@ -34,7 +34,7 @@ class _Transport:
 
 @pytest.fixture
 def register(tmp_path):
-    cfg = {"data": tmp_path / "data", "key_file": tmp_path / "data" / "register-key.pem", "dev_key": True, "public_url": "https://register.example"}
+    cfg = {"log_enable": True, "data": tmp_path / "data", "key_file": tmp_path / "data" / "register-key.pem", "dev_key": True, "public_url": "https://register.example"}
     app = create_app(cfg)
     store: Store = app.state.store
     store.create_account("artist-one")

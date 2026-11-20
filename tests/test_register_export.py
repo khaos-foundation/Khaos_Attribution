@@ -404,7 +404,7 @@ def test_a_publish_is_registered_and_mirrored_off_the_event_loop(tmp_path):
 
     from register_service.app import create_app
     from tests.test_register_service import _machine, _signed
-    cfg = {"data": tmp_path / "data", "key_file": tmp_path / "data" / "register-key.pem", "dev_key": True, "public_url": "https://register.example"}
+    cfg = {"log_enable": True, "data": tmp_path / "data", "key_file": tmp_path / "data" / "register-key.pem", "dev_key": True, "public_url": "https://register.example"}
     app = create_app(cfg)
     store = app.state.store
     store.create_account("artist-one")

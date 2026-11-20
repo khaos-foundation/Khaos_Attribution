@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One consistent copy of the register's two databases and its mirror files, kept locally for 30 days and sent to
-# BACKUP_TARGET over ssh when one is set. Run as the register user; the environment comes from /etc/register.env.
+# One consistent copy of the register's two databases, its mirror files and its verify keys' hashes, kept locally for
+# 30 days and sent to BACKUP_TARGET over ssh when one is set. Run as the register user; the environment comes from
+# /etc/register.env.
 set -euo pipefail
 DATA="${REGISTER_DATA_DIR:?}"
 cd "$(dirname "$DATA")"
@@ -15,6 +16,8 @@ done
 [ -d "$DATA/mirror" ] && cp -a "$DATA/mirror" "$WORK/mirror"
 # The marker that this register started its log: an empty log is never opened on "nothing published" once it exists.
 [ -f "$DATA/log-started" ] && cp -a "$DATA/log-started" "$WORK/log-started"
+# The verify keys' hashes: their keys were shown once, so a register restored without them must issue every one again.
+[ -f "$DATA/verify-keys.json" ] && cp -a "$DATA/verify-keys.json" "$WORK/verify-keys.json"
 # The signing key is never in a backup: the Guardians hold its backup.
 tar -C "$WORK" -czf "$OUT/register-$STAMP.tar.gz" .
 sha256sum "$OUT/register-$STAMP.tar.gz" > "$OUT/register-$STAMP.tar.gz.sha256"

@@ -23,7 +23,7 @@ from tests.test_register_service import _Transport, _machine, _signed  # noqa: E
 
 @pytest.fixture
 def register(tmp_path, monkeypatch):
-    cfg = {"data": tmp_path / "data", "key_file": tmp_path / "data" / "k.pem", "dev_key": True, "public_url": "https://register.example"}
+    cfg = {"log_enable": True, "data": tmp_path / "data", "key_file": tmp_path / "data" / "k.pem", "dev_key": True, "public_url": "https://register.example"}
     app = create_app(cfg)
     app.state.store.create_account("artist-one")
     app.state.store.create_account("artist-two")

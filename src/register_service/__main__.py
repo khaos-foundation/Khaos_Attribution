@@ -11,6 +11,7 @@
     python -m register_service log-withhold <leaf_hash> <reason>    a body out of public view; proofs unchanged
     python -m register_service log-stamp | log-upgrade    the day's heartbeat entry and the anchor of its root; the upgrade
     python -m register_service log-recover    put back entries the published log holds and this database lost
+    python -m register_service bill-of-materials    what this environment runs, as JSON
 """
 
 from __future__ import annotations
@@ -41,8 +42,22 @@ def main(argv=None) -> int:
                                        "export whole; after a crashed export, run log-export")
     sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again; after a "
                                       "crashed export, run this")
+    sub.add_parser("bill-of-materials")
     a = p.parse_args(argv)
+    if a.cmd == "bill-of-materials":
+        import json  # noqa: PLC0415
+        from register_service.bom import bill_of_materials  # noqa: PLC0415
+        print(json.dumps(bill_of_materials(), indent=1, sort_keys=True))
+        return 0
     cfg = settings()
+    if a.cmd.startswith("log-"):
+        from register_service.app import LOG_OFF, log_started  # noqa: PLC0415
+        # Only the service's own start begins a log, with its genesis: a command never does, setting or none.
+        if not log_started(cfg):
+            if a.cmd in ("log-stamp", "log-upgrade"):
+                print(f"nothing to {a.cmd[4:]}: the signed log has not started here. {LOG_OFF}")
+                return 0
+            raise SystemExit(f"the signed log has not started here. {LOG_OFF}")
     if a.cmd == "make-key":
         from pathlib import Path  # noqa: PLC0415
         from khaos_attribution.registry import SigningKey  # noqa: PLC0415
@@ -119,8 +134,12 @@ def main(argv=None) -> int:
         for place in ("mirror", "mirror-public"):
             export_anchors(store.log, cfg["data"] / place)
     elif a.cmd == "check":
-        from register_service.app import log_places  # noqa: PLC0415
+        from register_service.app import LOG_OFF, log_places, log_started  # noqa: PLC0415
         ok = store.ledger_ok()
+        if not log_started(cfg):
+            print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {store.count()} models")
+            print(f"log off: {LOG_OFF}")
+            return 0 if ok else 1
         pub = cfg["log_key_file"].with_suffix(".pub")
         problems = store.log.problems(pub.read_text(encoding="ascii") if pub.is_file() else None)
         if pub.is_file():
