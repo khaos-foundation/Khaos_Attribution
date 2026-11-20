@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "khaos_attribution"
 version = "0.57.0"
-description = "JSON schemas and validators for artist attribution: provenance records and model cards."
+description = "The contract the Khaos rooms share: record schemas, the watermark codec, attribution, Content Credentials, the seal, the Guild Register and the engine socket."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "LicenseRef-Khaos-Free-Use: free to use, not open source; see LICENSE" }
 authors = [{ name = "Khaos Foundation Limited" }]
 dependencies = [
@@ -29,16 +29,16 @@ gradient = ["torch>=2.2"]
 # registry.py: Ed25519 for machine keys and the register's countersignature; translog: RFC 8785 for the log's entries and heads.
 registry = ["cryptography>=42", "rfc8785==0.1.4"]
 # credentials.py: Content Credentials (C2PA) signed into every output.
-credentials = ["c2pa-python>=0.38; python_version >= '3.10'", "cryptography>=42"]
+credentials = ["c2pa-python>=0.38", "cryptography>=42"]
 # verify.py: the khaos-verify command reads the record and fingerprints the audio; `detector` adds the watermark.
-verify = ["soundfile>=0.12", "c2pa-python>=0.38; python_version >= '3.10'", "cryptography>=42"]
+verify = ["soundfile>=0.12", "c2pa-python>=0.38", "cryptography>=42"]
 # A room (the Workshop, a Space): the register client, Content Credentials and the verifier, in one word.
-rooms = ["cryptography>=42", "soundfile>=0.12", "c2pa-python>=0.38; python_version >= '3.10'", "rfc8785==0.1.4"]
+rooms = ["cryptography>=42", "soundfile>=0.12", "c2pa-python>=0.38", "rfc8785==0.1.4"]
 detector = ["audioseal>=0.2", "torch>=2.2", "torchaudio>=2.2"]
 # register_service: the register itself, on its own machine.
 # The soft-binding lookup decodes uploaded audio to fingerprint it; the log's daily anchor uses the OpenTimestamps library.
 service = ["cryptography>=42", "fastapi>=0.110", "uvicorn>=0.27", "soundfile>=0.12", "numpy>=1.24", "rfc8785==0.1.4",
-           "opentimestamps==0.5.0; python_version >= '3.11'"]
+           "opentimestamps==0.5.0"]
 
 [project.scripts]
 khaos-verify = "khaos_attribution.verify:main"

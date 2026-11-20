@@ -87,7 +87,7 @@ def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool
     note = ""
     if done.returncode != 0:
         why = done.stderr.strip()[:400]
-        if not (fallback and (3, 10) <= sys.version_info[:2] <= (3, 12)):
+        if not (fallback and (3, 11) <= sys.version_info[:2] <= (3, 12)):
             return False, f"the engine's Python {version} environment could not be made: {why}"
         here = f"{sys.version_info.major}.{sys.version_info.minor}"
         again = _run([uv, "venv", "-q", "--python", sys.executable, venv], env=env)

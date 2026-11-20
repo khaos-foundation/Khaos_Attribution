@@ -534,8 +534,8 @@ def test_a_real_uv_falls_back_to_the_running_python(tmp_path, monkeypatch):
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv is not on PATH")
-    if not (3, 10) <= P.sys.version_info[:2] <= (3, 12):
-        pytest.skip("the fallback takes only a Python from 3.10 to 3.12")
+    if not (3, 11) <= P.sys.version_info[:2] <= (3, 12):
+        pytest.skip("the fallback takes only a Python from 3.11 to 3.12")
     monkeypatch.setenv("UV_PYTHON_DOWNLOADS", "never")
     venv = tmp_path / ".venv"
     python = venv / ("Scripts/python.exe" if P.WINDOWS else "bin/python")
@@ -557,11 +557,11 @@ def test_off_windows_there_is_no_fallback(tmp_path, monkeypatch):
     assert len([cmd for cmd, _ in seen if "venv" in cmd]) == 1
 
 
-def test_the_fallback_takes_only_a_python_from_3_10_to_3_12(monkeypatch, tmp_path):
-    """A running Python outside the range the engine is known to take is refused, with uv's first reason."""
+def test_the_fallback_takes_only_a_python_from_3_11_to_3_12(monkeypatch, tmp_path):
+    """A running Python outside the range the engine and the contract take is refused, with uv's first reason."""
     calls = []
     monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: calls.append(cmd) or _done(2, err="error: no 3.11"))
-    for version in ((3, 9, 0), (3, 13, 0)):
+    for version in ((3, 10, 0), (3, 13, 0)):
         monkeypatch.setattr(P.sys, "version_info", version)
         calls.clear()
         ok, note = P.make_venv("uv", tmp_path / ".venv", tmp_path / "py", "3.11", fallback=True)

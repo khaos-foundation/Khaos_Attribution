@@ -1,4 +1,4 @@
-"""Every test runs with the weights mirror unreachable and no public log witness, so no test reaches the network.
+"""Every test runs with the weights mirror unreachable, no public log witness and none of this machine's git settings.
 A test that does not run to a verdict, skipped or expected to fail, fails the run unless its reason is named here."""
 import os
 import re
@@ -25,6 +25,9 @@ _unexpected: list = []
 def _no_real_weights_mirror(monkeypatch):
     monkeypatch.setenv("KHAOS_WEIGHTS_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("REGISTER_LOG_WITNESSES", "")
+    # Every git a test runs reads no configuration of this machine's.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
 def _reason(report) -> str | None:
