@@ -92,3 +92,22 @@ def test_a_long_recordings_mark_reads_back_across_windows(monkeypatch):
     marked, strength = W.Watermarker.embed_verified(long, SR, WATERMARK_ID)
     assert strength == 1.5 and marked.shape == long.shape
     assert W.Watermarker.detect_array(marked, SR)[1:] == (WATERMARK_ID, False)
+
+
+def test_one_window_is_audioseals_own_whole_reading_with_the_real_detector():
+    """With the real 16-bit detector, a short recording's reading equals AudioSeal's detect_watermark exactly."""
+    try:
+        _, detector = W._load_models()
+    except Exception as exc:  # noqa: BLE001 — the weights are fetched by the rooms' installers, not by this suite
+        pytest.skip(f"AudioSeal's weights are not here: {exc}")
+    audio = (np.random.default_rng(7).standard_normal((10 * SR, 2)) * 0.1).astype(np.float32)
+    mono = torch.from_numpy(audio).float().T.mean(dim=0, keepdim=True).unsqueeze(0)
+    with torch.inference_mode():
+        probability, message = detector.detect_watermark(mono, SR)
+    raw = 0
+    for bit in message[0].tolist():
+        raw = (raw << 1) | int(bit)
+    decoded = W.decode_codeword(raw)
+    expected = (float(probability), *((None, False) if decoded is None else decoded[1:]))
+    got = W.Watermarker.detect_array(audio, SR)
+    assert abs(got[0] - expected[0]) < 1e-6 and got[1:] == expected[1:]
