@@ -334,9 +334,10 @@ def test_a_khaos_shaped_mark_is_named_as_a_format_not_as_proof(tmp_path, detecto
 
 
 def test_no_id_khaos_ever_embedded_reads_as_foreign(tmp_path, detector):
-    """Every ID on record (the legacy list, every reset's, and each machine band's ends) reads as Khaos-shaped."""
+    """Every ID on record (the legacy list and every reset's) and the derived range's ends, which held every machine
+    band, read as Khaos-shaped."""
     ids = set(W.issued_codewords()) | set(W.legacy_watermark_ids())
-    ids |= {W.encode_payload(p) for band in W.MACHINE_BANDS.values() if band.start >= W.DERIVED_PAYLOADS.start for p in (band.start, band.stop - 1)}
+    ids |= {W.encode_payload(p) for p in (W.DERIVED_PAYLOADS.start, W.DERIVED_PAYLOADS.stop - 1)}
     assert W.encode_payload(27) in ids, "a pre-bucket platform ID below the derived range is on record"
     wav = _wav(tmp_path / "plain.wav")
     for codeword in sorted(ids):

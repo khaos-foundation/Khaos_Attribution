@@ -1,4 +1,4 @@
-"""The shared watermark contract: SECDED codec, issuer partition, allocation.
+"""The shared watermark contract: SECDED codec, issuer partition, legacy and reset records.
 
 Pure-Python throughout — the AudioSeal embed/detect machinery is exercised
 in the App and Platform suites, where the heavy dependencies live.
@@ -9,9 +9,9 @@ import pytest
 from khaos_attribution.watermark import (
     PAYLOAD_RANGES,
     PAYLOAD_SPACE,
-    allocate_watermark_id,
     decode_codeword,
     encode_payload,
+    legacy_watermark_ids,
     watermark_issuer,
 )
 
@@ -58,77 +58,6 @@ def test_issuer_recovered_from_codeword():
     assert watermark_issuer(encode_payload(7) ^ 0b1) is None
 
 
-def test_allocation_respects_partition_and_exhaustion():
-    for issuer, payload_range in PAYLOAD_RANGES.items():
-        allocated = allocate_watermark_id(set(), issuer=issuer)
-        decoded = decode_codeword(allocated)
-        assert decoded is not None and decoded[0] in payload_range
-
-        partition = {encode_payload(p) for p in payload_range}
-        victim = encode_payload(payload_range.start + 7)
-        assert allocate_watermark_id(partition - {victim}, issuer=issuer) == victim
-        assert allocate_watermark_id(partition, issuer=issuer) is None
-
-    # exhausting one partition never bleeds into the other
-    platform_full = {encode_payload(p) for p in PAYLOAD_RANGES["platform"]}
-    app_id = allocate_watermark_id(platform_full, issuer="app")
-    assert decode_codeword(app_id)[0] in PAYLOAD_RANGES["app"]
-
-
-def test_unknown_issuer_is_an_error():
-    with pytest.raises(KeyError):
-        allocate_watermark_id(set(), issuer="mystery")
-
-
-# ---- watermarking v2: model-level allocation (docs/watermarking-v2.md) ----
-
-from khaos_attribution.watermark import (  # noqa: E402
-    ARTIST_BANDS,
-    ARTIST_BAND_SIZE,
-    MACHINE_BANDS,
-    allocate_model_watermark_id,
-    artist_band,
-    legacy_watermark_ids,
-)
-
-
-def test_bands_tile_the_payload_space_exactly():
-    seen = set()
-    for band_range in MACHINE_BANDS.values():
-        assert not (seen & set(band_range)), "bands overlap"
-        seen |= set(band_range)
-    assert seen == set(range(PAYLOAD_SPACE)), "bands must tile 0..2047"
-
-
-def _pin_recorded_frozen_list(monkeypatch):
-    """The frozen list is empty since the reset; pin the recorded one so the
-    exclusion path stays exercised."""
-    import khaos_attribution.watermark as wm
-    two = next(e for e in wm.reset_history() if e["epoch"] == 2)
-    frozen = frozenset(two["sources"]["legacy_frozen"])
-    monkeypatch.setattr(wm, "_LEGACY_IDS", frozen)
-    return frozen
-
-
-def test_model_allocation_stays_in_band_and_avoids_legacy(monkeypatch):
-    _pin_recorded_frozen_list(monkeypatch)
-    legacy_payloads = {decode_codeword(c)[0] for c in legacy_watermark_ids()}
-    assert legacy_payloads
-    for band, band_range in MACHINE_BANDS.items():
-        cid = allocate_model_watermark_id(band, set())
-        payload, _, _ = decode_codeword(cid)
-        assert payload in band_range
-        assert payload not in legacy_payloads
-
-    # dense band: the only free non-legacy payload is found deterministically
-    band_range = MACHINE_BANDS["laptop"]
-    free = next(p for p in band_range if p not in legacy_payloads)
-    used = {encode_payload(p) for p in band_range if p != free}
-    assert allocate_model_watermark_id("laptop", used) == encode_payload(free)
-    assert allocate_model_watermark_id("laptop",
-                                       used | {encode_payload(free)}) is None
-
-
 def test_resets_are_on_record_and_freed_ids_say_so():
     from khaos_attribution.watermark import reset_before, reset_history
     history = reset_history()
@@ -146,24 +75,18 @@ def test_resets_are_on_record_and_freed_ids_say_so():
     # the history is a copy: a caller cannot corrupt the record
     history[0]["freed"].clear()
     assert reset_history()[0]["freed"]
-    # the legacy list is history: nothing is excluded from allocation any more
+    # the legacy list is history: the reset record holds what it held
     assert legacy_watermark_ids() == frozenset()
 
 
 def test_legacy_ids_are_frozen_valid_codewords():
-    """Whatever the frozen list holds must be clean codewords; the allocator
-    subtracts them blindly."""
+    """Whatever the frozen list holds must be clean codewords: a verify reads them as Khaos's."""
     legacy = legacy_watermark_ids()
     assert isinstance(legacy, frozenset)
     for codeword in legacy:
         decoded = decode_codeword(codeword)
         assert decoded is not None and decoded[1] == codeword, \
             f"legacy {codeword} is not a clean codeword"
-
-
-def test_unknown_band_is_an_error():
-    with pytest.raises(ValueError):
-        allocate_model_watermark_id("mystery", set())
 
 
 def test_retired_ids_are_spent_forever(tmp_path):
@@ -188,25 +111,6 @@ def test_retired_ids_are_spent_forever(tmp_path):
     assert list(home.glob(f"{RETIRED_IDS_FILENAME}.corrupt-*"))
 
 
-def test_each_artist_has_a_band_of_its_own_and_the_old_bands_did_not_move():
-    """A band per artist makes a cross-artist collision impossible; the laptop
-    and studio bands, which have issued IDs, keep their exact ranges."""
-    assert MACHINE_BANDS["laptop"] == range(32, 704)
-    assert MACHINE_BANDS["studio"] == range(704, 1376)
-    slots = [MACHINE_BANDS[artist_band(n)] for n in range(1, ARTIST_BANDS + 1)]
-    assert len(slots) == 20 and all(len(r) == ARTIST_BAND_SIZE for r in slots)
-    assert slots[0].start == 1376 and slots[-1].stop == MACHINE_BANDS["threadripper"].start
-    for a, b in zip(slots, slots[1:]):
-        assert a.stop == b.start
-    assert artist_band(7) == "artist-07"
-    with pytest.raises(ValueError):
-        artist_band(21)
-    # Two artists allocating with no knowledge of each other never meet.
-    ids_a = {allocate_model_watermark_id("artist-01", set()) for _ in range(40)}
-    ids_b = {allocate_model_watermark_id("artist-02", set()) for _ in range(40)}
-    assert not (ids_a & ids_b)
-
-
 def test_audio_that_is_not_frames_by_channels_is_refused_in_words_before_any_model_loads():
     """One-dimensional mono, an empty array and a batch are a caller's mistake: named, never marked or read on a guess."""
     import numpy as np
@@ -219,3 +123,12 @@ def test_audio_that_is_not_frames_by_channels_is_refused_in_words_before_any_mod
             wm.Watermarker.embed_array(bad, 16000, wm.encode_payload(40))
         with pytest.raises(ValueError, match=r"\(frames, channels\)"):
             wm.Watermarker.detect_array(bad, 16000)
+
+
+def test_no_allocator_is_left_to_issue_an_id_outside_a_derived_bucket():
+    """Every new mark is a derived bucket: the band and per-output allocators are gone, the readers stay."""
+    from khaos_attribution import watermark as wm
+    for gone in ("allocate_model_watermark_id", "allocate_watermark_id", "MACHINE_BANDS", "artist_band", "ARTIST_BANDS"):
+        assert not hasattr(wm, gone), gone
+    for kept in ("PAYLOAD_RANGES", "watermark_issuer", "legacy_watermark_ids", "reset_history", "retire_watermark_ids"):
+        assert hasattr(wm, kept), kept

@@ -1,12 +1,11 @@
 """The watermark every Khaos issuer shares: AudioSeal's 16-bit message carrying a (16,11) SECDED codeword, one bit
 corrected and two refused. A model's payload is a bucket derived from its machine key and run id, shared by many
-models; the issuer partition and the machine bands are the two earlier schemes, kept to read what they marked."""
+models; the issuer partition is the earlier scheme, kept to read what it marked."""
 
 from __future__ import annotations
 
 import logging
 import os
-import secrets
 import threading
 
 os.environ.setdefault("NO_TORCH_COMPILE", "1")
@@ -78,32 +77,6 @@ def watermark_issuer(codeword: int) -> str | None:
     return None
 
 
-# ---- the earlier run-level allocation (docs/watermarking-v2.md) ----
-# One ID per training run from its machine's band, with the per-output scheme's
-# payloads frozen out (legacy_watermark_ids.json). New runs derive a bucket
-# instead (below); the bands stay so a card that carries a band ID still reads.
-ARTIST_BAND_START = 1376
-ARTIST_BAND_SIZE = 24
-ARTIST_BANDS = 20
-
-
-def artist_band(n: int) -> str:
-    """The band name for artist slot n (1 … ARTIST_BANDS): 'artist-07'."""
-    if not 1 <= n <= ARTIST_BANDS:
-        raise ValueError(f"artist slot must be 1..{ARTIST_BANDS}, got {n}")
-    return f"artist-{n:02d}"
-
-
-MACHINE_BANDS: dict[str, range] = {
-    "reserved":     range(0, 32),      # calibration + migration tooling
-    "laptop":       range(32, 704),
-    "studio":       range(704, 1376),
-    **{artist_band(n): range(ARTIST_BAND_START + (n - 1) * ARTIST_BAND_SIZE,
-                             ARTIST_BAND_START + n * ARTIST_BAND_SIZE)
-       for n in range(1, ARTIST_BANDS + 1)},                    # 1376 … 1855
-    "threadripper": range(ARTIST_BAND_START + ARTIST_BANDS * ARTIST_BAND_SIZE, 2048),
-}
-
 # ---- the payload as a bucket: derived by the machine, never allocated ----
 # A model's payload is a hash of its machine key and run id into the payloads
 # outside the reserved 32; many models share one. The register's serial names
@@ -138,52 +111,6 @@ def legacy_watermark_ids() -> frozenset:
                           .joinpath("legacy_watermark_ids.json").read_text())
         _LEGACY_IDS = frozenset(int(c) for c in data["codewords"])
     return _LEGACY_IDS
-
-
-def allocate_model_watermark_id(band: str, used: set[int]) -> int | None:
-    """A fresh run codeword from this machine's band, or None when the band
-    is exhausted (the caller must fail loudly — a run may not complete
-    unmarked). `used` is the codewords already in model cards; frozen legacy
-    payloads are excluded automatically."""
-    if band not in MACHINE_BANDS:
-        raise ValueError(f"Unknown watermark band {band!r} — one of "
-                         f"{sorted(MACHINE_BANDS)}")
-    legacy_payloads = {decode_codeword(c)[0] for c in legacy_watermark_ids()
-                      if decode_codeword(c) is not None}
-    band_range = MACHINE_BANDS[band]
-    for _ in range(64):
-        payload = band_range.start + secrets.randbelow(len(band_range))
-        if payload in legacy_payloads:
-            continue
-        candidate = encode_payload(payload)
-        if candidate not in used:
-            return candidate
-    for payload in band_range:   # dense band: walk deterministically
-        if payload in legacy_payloads:
-            continue
-        candidate = encode_payload(payload)
-        if candidate not in used:
-            return candidate
-    log.error("Watermark band %r exhausted (%d payloads)", band, len(band_range))
-    return None
-
-
-def allocate_watermark_id(used: set[int], issuer: str = "platform") -> int | None:
-    """DEPRECATED: per-output allocation is retired; new audio carries its model's derived bucket
-    (derive_watermark_id). Kept for legacy callers."""
-    payload_range = PAYLOAD_RANGES[issuer]
-    span = len(payload_range)
-    for _ in range(64):
-        candidate = encode_payload(payload_range.start + secrets.randbelow(span))
-        if candidate not in used:
-            return candidate
-    # dense registry: walk the partition deterministically instead of gambling
-    for payload in payload_range:
-        candidate = encode_payload(payload)
-        if candidate not in used:
-            return candidate
-    log.error("Watermark partition %r exhausted (%d IDs)", issuer, span)
-    return None
 
 
 # ---- AudioSeal wrapper (heavy deps, all lazy) ----
