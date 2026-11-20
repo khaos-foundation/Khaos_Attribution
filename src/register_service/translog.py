@@ -185,10 +185,13 @@ class TransLog:
             out.append({**dict(r), "entry": json.loads(body) if body else None})
         return out
 
-    def struck(self) -> dict:
-        """Every struck leaf: the revoke that strikes it, its reason and sitting (None when the revoke is withheld)."""
+    def struck(self, record_sha256: str | None = None) -> dict:
+        """Every struck leaf, or one record's: the revoke that strikes it, its reason and sitting (None when the revoke
+        is withheld)."""
         out = {}
-        for r in self.db.execute("SELECT leaf_hash, refers FROM log_leaves WHERE kind = 'revoke' ORDER BY idx"):
+        one = " AND record_sha256 = ?" if record_sha256 is not None else ""
+        for r in self.db.execute(f"SELECT leaf_hash, refers FROM log_leaves WHERE kind = 'revoke'{one} ORDER BY idx",
+                                 (record_sha256,) if record_sha256 is not None else ()):
             body = self.body(r["leaf_hash"])
             entry = json.loads(body) if body else {}
             out.setdefault(r["refers"], {"leaf_hash": r["leaf_hash"], "reason": entry.get("reason"), "sitting": entry.get("sitting"),
