@@ -8,10 +8,12 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
+import shutil
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 MIRROR_ENV = "KHAOS_WEIGHTS_URL"
@@ -24,7 +26,44 @@ EXIT_NO_MIRROR = 3
 
 
 class MirrorError(RuntimeError):
-    """A file the mirror served did not match its manifest."""
+    """A file the mirror served did not match its manifest, or the manifest names a place outside the set."""
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _checked(repo: str, doc: dict) -> dict:
+    """The manifest, refused before anything is written unless its revision is one plain folder name and every file a
+    relative path inside the set with a sha256 for a name: the mirror's own word never chooses where a file lands."""
+    revision = doc["revision"]
+    if (not isinstance(revision, str) or revision in (".", "..") or any(c in revision for c in "/\\:")
+            or revision != revision.strip()):
+        raise MirrorError(f"{repo}: the manifest's revision {revision!r} is not a plain name")
+    for f in doc["files"]:
+        path = f.get("path") if isinstance(f, dict) else None
+        parts = PurePosixPath(path).parts if isinstance(path, str) else ()
+        if (not parts or PurePosixPath(path).is_absolute() or any(p in ("", ".", "..") for p in parts)
+                or "\\" in path or ":" in path):
+            raise MirrorError(f"{repo}: the manifest names a file outside the set: {path!r}")
+        if not isinstance(f.get("sha256"), str) or not _SHA256.fullmatch(f["sha256"]):
+            raise MirrorError(f"{repo}: the manifest's sha256 for {path!r} is not 64 hex characters")
+        if not isinstance(f.get("size"), int) or isinstance(f.get("size"), bool) or f["size"] < 0:
+            raise MirrorError(f"{repo}: the manifest's size for {path!r} is not a size")
+    return doc
+
+
+def _place_link(blob: Path, link: Path) -> None:
+    """The snapshot's entry for a blob: a relative symlink, else a hard link, else a copy, as the hub's own downloader
+    falls back where symlinks are refused (Windows without Developer Mode)."""
+    try:
+        link.symlink_to(os.path.relpath(blob, link.parent))
+        return
+    except (OSError, NotImplementedError):
+        pass
+    try:
+        os.link(blob, link)
+    except OSError:
+        shutil.copyfile(blob, link)
 
 
 def base_url(base: str | None = None) -> str:
@@ -101,6 +140,7 @@ def fetch_into_dir(repo: str, dest: Path | str, patterns: list | tuple | None = 
     doc = manifest(repo, base)
     if doc is None or (revision and doc["revision"] != revision):
         return None
+    _checked(repo, doc)
     dest = Path(dest)
     for f in _wanted(doc["files"], patterns):
         _download(f"{base_url(base)}/{repo}/{doc['revision']}/{f['path']}", dest / (place(f["path"]) if place else f["path"]),
@@ -116,6 +156,7 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
     doc = manifest(repo, base)
     if doc is None or (revision and doc["revision"] != revision):
         return None
+    _checked(repo, doc)
     repo_dir = Path(cache_dir) / ("models--" + repo.replace("/", "--"))
     blobs, snapshot = repo_dir / "blobs", repo_dir / "snapshots" / doc["revision"]
     for f in _wanted(doc["files"], patterns):
@@ -125,7 +166,7 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.is_symlink() or link.exists():
             link.unlink()
-        link.symlink_to(os.path.relpath(blob, link.parent))
+        _place_link(blob, link)
     refs = repo_dir / "refs"
     refs.mkdir(parents=True, exist_ok=True)
     (refs / "main").write_text(doc["revision"], encoding="utf-8")

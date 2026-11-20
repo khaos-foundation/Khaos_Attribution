@@ -4,6 +4,7 @@ falls back to the hub."""
 import hashlib
 import http.server
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -197,3 +198,58 @@ def test_a_file_fetched_by_address_comes_from_the_mirror_or_says_it_cannot(mirro
     assert (tmp_path / "b" / "m.pt").read_bytes() == data
     assert not W.fetch_url("https://example.org/other.pt", tmp_path / "b" / "o.pt", base=base)
     assert not W.fetch_url("https://github.com/o/r/m.pt", tmp_path / "c" / "m.pt", base="http://127.0.0.1:9"), "unreachable is False"
+
+
+@pytest.mark.parametrize("no_hard_links", [False, True])
+def test_a_machine_without_symlinks_still_gets_the_hub_cache_it_reads(mirror, tmp_path, monkeypatch, no_hard_links):
+    """Windows without Developer Mode refuses symlinks: the snapshot then takes a hard link, else a copy, as the hub does."""
+    base, repo, rev, files = mirror
+
+    def refuse(*a, **k):
+        raise OSError("A required privilege is not held by the client")
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    if no_hard_links:
+        monkeypatch.setattr(os, "link", refuse)
+    cache = tmp_path / "hub"
+    assert W.fetch_into_hub_cache(repo, cache, base=base) == rev
+    snapshot = cache / "models--org--model" / "snapshots" / rev
+    for path, data in files.items():
+        assert (snapshot / path).read_bytes() == data and not (snapshot / path).is_symlink()
+    hub = pytest.importorskip("huggingface_hub")
+    assert isinstance(hub.try_to_load_from_cache(repo, "config.json", cache_dir=str(cache)), str)
+
+
+def _serve(root, repo, revision, files, entries):
+    (root / repo).mkdir(parents=True, exist_ok=True)
+    (root / repo / "manifest.json").write_text(json.dumps({"repo": repo, "revision": revision, "files": entries}))
+
+
+@pytest.mark.parametrize("revision,path,sha", [
+    ("a" * 40, "../../escaped.txt", None),
+    ("a" * 40, "/etc/escaped.txt", None),
+    ("a" * 40, "sub\\..\\..\\escaped.txt", None),
+    ("a" * 40, "C:/escaped.txt", None),
+    ("a" * 40, "ok.txt", "../../../escaped"),
+    ("../../../escaped", "ok.txt", None),
+])
+def test_a_manifest_naming_a_place_outside_the_set_is_refused_before_anything_is_written(mirror, tmp_path, revision, path, sha):
+    base = mirror[0]
+    data = b"payload"
+    entries = [{"path": path, "size": len(data), "sha256": sha or hashlib.sha256(data).hexdigest()}]
+    _serve(tmp_path / "mirror", "org/evil", revision, {}, entries)
+    before = {p for p in tmp_path.rglob("*")}
+    for fetch in (lambda: W.fetch_into_dir("org/evil", tmp_path / "plain", base=base),
+                  lambda: W.fetch_into_hub_cache("org/evil", tmp_path / "hub", base=base)):
+        with pytest.raises(W.MirrorError, match="manifest"):
+            fetch()
+    assert {p for p in tmp_path.rglob("*")} - before <= {tmp_path / "plain", tmp_path / "hub"} and not list(tmp_path.rglob("escaped*"))
+
+
+def test_a_set_whose_paths_start_with_a_dot_is_still_served(mirror, tmp_path):
+    base, _, rev, _ = mirror
+    root = tmp_path / "mirror" / "org" / "dotted"
+    (root / rev).mkdir(parents=True)
+    (root / rev / ".gitattributes").write_bytes(b"*.bin lfs")
+    (root / "manifest.json").write_text(json.dumps({"repo": "org/dotted", "revision": rev, "files": [
+        {"path": ".gitattributes", "size": 9, "sha256": hashlib.sha256(b"*.bin lfs").hexdigest()}]}))
+    assert W.fetch_into_dir("org/dotted", tmp_path / "d", base=base) == rev
