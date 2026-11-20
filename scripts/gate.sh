@@ -68,8 +68,15 @@ GITDIR=$(git rev-parse --git-common-dir) || exit 2
 LOCK="$GITDIR/khaos-gate.lock"
 GREEN="$GITDIR/khaos-gate.green"
 # Per worktree: each checkout remembers its own last quick run, and the test files a quick run had to skip.
-QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
+WORKTREE_GITDIR=$(git rev-parse --absolute-git-dir) || exit 2
+QUICK="$WORKTREE_GITDIR/khaos-gate.quick"
 OWED="$QUICK.owed"
+# The pins this branch turned red ("<holder> <test id>"), and those a run had to skip ("<holder> <why>"), one pair of
+# files per branch: each later stop on it names them, and only a run of them settles them.
+# A branch is named by its readable name and a hash of it, so a/b and a_b keep apart; a detached HEAD by its commit.
+PINS_BRANCH=$(git symbolic-ref --short -q HEAD) || PINS_BRANCH="HEAD $(git rev-parse --short HEAD 2> /dev/null)"
+PINS_RED="$QUICK.pins.$(printf '%s' "$PINS_BRANCH" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_').$(printf '%s' "$PINS_BRANCH" | git hash-object --stdin | cut -c1-8)"
+PINS_OWED="$PINS_RED.owed"
 # The gate that runs every test file: only a green run of it, or of --changed, settles what is owed.
 SUITE_GATE=pytest
 # A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
@@ -80,6 +87,7 @@ QUICK_PYTEST="$VENV/python -m pytest -q -p no:cacheprovider"
 usage() {
   echo "usage: scripts/gate.sh [all | <gate>... | --changed | --quick | --hook] [--budget SECONDS]"
   echo "gates: $ALL_GATES; by name only: $NAMED_GATES"
+  echo "pins: the tests a repository beside this one holds on it, which --changed and --quick also run"
 }
 
 changed_paths() {
@@ -126,11 +134,11 @@ take_lock() {
     local pid
     pid=$(cat "$LOCK/pid" 2> /dev/null)
     if [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null; then return 1; fi
-    rm -rf "$LOCK"
+    rm -rf "${LOCK:?}"
     mkdir "$LOCK" 2> /dev/null || return 1
   fi
   echo $$ > "$LOCK/pid"
-  trap 'rm -rf "$LOCK"' EXIT
+  trap 'rm -rf "${LOCK:?}"' EXIT
 }
 
 # The test files a quick run had to skip, those that still exist.
@@ -188,14 +196,14 @@ run_owed() {
   rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; then
     echo "PASS owed ($(( $(date +%s) - start ))s): $(grep -E '[0-9]+ passed' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')"
-    rm -f "$OWED"
+    rm -f "${OWED:?}"
     rc=0
   else
     echo "FAIL owed ($(( $(date +%s) - start ))s, exit $rc)"
     tail -60 "$log"
     rc=1
   fi
-  rm -f "$log"
+  rm -f "${log:?}"
   return "$rc"
 }
 
@@ -211,6 +219,141 @@ with_timeout() {
     waitpid($p, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$secs" "$@"
 }
 
+# Changed paths on stdin; on stdout those a pin could read: not archive/, docs/, reports/ or a .md file.
+code_paths() {
+  grep -vE '^(archive|docs|reports)/|\.md$'
+}
+
+# The SIBLING_PINS entries the gate.sh at $1 declares, one per line: `<repo>[,<repo>]:<test file or id>`, and
+# `!<repo>[,<repo>]:<test id>` for a test that repository's own gate keeps.
+pins_declared() {
+  [ -f "$1" ] && awk '/^SIBLING_PINS="/ { on = 1; sub(/^SIBLING_PINS="/, "") }
+    on { last = sub(/"[[:space:]]*$/, ""); n = split($0, words, /[[:space:]]+/)
+         for (i = 1; i <= n; i++) if (words[i] != "") print words[i]
+         if (last) exit }' "$1"
+}
+
+# Each repository beside this checkout whose gate.sh holds a pin on it, as its folder.
+pin_holders() {
+  local ws me folder entry
+  ws=$(cd .. && pwd)
+  me=$(basename "$PWD")
+  for folder in "$ws"/*/; do
+    folder=${folder%/}
+    [ "$(basename "$folder")" = "$me" ] && continue
+    while IFS= read -r entry; do
+      case "$entry" in '!'*) continue ;; esac
+      case ",${entry%%:*}," in *",$me,"*) echo "$folder"; break ;; esac
+    done < <(pins_declared "$folder/scripts/gate.sh")
+  done
+}
+
+# Sets the lines of the record $1 for the holder $2 to the rest of the arguments, one line each; none clears them.
+record_set() {
+  local file=$1 holder=$2 item
+  shift 2
+  { grep -v "^$holder " "$file" 2> /dev/null; for item in "$@"; do printf '%s %s\n' "$holder" "$item"; done; } > "$file.tmp"
+  mv "$file.tmp" "$file"
+  [ -s "$file" ] || rm -f "${file:?}"
+  # The branch a record belongs to, so the records of a branch that is gone can be found and cleared.
+  if [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ]; then
+    printf '%s\n' "$PINS_BRANCH" > "$PINS_RED.branch"
+  else
+    rm -f "${PINS_RED:?}.branch"
+  fi
+}
+
+# The record $1's entries for the holder $2, one per line.
+record_get() {
+  grep "^$2 " "$1" 2> /dev/null | cut -d' ' -f2-
+}
+
+# Clears the records of a holder no longer beside this checkout, or holding no pin on it, saying so once.
+pins_prune() {
+  local holders holder named branch
+  # Records of a branch that is gone, or of a detached HEAD left four whole days ago (-mtime +3), go with it.
+  for named in "$QUICK".pins.*.branch; do
+    [ -f "$named" ] && [ "$named" != "$PINS_RED.branch" ] || continue
+    case "$named" in "${QUICK:?}".pins.*.branch) ;; *) continue ;; esac
+    branch=$(cat "$named")
+    case "$branch" in
+      "HEAD "*) [ -n "$(find "$named" -mtime +3 2> /dev/null)" ] || continue ;;
+      *) git show-ref --verify -q "refs/heads/$branch" && continue ;;
+    esac
+    rm -f "${named:?}" "${named%.branch}" "${named%.branch}.owed"
+  done
+  [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ] || return 0
+  holders=$(pin_holders | while IFS= read -r holder; do basename "$holder"; done)
+  for holder in $(cut -d' ' -f1 "$PINS_RED" "$PINS_OWED" 2> /dev/null | sort -u); do
+    printf '%s\n' "$holders" | grep -qxF "$holder" && continue
+    record_set "$PINS_RED" "$holder"
+    record_set "$PINS_OWED" "$holder"
+    echo "SKIP pins $holder: no longer beside this checkout holding pins on it; its record is cleared"
+  done
+}
+
+# Each line of what the pins records still hold, as a stop names it.
+pins_reminder() {
+  local holder ids why
+  pins_prune
+  if [ -s "$PINS_RED" ]; then
+    cut -d' ' -f1 "$PINS_RED" | sort -u | while IFS= read -r holder; do
+      ids=$(record_get "$PINS_RED" "$holder" | tr '\n' ' ')
+      echo "SKIP pins $holder: ${ids}red since an earlier run on this branch; scripts/gate.sh --changed shows it"
+    done
+  fi
+  if [ -s "$PINS_OWED" ]; then
+    while IFS=' ' read -r holder why; do
+      echo "SKIP pins $holder: not run ($why); scripts/gate.sh --changed runs them"
+    done < "$PINS_OWED"
+  fi
+}
+
+# The test ids a pytest_by_folder run reported red, each once.
+red_ids() {
+  grep -E '^(FAILED|ERROR) ' | awk '{ print $2 }' | sort -u
+}
+
+# Of the pins $2 (test ids) the repository at $1 holds on this one, those red on this checkout's committed base too,
+# run beside the same siblings within $3 seconds (0: no limit). Fails when that run could not be made.
+red_before() {
+  local holder=$1 ids=$2 secs=$3 ws me base tmp sibling out rc began
+  ws=$(cd .. && pwd)
+  me=$(basename "$PWD")
+  base=$(git merge-base HEAD origin/main 2> /dev/null) || base=HEAD
+  began=$(date +%s)
+  tmp=$(mktemp -d) || return 1
+  mkdir "$tmp/$me"
+  # Where a link is made as a copy (Git Bash on Windows), the copy would hold a venv and every sibling: not made.
+  if ! ln -s "$tmp/$me" "$tmp/link-probe" 2> /dev/null || [ ! -L "$tmp/link-probe" ]; then
+    rm -rf "${tmp:?}"
+    return 1
+  fi
+  rm -f "${tmp:?}/link-probe"
+  if with_timeout "$secs" bash -c 'git archive --format=tar "$1" | tar -x -C "$2"' _ "$base" "$tmp/$me"; then
+    # The copy holds what git tracks; a pin may also read the venv beside it, which no change to the files moves.
+    [ -e .venv ] && ln -s "$PWD/.venv" "$tmp/$me/.venv"
+    if [ "$secs" -gt 0 ]; then
+      secs=$(( secs - ($(date +%s) - began) ))
+      [ "$secs" -lt 1 ] && secs=1
+    fi
+    for sibling in "$ws"/*/; do
+      sibling=${sibling%/}
+      if [ "$(basename "$sibling")" != "$me" ] && [ -e "$sibling/.git" ]; then ln -s "$sibling" "$tmp/$(basename "$sibling")"; fi
+    done
+    out=$(bash "$holder/scripts/gate.sh" --pins-for "$me" --workspace "$tmp" --only "$ids" --budget "$secs" < /dev/null 2>&1)
+    rc=$?
+  else
+    rc=2
+  fi
+  rm -rf "${tmp:?}"
+  case "$rc" in
+    0|5) return 0 ;;
+    1) printf '%s\n' "$out" | red_ids ;;
+    *) return 1 ;;
+  esac
+}
+
 run_gates() {
   local failed=0 skipped=0 start left cmd log rc g
   local deadline=$(( $(date +%s) + BUDGET ))
@@ -220,7 +363,7 @@ run_gates() {
       left=$(( deadline - $(date +%s) ))
       if [ "$left" -le 0 ]; then echo "SKIP $g: out of time"; skipped=1; continue; fi
     fi
-    cmd=$(gate_cmd "$g")
+    if [ "$g" = pins ]; then cmd="bash $(printf %q "$SELF") --pins"; else cmd=$(gate_cmd "$g"); fi
     echo "== gate $g: $cmd"
     log=$(mktemp)
     start=$(date +%s)
@@ -230,12 +373,17 @@ run_gates() {
       summary=$(grep -E '([0-9]+ passed|^Results:)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
       echo "PASS $g ($(( $(date +%s) - start ))s)${summary:+: $summary}"
       grep -E '^[[:space:]]*SKIP:' "$log" | head -8 | sed -E 's/^[[:space:]]*SKIP: */  skipped inside: /'
+      [ "$g" = pins ] && grep -E '^SKIP pins ' "$log" | head -8 | sed 's/^/  /'
+    elif [ "$g" = pins ] && [ "$rc" -eq 3 ]; then
+      echo "SKIP pins ($(( $(date +%s) - start ))s): a pin held on this repository did not run, or was red before this change"
+      grep -E '^SKIP pins ' "$log" | head -8 | sed 's/^/  /'
+      skipped=1
     else
       echo "FAIL $g ($(( $(date +%s) - start ))s, exit $rc)"
       tail -60 "$log"
       failed=1
     fi
-    rm -f "$log"
+    rm -f "${log:?}"
   done
   [ "$failed" -eq 1 ] && return 1
   [ "$skipped" -eq 1 ] && return 3
@@ -269,6 +417,9 @@ else:
 
 MODE=names
 BUDGET=0
+TARGET=""
+WORKSPACE=""
+ONLY=""
 NAMES=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -276,6 +427,10 @@ while [ $# -gt 0 ]; do
     --quick) MODE=quick ;;
     --hook) MODE=hook ;;
     --budget) BUDGET=${2:-0}; shift ;;
+    --pins) MODE=pins ;;
+    --pins-for) MODE=pins_for; TARGET=${2:-}; shift ;;
+    --workspace) WORKSPACE=${2:-}; shift ;;
+    --only) ONLY=${2:-}; shift ;;
     -h|--help) usage; exit 0 ;;
     *) NAMES+=("$1") ;;
   esac
@@ -291,7 +446,7 @@ case "$MODE" in
     red=0
     [ "$rc" -eq 1 ] && red=1
     hook_answer "$red" "$out" "$input"
-    rm -f "$out"
+    rm -f "${out:?}"
     exit 0 ;;
   quick)
     # The test files a quick run had to skip are owed: every later run counts them until they have run green.
@@ -303,24 +458,56 @@ case "$MODE" in
         owed=$(wc -l < "$OWED" | tr -d ' ')
         [ "$owed" -gt 0 ] && echo "SKIP quick: $owed test files were never run; scripts/gate.sh --changed runs them"
       fi
+      [ "$pins_ran" -eq 0 ] && pins_reminder
       exit "$1"
     }
+    # The pins siblings hold on this repository run after its own tests, inside the same seconds. Only a pin newly red
+    # on this branch blocks, once; the pins run keeps the records later stops name.
+    pins_then_finish() {
+      local left out prc holder
+      if [ -z "$(printf '%s\n' "$fresh" | code_paths)" ] || [ -z "$(pin_holders)" ]; then finish "$1"; fi
+      left=$(( secs - ($(date +%s) - began) ))
+      if [ "$left" -lt 3 ]; then
+        echo "SKIP pins: the stop's seconds are spent; scripts/gate.sh --changed runs them"
+        while IFS= read -r holder; do
+          record_set "$PINS_OWED" "$(basename "$holder")" "no time left in a stop"
+        done < <(pin_holders)
+        finish "$1"
+      fi
+      out=$(bash "$SELF" --pins --budget "$left" < /dev/null 2>&1)
+      prc=$?
+      pins_ran=1
+      [ -n "$out" ] && printf '%s\n' "$out"
+      [ "$prc" -eq 1 ] && finish 1
+      finish "$1"
+    }
+    pins_ran=0
+    began=$(date +%s)
+    secs=$QUICK_SECONDS
+    [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
     now=$(branch_files)
     fresh=$(comm -23 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
-    [ -z "$fresh" ] && finish 0
     remember() { printf '%s\n' "$now" > "$QUICK.tmp" && mv "$QUICK.tmp" "$QUICK"; }
+    if [ -z "$fresh" ]; then
+      # A change undone counts for a pin it had turned red: the pins run again to see.
+      undone=$(comm -13 <(printf '%s\n' "$now" | sort -u) <(sort -u "$QUICK" 2> /dev/null) | cut -d' ' -f2-)
+      if { [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ]; } && [ -n "$undone" ]; then
+        fresh=$undone
+        remember
+        pins_then_finish 0
+      fi
+      finish 0
+    fi
     tests=$(printf '%s\n' "$fresh" | quick_tests)
-    [ -z "$tests" ] && { remember; finish 0; }
+    [ -z "$tests" ] && { remember; pins_then_finish 0; }
     count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
     if [ "$count" -gt "$QUICK_MAX_FILES" ]; then
       echo "SKIP quick: $count test files name the change; gate.sh --changed checks it before the PR"
       remember
       owe
-      finish 0
+      pins_then_finish 0
     fi
     take_lock || { echo "SKIP quick: another gate run holds this repository's lock"; finish 0; }
-    secs=$QUICK_SECONDS
-    [ "$BUDGET" -gt 0 ] && [ "$BUDGET" -lt "$secs" ] && secs=$BUDGET
     log=$(mktemp)
     start=$(date +%s)
     with_timeout "$secs" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
@@ -336,13 +523,16 @@ case "$MODE" in
         rc=0 ;;
       *) echo "FAIL quick (${took}s, exit $rc): $(printf '%s' "$tests" | tr '\n' ' ')"; tail -60 "$log"; rc=1 ;;
     esac
-    rm -f "$log"
+    rm -f "${log:?}"
+    [ "$rc" -eq 0 ] && pins_then_finish 0
     finish "$rc" ;;
   changed)
     gates=$(changed_paths | gates_for | tr '\n' ' ')
     gates=${gates% }
     owed=$(owed_tests)
-    if [ -z "$gates" ] && [ -z "$owed" ]; then
+    pins=""
+    if [ -n "$(changed_paths | code_paths)" ] && [ -n "$(pin_holders)" ]; then pins=pins; fi
+    if [ -z "$gates" ] && [ -z "$owed" ] && [ -z "$pins" ]; then
       echo "SKIP changed: no changed path maps to a gate or is named by a test; nothing to run"
       exit 0
     fi
@@ -351,7 +541,7 @@ case "$MODE" in
     if [ -n "$gates" ] && [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then
       echo "PASS $gates: unchanged since its last green run"
       green=1
-      [ -z "$owed" ] && exit 0
+      [ -z "$owed" ] && [ -z "$pins" ] && exit 0
     fi
     take_lock || { echo "SKIP ${gates:-owed}: another gate run holds this repository's lock"; exit 3; }
     rc=0
@@ -365,9 +555,111 @@ case "$MODE" in
     fi
     # What the quick check skipped is run itself, unless the suite gate covered it: another gate may not hold it.
     if [ "$rc" -eq 0 ] && [ -n "$owed" ]; then
-      case " $gates " in *" $SUITE_GATE "*) rm -f "$OWED" ;; *) run_owed; rc=$? ;; esac
+      case " $gates " in *" $SUITE_GATE "*) rm -f "${OWED:?}" ;; *) run_owed; rc=$? ;; esac
+    fi
+    # The pins siblings hold on this repository read them too, so a green run of them is never remembered.
+    if [ -n "$pins" ]; then
+      run_gates pins
+      prc=$?
+      if [ "$prc" -eq 1 ]; then rc=1; elif [ "$prc" -ne 0 ] && [ "$rc" -eq 0 ]; then rc=3; fi
     fi
     exit "$rc" ;;
+  pins)
+    me=$(basename "$PWD")
+    ws=$(cd .. && pwd)
+    began=$(date +%s)
+    rc=0
+    worse() { [ "$rc" -eq 0 ] && rc=$1; }
+    pins_prune
+    while IFS= read -r holder; do
+      name=$(basename "$holder")
+      left=0
+      if [ "$BUDGET" -gt 0 ]; then
+        left=$(( BUDGET - ($(date +%s) - began) ))
+        if [ "$left" -lt 2 ]; then
+          echo "SKIP pins $name: no time left; scripts/gate.sh --changed runs them"
+          record_set "$PINS_OWED" "$name" "no time left"
+          worse 3
+          continue
+        fi
+      fi
+      start=$(date +%s)
+      out=$(bash "$holder/scripts/gate.sh" --pins-for "$me" --workspace "$ws" --budget "$left" < /dev/null 2>&1)
+      hrc=$?
+      took=$(( $(date +%s) - start ))
+      case "$hrc" in
+        0|5)
+          echo "PASS pins $name (${took}s): $(printf '%s\n' "$out" | tail -1)"
+          record_set "$PINS_RED" "$name"
+          record_set "$PINS_OWED" "$name" ;;
+        1)
+          ids=$(printf '%s\n' "$out" | red_ids)
+          [ "$BUDGET" -gt 0 ] && left=$(( BUDGET - ($(date +%s) - began) ))
+          if [ -z "$ids" ]; then
+            echo "SKIP pins $name (${took}s): red without naming a test; scripts/gate.sh --changed shows it"
+            printf '%s\n' "$out" | tail -30
+            record_set "$PINS_OWED" "$name" "red without naming a test"
+            worse 3
+          elif [ "$BUDGET" -gt 0 ] && [ "$left" -lt 2 ]; then
+            echo "SKIP pins $name (${took}s): red, unconfirmed: no time left to run them on this branch's base: $(printf '%s ' $ids)"
+            record_set "$PINS_OWED" "$name" "red, unconfirmed against this branch's base"
+            worse 3
+          elif ! before=$(red_before "$holder" "$(printf '%s ' $ids)" "$left"); then
+            echo "SKIP pins $name (${took}s): red, unconfirmed: they could not be run on this branch's base: $(printf '%s ' $ids)"
+            record_set "$PINS_OWED" "$name" "red, unconfirmed against this branch's base"
+            worse 3
+          else
+            new=$(comm -23 <(printf '%s\n' "$ids") <(printf '%s\n' "$before" | sort -u))
+            added=$(comm -23 <(printf '%s\n' "$new") <(record_get "$PINS_RED" "$name" | sort -u))
+            record_set "$PINS_OWED" "$name"
+            # shellcheck disable=SC2086
+            record_set "$PINS_RED" "$name" $new
+            if [ -n "$added" ]; then
+              echo "FAIL pins $name (${took}s): red since this change: $(printf '%s ' $added)"
+              printf '%s\n' "$out" | tail -60
+              rc=1
+            elif [ -n "$new" ]; then
+              echo "SKIP pins $name (${took}s): $(printf '%s ' $new)red since an earlier run on this branch; settled by a change here or in $name"
+              worse 3
+            else
+              echo "SKIP pins $name (${took}s): red before this change too, so not this change's to fix: $(printf '%s ' $ids)"
+              worse 3
+            fi
+          fi ;;
+        3)
+          printf '%s\n' "$out" | grep -E '^SKIP '
+          record_set "$PINS_OWED" "$name" "$(printf '%s\n' "$out" | grep -E '^SKIP ' | head -1 | sed 's/^SKIP pins [^:]*: //')"
+          worse 3 ;;
+        124)
+          echo "SKIP pins $name: ran past the time left; scripts/gate.sh --changed runs them"
+          record_set "$PINS_OWED" "$name" "ran past the time left"
+          worse 3 ;;
+        *)
+          echo "SKIP pins $name: its gate.sh could not run them (exit $hrc)"
+          printf '%s\n' "$out" | tail -10
+          record_set "$PINS_OWED" "$name" "its gate.sh could not run them (exit $hrc)"
+          worse 3 ;;
+      esac
+    done < <(pin_holders)
+    exit "$rc" ;;
+  pins_for)
+    [ -n "$TARGET" ] && [ -n "$WORKSPACE" ] || { usage; exit 2; }
+    files=""
+    drop=""
+    while IFS= read -r entry; do
+      case "$entry" in
+        '!'*) entry=${entry#!}; case ",${entry%%:*}," in *",$TARGET,"*) drop="$drop --deselect ${entry#*:}" ;; esac ;;
+        *) case ",${entry%%:*}," in *",$TARGET,"*) files="$files ${entry#*:}" ;; esac ;;
+      esac
+    done < <(pins_declared "$SELF")
+    [ -n "$ONLY" ] && files=" $ONLY"
+    [ -n "$files" ] || { echo "SKIP pins $(basename "$PWD"): it holds none on $TARGET"; exit 3; }
+    take_lock || { echo "SKIP pins $(basename "$PWD"): another gate run holds its lock"; exit 3; }
+    # Every pin must be able to look, and looks at the workspace of the checkout it is run for.
+    QUICK_PYTEST="KHAOS_WORKSPACE=$(printf %q "$WORKSPACE") KHAOS_REQUIRE_SIBLINGS=1 $QUICK_PYTEST$drop"
+    export QUICK_PYTEST
+    with_timeout "$BUDGET" bash -c "pytest_by_folder$files"
+    exit $? ;;
   names)
     [ ${#NAMES[@]} -eq 0 ] && { usage; exit 2; }
     expanded=()
@@ -375,10 +667,12 @@ case "$MODE" in
       if [ "$g" = all ]; then read -r -a every <<< "$ALL_GATES"; expanded+=("${every[@]}"); else expanded+=("$g"); fi
     done
     NAMES=("${expanded[@]}")
-    for g in "${NAMES[@]}"; do gate_cmd "$g" > /dev/null || { echo "no gate named $g"; usage; exit 2; }; done
+    for g in "${NAMES[@]}"; do
+      [ "$g" = pins ] || gate_cmd "$g" > /dev/null || { echo "no gate named $g"; usage; exit 2; }
+    done
     take_lock || { echo "another gate run holds this repository's lock"; exit 3; }
     run_gates "${NAMES[@]}"
     rc=$?
-    [ "$rc" -eq 0 ] && case " ${NAMES[*]} " in *" $SUITE_GATE "*) rm -f "$OWED" ;; esac
+    [ "$rc" -eq 0 ] && case " ${NAMES[*]} " in *" $SUITE_GATE "*) rm -f "${OWED:?}" ;; esac
     exit "$rc" ;;
 esac
