@@ -23,7 +23,7 @@ from register_service.app import create_app, export_all, log_places  # noqa: E40
 from tests.test_register_service import _machine, _signed, _Transport, register  # noqa: E402,F401
 from tests import log_files as LF  # noqa: E402
 
-pytestmark = pytest.mark.usefixtures("tile_widths")
+pytestmark = pytest.mark.usefixtures("tile_widths", "confined")
 
 
 def _age_every_head(store, days):

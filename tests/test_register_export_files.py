@@ -14,7 +14,7 @@ from register_service.app import create_app, export_all  # noqa: E402
 from tests.test_register_service import _machine, _signed, register  # noqa: E402,F401
 from tests import log_files as LF  # noqa: E402
 
-pytestmark = pytest.mark.usefixtures("tile_widths")
+pytestmark = pytest.mark.usefixtures("tile_widths", "confined")
 
 
 def test_the_export_writes_no_file_no_reader_reads_and_clears_the_old_ones(register):

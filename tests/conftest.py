@@ -80,26 +80,31 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture
 def confined(tmp_path, monkeypatch):
-    """No removal reaches outside this test's own folder, whatever the code under test asks: such a request fails
-    the test and removes nothing. A hostile-path test must hold even against code that does not yet resist it."""
+    """No removal or replacement reaches outside this test's own folder, whatever the code under test asks: such a
+    request fails the test and changes nothing. A hostile-path test must hold even against code that does not yet
+    resist it."""
     import os
-    root, rmtree, unlink = tmp_path.resolve(), shutil.rmtree, os.unlink
+    root = tmp_path.resolve()
+    real = {"rmtree": shutil.rmtree, "unlink": os.unlink, "remove": os.remove, "rmdir": os.rmdir, "replace": os.replace}
 
     def inside(path) -> bool:
+        """The path's folder resolved, its last part kept as it is: a link inside the folder is the folder's to remove."""
         try:
-            return Path(os.path.abspath(path)).resolve().is_relative_to(root)
-        except (OSError, ValueError):
+            whole = Path(os.path.abspath(os.fsdecode(path)))
+            return (whole.parent.resolve() / whole.name).is_relative_to(root)
+        except (OSError, ValueError, TypeError):
             return False
 
-    def guarded_rmtree(path, *a, **k):
-        if not inside(path):
-            raise AssertionError(f"a removal outside the test's folder was asked for: {path}")
-        return rmtree(path, *a, **k)
-
-    def guarded_unlink(path, *a, **k):
-        if k.get("dir_fd") is None and not inside(path):
-            raise AssertionError(f"a removal outside the test's folder was asked for: {path}")
-        return unlink(path, *a, **k)
-    monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
-    monkeypatch.setattr(os, "unlink", guarded_unlink)
+    def guard(name):
+        def guarded(*paths_and_args, **k):
+            count = 2 if name == "replace" else 1
+            if k.get("dir_fd") is None and k.get("src_dir_fd") is None:
+                for path in paths_and_args[:count]:
+                    if not inside(path):
+                        raise AssertionError(f"{name} outside the test's folder was asked for: {path}")
+            return real[name](*paths_and_args, **k)
+        return guarded
+    monkeypatch.setattr(shutil, "rmtree", guard("rmtree"))
+    for name in ("unlink", "remove", "rmdir", "replace"):
+        monkeypatch.setattr(os, name, guard(name))
     return root

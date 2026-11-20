@@ -467,3 +467,20 @@ def test_mirrors_that_all_fail_end_unreadable_in_bounded_time_and_memory(tmp_pat
     gigabyte = 1 << 30 if sys.platform == "darwin" else 1 << 20   # ru_maxrss is bytes on macOS, kilobytes on Linux
     assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before < gigabyte
     assert len(asked) < 40 and len({w for w, _ in asked}) == 3
+
+
+def test_a_link_planted_where_a_tile_is_kept_is_replaced_never_written_through(tmp_path, clock):
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    for i in range(9):
+        _publish(store, f"model-{i}")
+    _export(store, clock, mirror, public)
+    pem, key_id = store.log.signer.public_pem(), store.log.signer.key_id
+    cache, victim = tmp_path / "cache", _victim(tmp_path)
+    target = victim / "keep" / "file"
+    (cache / key_id / "4" / "hashes").mkdir(parents=True)
+    (cache / key_id / "4" / "hashes" / "0.json").symlink_to(target)
+    V.load_log(V.CachedMirror(V.Mirror(str(mirror)), cache, key_id), pem)
+    assert target.read_text() == "mine"
+    kept = cache / key_id / "4" / "hashes" / "0.json"
+    assert not kept.is_symlink() and json.loads(kept.read_text()) == json.loads((mirror / "log" / "hashes" / "0.json").read_text())

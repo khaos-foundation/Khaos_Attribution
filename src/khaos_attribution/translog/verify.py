@@ -121,7 +121,7 @@ class CachedMirror(Mirror):
             try:
                 place.parent.mkdir(parents=True, exist_ok=True)
                 if self._place(name) == place:
-                    place.write_text(json.dumps(doc), encoding="utf-8")
+                    _write_new(place, json.dumps(doc).encode("utf-8"))
             except OSError:
                 pass
         return doc
@@ -139,6 +139,21 @@ class CachedMirror(Mirror):
         if place is not None and (place.is_file() or place.is_symlink()):
             place.unlink()
         self.cached.discard(name)
+
+
+def _write_new(place: Path, data: bytes) -> None:
+    """A new file beside ``place``, created afresh and never through a link, then moved over it: a link planted at
+    ``place`` is replaced, never written through."""
+    import secrets  # noqa: PLC0415
+    tmp = place.with_name(f".{place.name}.{os.getpid()}.{secrets.token_hex(6)}.new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, place)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class TileUnreadable(Unreadable):

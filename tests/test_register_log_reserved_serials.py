@@ -17,7 +17,7 @@ from khaos_attribution import registry as R  # noqa: E402
 from register_service.app import create_app, log_places  # noqa: E402
 from tests.test_register_service import _machine, _signed, _Transport, register  # noqa: E402,F401
 
-pytestmark = pytest.mark.usefixtures("tile_widths")
+pytestmark = pytest.mark.usefixtures("tile_widths", "confined")
 
 
 def _lose_an_admit(register, tmp_path):
