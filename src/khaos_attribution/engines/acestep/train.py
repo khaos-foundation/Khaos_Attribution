@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.acestep import DESCRIPTOR
 
 log = logging.getLogger(__name__)
@@ -226,13 +227,7 @@ def dtype_tag(dtype: Any) -> str:
 
 
 def adapter_file_in(directory: Path | str) -> Path | None:
-    """The adapter weights inside a checkpoint directory: the descriptor's names first, then any safetensors."""
-    directory = Path(directory)
-    for name in DESCRIPTOR.adapter["filenames"]:
-        if (directory / name).is_file():
-            return directory / name
-    files = sorted(directory.glob("*.safetensors"))
-    return files[0] if files else None
+    return _adapter_file_in(directory, DESCRIPTOR)
 
 
 def preprocess_pairs(api: TrainingApi, *, out_dir: Path | str, checkpoint_root: Path | str, variant: str,

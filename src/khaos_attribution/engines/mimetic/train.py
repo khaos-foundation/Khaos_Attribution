@@ -12,12 +12,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from khaos_attribution.engines.train import NoLossHooks
+from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import WINDOWS, find_root, python_for, worker_env
 from khaos_attribution.engines.render import RenderFailed
-# The held-out record's arithmetic is the same for every engine whose worker returns per-sample bucket losses.
-from khaos_attribution.engines.sa3.train import bucket_timesteps, summarise  # noqa: F401
 from khaos_attribution.engines import process_trainer as PT
+from khaos_attribution.engines.heldout import DEFAULT_BUCKETS, bucket_timesteps, summarise  # noqa: F401
 from khaos_attribution.engines.train import TrainingUnavailable
 from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
@@ -26,7 +27,6 @@ log = logging.getLogger(__name__)
 
 PAIR_SUFFIX = ".wav"
 TRAINER_DIRNAME = "mimetic"
-DEFAULT_BUCKETS = 10
 HELDOUT_WORKER = Path(__file__).with_name("heldout_worker.py")
 CONVERT_WORKER = Path(__file__).with_name("convert_worker.py")
 TRAIN_DRIVER = Path(__file__).with_name("train_driver.py")
@@ -70,12 +70,7 @@ def adapter_kwargs(cfg: dict) -> tuple:
 
 
 def adapter_file_in(directory: Path | str) -> Path | None:
-    directory = Path(directory)
-    for name in DESCRIPTOR.adapter["filenames"]:
-        if (directory / name).is_file():
-            return directory / name
-    files = sorted(directory.glob("*.safetensors"))
-    return files[0] if files else None
+    return _adapter_file_in(directory, DESCRIPTOR)
 
 
 def run_refusal(run_dir: Path | str) -> str | None:
@@ -127,22 +122,7 @@ def _env(api: TrainingApi) -> dict:
 
 # ── the session ──────────────────────────────────────────────────────────────
 
-class LossHooks:
-    """The trainer takes no seams from Khaos: every flag is off, and the context has nothing to undo."""
-
-    def __init__(self, record_into: dict | None = None) -> None:
-        self.flags = {"masked_loss": False, "length_buckets": False}
-        self._record_into = record_into
-
-    def manifest_fields(self) -> dict:
-        return {}
-
-    def __enter__(self) -> "LossHooks":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._record_into is not None:
-            self._record_into.update(self.manifest_fields())
+LossHooks = NoLossHooks
 
 
 def steps_for(cfg: dict, n_pairs: int) -> dict:

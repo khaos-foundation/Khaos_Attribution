@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from khaos_attribution.engines.train import NoLossHooks
+from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.render import RenderFailed
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3 import train_driver as TD
@@ -22,8 +24,8 @@ from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root,
 from khaos_attribution.engines import worker_process as W
 from khaos_attribution.engines.worker_process import stop_tree
 from khaos_attribution.engines import process_trainer as PT
+from khaos_attribution.engines.heldout import DEFAULT_BUCKETS, HIGH_NOISE_T, bucket_timesteps, summarise  # noqa: F401
 from khaos_attribution.engines.train import TrainingUnavailable
-from khaos_attribution.identifiers import track_of_segment
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +34,6 @@ LATENTS_DIRNAME = "latents"
 TRAINER_DIRNAME = "sa3"
 BASE_NPZ = "medium-base.npz"
 TELEMETRY = "loss_by_timestep.bin"
-HIGH_NOISE_T = 0.8
-DEFAULT_BUCKETS = 10
 HELDOUT_WORKER = Path(__file__).with_name("heldout_worker.py")
 CONVERT_WORKER = Path(__file__).with_name("convert_worker.py")
 TRAIN_DRIVER = Path(__file__).with_name("train_driver.py")
@@ -86,12 +86,7 @@ def adapter_kwargs(cfg: dict) -> tuple:
 
 
 def adapter_file_in(directory: Path | str) -> Path | None:
-    directory = Path(directory)
-    for name in DESCRIPTOR.adapter["filenames"]:
-        if (directory / name).is_file():
-            return directory / name
-    files = sorted(directory.glob("*.safetensors"))
-    return files[0] if files else None
+    return _adapter_file_in(directory, DESCRIPTOR)
 
 
 def run_refusal(run_dir: Path | str) -> str | None:
@@ -228,22 +223,7 @@ def _env(api: TrainingApi) -> dict:
 
 # ── the session ──────────────────────────────────────────────────────────────
 
-class LossHooks:
-    """Stability's trainer takes no seams from Khaos: every flag is off, and the context has nothing to undo."""
-
-    def __init__(self, record_into: dict | None = None) -> None:
-        self.flags = {"masked_loss": False, "length_buckets": False}
-        self._record_into = record_into
-
-    def manifest_fields(self) -> dict:
-        return {}
-
-    def __enter__(self) -> "LossHooks":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._record_into is not None:
-            self._record_into.update(self.manifest_fields())
+LossHooks = NoLossHooks
 
 
 def steps_for(cfg: dict, n_pairs: int) -> dict:
@@ -537,10 +517,6 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
 
 # ── the held-out loss, by a worker on the latest checkpoint ──────────────────
 
-def bucket_timesteps(n_buckets: int = DEFAULT_BUCKETS) -> list:
-    return [round((i + 0.5) / n_buckets, 6) for i in range(int(n_buckets))]
-
-
 class HeldoutEvaluator:
     """The rectified-flow velocity MSE on the held-out clips at fixed timesteps with seeded noise, taken by a
     worker in the engine's environment on the adapter named, else the checkpoint of the epoch just finished."""
@@ -584,31 +560,3 @@ def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str
     except W.WorkerFailed as exc:
         raise RuntimeError(f"the Stable Audio 3 held-out worker failed: {exc.why}") from exc
     return summarise(reply["per_sample"], list(timesteps))
-
-
-def summarise(per_sample: dict, timesteps: list) -> dict:
-    """The evaluator's record from per-sample bucket losses: pooled buckets, mean, the high-noise band, per track."""
-    keys = [f"{t:.2f}" for t in timesteps]
-    n = len(per_sample)
-    if not n:
-        raise ValueError("the held-out worker scored no sample")
-    sums = {k: 0.0 for k in keys}
-    per_track: dict = {}
-    for name, row in per_sample.items():
-        track = track_of_segment(Path(name).stem)
-        tr = per_track.setdefault(track, {"sums": {k: 0.0 for k in keys}, "n_pairs": 0})
-        tr["n_pairs"] += 1
-        for k in keys:
-            sums[k] += float(row[k])
-            tr["sums"][k] += float(row[k])
-    buckets = {k: v / n for k, v in sums.items()}
-    high = [buckets[f"{t:.2f}"] for t in timesteps if t >= HIGH_NOISE_T]
-    by_track = {}
-    for track, tr in sorted(per_track.items()):
-        tb = {k: v / tr["n_pairs"] for k, v in tr["sums"].items()}
-        th = [tb[f"{t:.2f}"] for t in timesteps if t >= HIGH_NOISE_T]
-        by_track[track] = {"mean": sum(tb.values()) / len(tb), "high_noise": (sum(th) / len(th)) if th else None,
-                           "n_pairs": tr["n_pairs"]}
-    return {"buckets": buckets, "mean": sum(buckets.values()) / len(buckets),
-            "high_noise": (sum(high) / len(high)) if high else None, "n_pairs": n,
-            "timesteps": [float(t) for t in timesteps], "by_track": by_track}
