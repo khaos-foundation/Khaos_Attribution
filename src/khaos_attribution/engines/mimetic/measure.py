@@ -128,9 +128,10 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
                timestep_norm: bool = False, param_filter: str | None = None, latent_transform: dict | None = None,
                latent_pool: int | None = None, noise_draws: int | None = None, noise_shared: bool = False,
                param_groups: str | None = None, groups_out=None, on_row=None) -> tuple:
-    """(matrix, rows) of an index through the worker: the matrix lands beside the files as a temp .npy."""
+    """(matrix, rows) of an index through the worker: the matrix lands beside the files in a file of this call's own."""
     import numpy as np  # noqa: PLC0415
     from khaos_attribution import gradient as _G  # noqa: PLC0415
+    from khaos_attribution.engines import worker_process as W  # noqa: PLC0415
     if param_groups or groups_out:
         raise _G.GradientUnavailable("block sketches are not built on the mimetic-a0 worker")
     if _G.research_int(latent_pool, "latent_pool") > 1 or _G.research_int(noise_draws, "noise_draws") > 1:
@@ -145,7 +146,6 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
     if param_filter:
         from khaos_attribution.gradient import GradientUnavailable  # noqa: PLC0415
         raise GradientUnavailable("a parameter filter is not built on the mimetic-a0 worker")
-    out = Path(files[0]).resolve().parent / ".khaos_index_rows.tmp.npy" if files else Path(".khaos_index_rows.tmp.npy")
     seen = set()
 
     def progress(row: dict) -> None:
@@ -153,19 +153,19 @@ def index_rows(handle: Handle, files, *, projection, timesteps, noise_seed: int,
             seen.add(row["row"])
             on_row(row["row"], Path(files[row["row"]]), row.get("gradient_norm"))
 
-    r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target}, files, "index"),
-                      "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
-             on_progress=progress)
     from khaos_attribution.gradient import GradientUnavailable, dtype_tag  # noqa: PLC0415
-    if r.get("compute_dtype") and r["compute_dtype"] != dtype_tag(handle.dtype):
-        Path(r["matrix"]).unlink(missing_ok=True)
-        raise GradientUnavailable(f"the worker ran at {r['compute_dtype']}, and the index would record "
-                                  f"{dtype_tag(handle.dtype)}; they must be one precision")
-    try:
-        matrix = np.load(str(r["matrix"]))
-    except (OSError, ValueError) as exc:
-        raise GradientUnavailable(f"the mimetic-a0 measure worker left no readable matrix: {exc}") from exc
-    Path(r["matrix"]).unlink(missing_ok=True)
+    folder = Path(files[0]).resolve().parent if files else Path.cwd()
+    with W.scratch_file(folder, ".khaos_index_rows.", ".npy") as out:
+        r = _ask(handle, {**_base(handle, {"timesteps": timesteps, "noise_seed": noise_seed, "target": target}, files, "index"),
+                          "projection": {"dim": int(projection.dim), "seed": int(projection.seed)}, "out": str(out)},
+                 on_progress=progress)
+        if r.get("compute_dtype") and r["compute_dtype"] != dtype_tag(handle.dtype):
+            raise GradientUnavailable(f"the worker ran at {r['compute_dtype']}, and the index would record "
+                                      f"{dtype_tag(handle.dtype)}; they must be one precision")
+        try:
+            matrix = np.load(str(r["matrix"]))
+        except (OSError, ValueError) as exc:
+            raise GradientUnavailable(f"the mimetic-a0 measure worker left no readable matrix: {exc}") from exc
     if on_row is not None:
         for row in r["rows"]:
             if row["row"] not in seen:
