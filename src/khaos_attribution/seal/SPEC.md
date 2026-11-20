@@ -98,9 +98,9 @@ The label promises that the number resolves to a Register entry, so it is
 an **opaque sequential registration number issued at admission**. This
 module never derives it — not from the record hash, the model or anything
 else — and never generates, allocates, pads or reformats it: it comes in
-from the record and is set exactly as given. **Its format is an open
-question upstream**: it has to fit whatever the watermark payload can
-actually carry, so no digit count is chosen here and none is baked into a
+from the record and is set exactly as given. It is the Guild Register's
+serial for the model (from 65536), which the watermark does not carry: the
+watermark names a bucket many models share. No digit count is baked into a
 validator. The only refusal is a character the glyph table cannot set.
 
 ### Seal punches (within the row group; punch i at x = i × 160)
@@ -199,8 +199,13 @@ never carry meaning.
 `provenance_values(document)` reads the four values from a verified
 document — the Listening Space's provenance endpoint's shape: `record` plus
 `embedded_agrees_with_sidecar`. It **raises `SealRefused`** unless that flag
-is literally `True`. Then, from the record: the number is `watermark_id`,
-as given (see "The number is opaque");
+is literally `True`. Then, from the record: the number is `register_serial`,
+the Guild Register's serial for the model, as given (see "The number is
+opaque"); a record without one rings its `watermark_id`, which only a model
+from before the Register carries as its own: a derived watermark ID is a
+bucket many models share and names none of them. `model_seal_document(card,
+serial=, verified=, derived=)` builds a model's document from its card for
+every room, and refuses a derived bucket that has no serial yet;
 `artist_mark`, `standard_version` and `date_letter` are read from those
 keys when the record carries them, else derived from what it does carry —
 the initials of `artist_name`, the `schema_version` as major.minor, the

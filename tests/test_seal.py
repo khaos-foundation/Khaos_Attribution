@@ -256,3 +256,23 @@ def test_the_foundations_name_is_in_no_filename_module_or_public_identifier():
         assert "khaos" not in name.lower(), name
     for svg in (render_seal(*ARGS), render_marks_row("CG", "1.0", "A")):
         assert 'id="' not in svg or all("khaos" not in i.lower() for i in svg.split('id="')[1:])
+
+
+def test_the_ring_reads_the_register_serial_whenever_the_record_carries_one():
+    """A derived watermark ID names a bucket many models share; the Register's serial names the model."""
+    v = seal.provenance_values({"record": {**RECORD, "register_serial": 65537}, "embedded_agrees_with_sidecar": True})
+    assert v["number"] == "65537"
+
+
+CARD = {"artist_name": "Example Artist", "schema_version": "1.1.0", "training_date": "2026-10-10", "watermark_id": 36388}
+
+
+def test_a_models_seal_document_is_built_once_for_every_room():
+    doc = seal.model_seal_document(CARD, serial=65540, verified=True, derived=True)
+    assert seal.provenance_values(doc)["number"] == "65540"
+    assert seal.provenance_values(seal.model_seal_document(CARD, serial=None, verified=True, derived=False))["number"] == "36388", \
+        "a model from before the Register keeps its own ID"
+    with pytest.raises(seal.SealRefused, match="register"):
+        seal.provenance_values(seal.model_seal_document(CARD, serial=None, verified=True, derived=True))
+    with pytest.raises(seal.SealRefused):
+        seal.provenance_values(seal.model_seal_document(CARD, serial=65540, verified=False, derived=True))
