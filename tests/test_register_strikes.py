@@ -270,3 +270,91 @@ def test_a_move_the_start_takes_from_the_log_has_a_ledger_row(register, tmp_path
     rows = [r for r in store3.ledger() if r["kind"] == "state"]
     assert rows and rows[-1]["serial"] == serial and rows[-1]["detail"] == {"state": "struck", "restored_from_log": True}
     assert store3.ledger_ok()
+
+
+def _lose_a_strike_with_a_piece(register, tmp_path):
+    """A released piece, a strike after the backup, and a recovery from the public copy alone: the model under review."""
+    from register_service.translog import recover
+    app, store, http = register
+    cfg = app.state.cfg
+    key, client, space, warden, signed, serial = _published(register)
+    store.db.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy(cfg["data"] / "register.sqlite3", tmp_path / "backup.sqlite3")
+    _strike(store, warden, signed)
+    for p in cfg["data"].glob("register.sqlite3*"):
+        p.unlink()
+    shutil.rmtree(cfg["data"] / "mirror")
+    shutil.copy(tmp_path / "backup.sqlite3", cfg["data"] / "register.sqlite3")
+    st = create_app(cfg).state.store
+    assert recover(st, log_places(cfg)[3], st.log.signer.public_pem())[0]
+    return cfg, signed, serial, warden
+
+
+def test_a_model_under_review_keeps_its_pieces_out_until_a_warden_answers(register, tmp_path):
+    cfg, signed, serial, warden = _lose_a_strike_with_a_piece(register, tmp_path)
+    app2 = create_app(cfg)
+    http = TestClient(app2)
+    assert serial in http.get("/api/withdrawn").json()["unresolved"]
+    assert not app2.state.index.offered("gen-1"), "the start never restores a model under review"
+    lost = app2.state.store.db.execute("SELECT leaf_hash FROM log_leaves WHERE kind = 'unavailable'").fetchone()["leaf_hash"]
+    warden._post = _Transport(http, warden.key)
+    warden.log_append({"kind": "confirm", "answers": lost, "sitting": "S10"})
+    assert serial not in http.get("/api/withdrawn").json()["unresolved"]
+    assert app2.state.index.offered("gen-1"), "the wardens' answer brings the pieces back"
+
+
+def test_a_record_put_back_from_the_log_takes_its_offer_from_the_log(register, tmp_path):
+    from register_service.translog import recover
+    app, store, http = register
+    cfg = app.state.cfg
+    key, client = _machine(register, "artist-one")
+    _, warden = _machine(register, "artist-two", role="warden")
+    store.db.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy(cfg["data"] / "register.sqlite3", tmp_path / "before-publish.sqlite3")
+    signed = _signed(key)
+    serial = client.publish(signed)["serial"]
+    client.release("gen-1", serial, FP)
+    app.state.index.db.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy(cfg["data"] / "index.sqlite3", tmp_path / "index-before-strike.sqlite3")
+    _strike(store, warden, signed)
+    for name, backup in (("register", "before-publish"), ("index", "index-before-strike")):
+        for p in cfg["data"].glob(f"{name}.sqlite3*"):
+            p.unlink()
+        shutil.copy(tmp_path / f"{backup}.sqlite3", cfg["data"] / f"{name}.sqlite3")
+    st = create_app(cfg).state.store
+    assert recover(st, log_places(cfg)[3], st.log.signer.public_pem())[0]
+    app3 = create_app(cfg)
+    assert app3.state.index.offered("gen-1"), "the index, older than the strike, knows nothing of it yet"
+    client._post = _Transport(TestClient(app3), key)
+    client.publish(signed)
+    assert app3.state.store.state_of(serial) == "struck" and not app3.state.index.offered("gen-1")
+
+
+def test_every_reader_names_an_accounts_withdrawal_as_one(register, tmp_path, capsys):
+    from khaos_attribution.translog import verify as V
+    from tests.test_register_log import run_page_verifier
+    app, store, http = register
+    key, client = _machine(register, "artist-one")
+    signed = _signed(key)
+    serial = client.publish(signed)["serial"]
+    client.withdraw(serial, "asked to")
+    leaf = store.log.admit_leaf_of(signed["record_sha256"])
+    pem = tmp_path / "k.pub"
+    pem.write_text(store.log.signer.public_pem())
+    mirror = app.state.cfg["data"] / "mirror"
+    assert V.main([leaf, "--mirror", str(mirror), "--key", str(pem), "--state", "none"]) == V.PROVED
+    out = capsys.readouterr().out
+    assert "WITHDRAWN by the account that published it: asked to" in out and "STRUCK" not in out
+    page, = run_page_verifier(tmp_path, [(mirror, leaf, store.log.signer.public_pem())])
+    assert "bad|Withdrawn by the account that published it: asked to" in page
+    assert "Withdrawn by the account that published it: asked to" in http.get(f"/models/{serial}").text
+
+
+def test_a_withdraw_entry_reaches_the_public_copy_without_the_delay(register):
+    app, store, http = register
+    key, client, space, warden, signed, serial = _published(register)
+    _strike(store, warden, signed)
+    client.withdraw(serial, "the artist withdrew")
+    public = json.loads((app.state.cfg["data"] / "mirror-public" / "log" / "bodies.json").read_text())
+    entry = json.loads(public["bodies"][store.log.size() - 1])
+    assert entry["kind"] == "withdraw" and public["pending_from"] is not None

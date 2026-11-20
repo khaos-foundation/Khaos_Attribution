@@ -237,7 +237,8 @@ def log_section(entries: list, struck: dict) -> str:
         elif kind == "confirm":
             what = "Confirmed after a recovery" + (f" at {esc(body['sitting'])}" if body.get("sitting") else "")
         elif kind == "revoke":
-            what = f"Struck: {esc(body.get('reason') or '')}" + (f" ({esc(body['sitting'])})" if body.get("sitting") else "")
+            what = (("Withdrawn by the account that published it" if not body.get("appended_by") else "Struck")
+                    + f": {esc(body.get('reason') or '')}" + (f" ({esc(body['sitting'])})" if body.get("sitting") else ""))
         elif kind == "withdraw":
             what = "Withdrawn by the account that published it"
         else:

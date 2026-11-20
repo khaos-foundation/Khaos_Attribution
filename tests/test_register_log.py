@@ -348,7 +348,7 @@ def test_the_browser_verifier_proves_the_same_mirror_and_refuses_a_changed_body_
         (_mirror(app), signed["record_sha256"], pem), (_mirror(app), signed2["record_sha256"], pem),
         (_mirror(app), json.dumps(entry), ""), (changed, leaf, pem), (_mirror(app), leaf, other)])
     assert first[0].startswith("ok|Proved: the admit entry for No. 65536") and not any("cannot check Ed25519" in x for x in first)
-    assert any(x == "bad|Struck: asked to" for x in struck)
+    assert any(x == "bad|Withdrawn by the account that published it: asked to" for x in struck), "an account's own withdrawal"
     assert pasted[0].startswith("ok|Proved: the admit entry for No. 65537") and "pasted, hashed here" in pasted[1]
     assert tampered[0].startswith("bad|Not proved: the body of entry") and "does not hash to its leaf" in tampered[0]
     assert wrong_key[0].startswith("bad|Not proved: the head is signed by key")

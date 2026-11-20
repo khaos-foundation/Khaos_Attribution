@@ -867,8 +867,9 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
             pass
         if was_size > n:
             return None
-    # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing: neither waits.
-    shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat") else b
+    # A withhold names only a leaf and a reason, which a verifier needs; a heartbeat names nothing; a withdraw names only
+    # the record, and a recovery from the public copy alone must not lose it: none waits.
+    shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat", "withdraw") else b
              for i, b in enumerate(snap["bodies"])]
     was = 0 if done is None else done["tree_size"]
     # A body's place can change behind the newest leaf only where the delay's edge moved, or by a withhold.

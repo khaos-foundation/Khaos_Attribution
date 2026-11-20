@@ -323,19 +323,21 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     def sync_offered(serial: int) -> None:
         """The index offers a model's pieces exactly while the store serves it: read after the change committed, under
-        one lock, so the last of two racing changes always decides."""
+        one lock, so the last of two racing changes always decides. A model under review keeps the offer it has."""
         with flag_lock:
             state = store.state_of(serial)
             if state in NOT_SERVED:
                 index.withdraw_model(serial)
-            elif state is not None:
+            elif state is not None and serial not in store.unresolved_serials():
                 index.restore_model(serial)
 
     if store.log.blocked:
         # A store behind its log may have lost a withdrawal: it only ever takes pieces out of the offer.
         index.withdraw_models(store.withdrawn_serials())
     else:
-        index.set_offered(store.served_serials(), store.withdrawn_serials())
+        # Under review, a struck model's pieces may be struck still: only a warden's answer brings them back.
+        under_review = set(store.unresolved_serials())
+        index.set_offered([s for s in store.served_serials() if s not in under_review], store.withdrawn_serials())
         # A model file a failed write or a recovery left missing or stale is written now; a blocked store is behind.
         unresolved_now = set(store.unresolved_serials())
         try:
@@ -410,6 +412,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             serial, counter, already = store.register(signed, key_id, machine["account_id"],
                                                       lambda n, at: R.countersign(signed, n, key, at or now_utc()), mine)
             if not already:
+                # A row put back from the log may come back withdrawn or struck.
+                sync_offered(serial)
                 mirror_quietly(serial)
             return {"serial": serial, "countersignature": counter, "already": already,
                     "page": f"{cfg['public_url']}/models/{serial}"}
@@ -851,10 +855,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 raise HTTPException(422, str(e)) from None
             after = set(store.unresolved_serials())
             moved = out.get("model")
-            if moved:
-                sync_offered(moved["serial"])
-            # Each model whose state or review the entry changed has its public file rewritten.
-            mirror_quietly(*sorted((before ^ after) | ({moved["serial"]} if moved else set())), unresolved=after)
+            # Each model whose state or review the entry changed has its offer set again and its public file rewritten.
+            changed = sorted((before ^ after) | ({moved["serial"]} if moved else set()))
+            for serial in changed:
+                sync_offered(serial)
+            mirror_quietly(*changed, unresolved=after)
             return out
         return await run_in_threadpool(once, body, key_id, work)
 
