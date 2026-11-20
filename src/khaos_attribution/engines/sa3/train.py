@@ -324,7 +324,7 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
                 *([TD.CRN_FLAG] if opts["common_random_numbers"] else []),
                 *(["--lora_checkpoint", str(resume_from)] if resume_from else [])]
     mlx = api.root / MLX_SUBDIR
-    crop = max(2, int(round(window_seconds * DESCRIPTOR.sample_rate / 4096)))
+    crop = max(2, int(round(window_seconds * DESCRIPTOR.sample_rate / int(DESCRIPTOR.rework["frame_samples"]))))
     # The MLX trainer builds each clip's prompt from its sidecar tags; without this config it would train on an
     # EMPTY prompt. The caption (the pre-encoder's "prompt" tag, read from the .txt beside the clip) goes through
     # verbatim: Khaos's captions already carry the trigger phrase.

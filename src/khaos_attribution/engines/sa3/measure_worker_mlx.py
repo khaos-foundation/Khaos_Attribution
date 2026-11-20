@@ -2,13 +2,17 @@
 reply as the torch worker. The forward is the MLX trainer's own (its pre-encoded latents, its conditioning, the
 generation mask), the gradient is MLX's over the adapter's parameters, flattened in the adapter file's key order
 and projected by the contract, so a Mac-trained adapter is measured on the weights it was trained and renders with.
-The request's convention, precision and keep_flat are for comparing the two runtimes; the rooms never send them."""
+A clip's prompt is its pre-encoded latents' own, else the .txt beside it (the torch worker reads only the .txt), and
+an index row here carries no training residual. The request's convention, precision and keep_flat are for comparing
+the two runtimes; the rooms never send them."""
 
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
+
+from khaos_attribution.engines.sa3 import DESCRIPTOR
 
 MLX_DIR = Path.cwd() / "optimized" / "mlx"
 LATENTS_DIRNAME = "latents"
@@ -17,7 +21,7 @@ CHECKPOINT_ABOVE_LATENTS = 1024
 CONVENTIONS = ("mlx", "torch")
 # The trainer's half-precision base; "fp32" is for checks that need the arithmetic exact enough to compare.
 PRECISIONS = ("fp16", "fp32")
-SAMPLES_PER_LATENT = 4096
+SAMPLES_PER_LATENT = int(DESCRIPTOR.rework["frame_samples"])
 _HALF = []
 
 
@@ -147,7 +151,10 @@ def _prepared(mx, item, pair_seed: int, convention: str = "mlx"):
     arr = item["latents"]
     t_lat = arr.shape[-1]
     mask_np = np.zeros((1, t_lat), bool)
-    if convention == "torch" and item.get("samples"):
+    if convention == "torch":
+        if not item.get("samples"):
+            raise RuntimeError("the torch convention counts a clip's frames from its sample count, and this clip's "
+                               "latents name none")
         pm = np.ones(max(1, min(int(round(item["samples"] / SAMPLES_PER_LATENT)), t_lat)), bool)
     else:
         pm = np.asarray(item["padding_mask"] or [1] * t_lat, bool)[:t_lat]
@@ -186,10 +193,24 @@ def _gradient(mx, nn, bundle, paths, prepared, cond, timesteps, target: str):
     return total / float(len(timesteps))
 
 
-def _set_strength(bundle, strength: float) -> None:
+def _unit_scalings(bundle) -> dict:
+    """Each adapter layer's scaling at strength 1, by layer, read by ``loss``, the one command that sets a strength;
+    refused unless the engine scales a layer by alpha / rank, the rule a strength set through the scaling relies on."""
+    from models.defs.lora import iter_trainable_lora_layers  # noqa: PLC0415
+    units = {}
+    for layer in iter_trainable_lora_layers(bundle):
+        if abs(float(layer.scaling) - layer.alpha / layer.rank) > 1e-9 * max(1.0, abs(layer.alpha / layer.rank)):
+            raise RuntimeError(f"an adapter layer's scaling is {layer.scaling}, not alpha / rank "
+                               f"({layer.alpha} / {layer.rank}); its strength cannot be set through it")
+        units[id(layer)] = float(layer.scaling)
+    return units
+
+
+def _set_strength(bundle, strength: float, units: dict) -> None:
+    """Every adapter layer at ``strength`` times its own scaling at strength 1; 0 leaves the base alone."""
     from models.defs.lora import iter_trainable_lora_layers  # noqa: PLC0415
     for layer in iter_trainable_lora_layers(bundle):
-        layer.scaling = float(strength) * layer.alpha / layer.rank
+        layer.scaling = float(strength) * units[id(layer)]
 
 
 def _peak_gb(mx) -> float | None:
@@ -210,8 +231,12 @@ def run(req: dict) -> dict:
     for key in ("timestep_norm", "param_filter", "latent_transform"):
         if req.get(key):
             raise RuntimeError(f"{key} is not built on the MLX worker")
-    if req.get("noise_shared") or str(req.get("target") or "vnorm") in ("vmean", "dmean"):
-        raise RuntimeError("noise_shared and the signed-mean targets are not built on the MLX worker")
+    if req.get("noise_shared"):
+        raise RuntimeError("noise_shared is not built on the MLX worker")
+    target = str(req.get("target") or "vnorm")
+    if target not in ("vnorm", "loss"):
+        raise RuntimeError(f"target {target!r} is not built on the MLX worker: the signed-mean and delta targets are "
+                           "the torch worker's")
     if req.get("param_groups") or req.get("groups_out"):
         raise RuntimeError("block sketches (param_groups) are not built on the MLX worker")
     for key in ("latent_pool", "noise_draws"):
@@ -227,9 +252,6 @@ def run(req: dict) -> dict:
     _HALF[:] = [mx.float32 if precision == "fp32" else mx.float16]
     timesteps = [float(t) for t in req["timesteps"]]
     noise_seed = int(req["noise_seed"])
-    target = str(req.get("target") or "vnorm")
-    if target not in ("vnorm", "loss"):
-        raise RuntimeError(f"target {target!r} is not built on the MLX worker")
     files = [Path(f) for f in req["files"]]
     items = _latents(files, [])
     t_lat = max([it["latents"].shape[-1] for it in items] or [256])
@@ -294,11 +316,12 @@ def run(req: dict) -> dict:
                 vals.append(float(np.mean([float(v) for v in per_t])))
             return float(np.mean(vals))
 
-        _set_strength(bundle, 1.0)
+        units = _unit_scalings(bundle)
+        _set_strength(bundle, 1.0, units)
         with_adapter = mean_loss()
-        _set_strength(bundle, 0.0)
+        _set_strength(bundle, 0.0, units)
         without = mean_loss()
-        _set_strength(bundle, 1.0)
+        _set_strength(bundle, 1.0, units)
         return {**base, "with": with_adapter, "without": without, "n": len(items)}
     raise RuntimeError(f"unknown command {command!r}")
 
