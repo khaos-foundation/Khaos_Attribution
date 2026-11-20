@@ -9,17 +9,23 @@ from khaos_attribution import weights as mirror
 
 import hashlib
 import json
-import os
 import shutil
-import subprocess
 import sys
 import urllib.request
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, runtime_for, venv_python
 from khaos_attribution.engines.sa3.train import BASE_NPZ
+from khaos_attribution.engines import environment as shared_environment
+from khaos_attribution.engines.contract_guard import (CONTRACT_FINGERPRINT, CONTRACT_REPO, CONTRACT_SRC_ENV,  # noqa: F401
+                                                      CONTRACT_WHEEL_ENV, contract_fingerprint, contract_into,
+                                                      contract_mismatch, contract_present, contract_spec,
+                                                      mismatch_words)
+from khaos_attribution.engines.environment import (Report, archive_url, git_usable, make_venv,  # noqa: F401
+                                                   remove_tree, uv_path)
+from khaos_attribution.engines.environment import from_mirror as _from_mirror
+from khaos_attribution.engines.environment import run as _run
 from khaos_attribution.engines.worker_process import host_env
 
 # Stability's CUDA 12.6 build of torch 2.7.1 cannot drive a Blackwell card; its CUDA 12.8 build can.
@@ -41,145 +47,15 @@ PYTHON_VERSION = "3.11"
 BUILD_RECORD = ".khaos-built.json"
 
 
-@dataclass
-class Report:
-    checks: list = field(default_factory=list)
-
-    def ok(self, what: str) -> None:
-        self.checks.append((True, what))
-
-    def bad(self, what: str) -> None:
-        self.checks.append((False, what))
-
-    def note(self, what: str) -> None:
-        """Said, never failed on."""
-        self.checks.append((None, what))
-
-    @property
-    def passed(self) -> bool:
-        return all(ok is not False for ok, _ in self.checks)
-
-    def text(self) -> str:
-        mark = {True: "ok", False: "FAIL", None: "note"}
-        return "\n".join(f"[{mark[ok]}] {what}" for ok, what in self.checks) + \
-            ("\nCHECK OK" if self.passed else "\nCHECK FAILED")
-
-
-def uv_path() -> str:
-    found = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
-    if not Path(found).exists():
-        raise RuntimeError("uv is not installed; the engine's environment is made with it")
-    return found
-
-
-def _run(cmd: list, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
-    # The engine's interpreters never see the room's PYTHONPATH: its packages are not theirs.
-    env = {k: v for k, v in (env if env is not None else host_env()).items() if k != "PYTHONPATH"}
-    return subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
-
-
-def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool = False) -> tuple:
-    """A fresh venv at ``venv`` on Python ``version``, or with ``fallback`` on the Python running this: (ok, note).
-    The note is empty on ``version``, says why on the fallback, and gives uv's own words when nothing can be made."""
-    # A folder left by an earlier failed try holds no interpreter; uv refuses it unless told to replace it.
-    env = {**host_env(), "UV_VENV_CLEAR": "1"}
-    done = _run([uv, "venv", "-q", "--python", version, venv], env=env)
-    note = ""
-    if done.returncode != 0:
-        why = done.stderr.strip()[:400]
-        if not (fallback and (3, 11) <= sys.version_info[:2] <= (3, 12)):
-            return False, f"the engine's Python {version} environment could not be made: {why}"
-        here = f"{sys.version_info.major}.{sys.version_info.minor}"
-        again = _run([uv, "venv", "-q", "--python", sys.executable, venv], env=env)
-        if again.returncode != 0:
-            return False, (f"the engine's Python {version} environment could not be made: {why}; "
-                           f"nor on this Python {here} ({sys.executable}): {again.stderr.strip()[:400]}")
-        note = f"Python {version} could not be had ({why}); the environment was made on this Python {here}"
-    if not python.is_file():
-        return False, f"uv made the environment but left no interpreter at {python}"
-    return True, note
-
-
-def git_usable() -> bool:
-    """Whether git here runs without a dialog: a Mac without the developer tools has a git stub that opens one."""
-    if not shutil.which("git"):
-        return False
-    if sys.platform == "darwin":
-        return _run(["xcode-select", "-p"]).returncode == 0
-    return True
-
-
-def archive_url(repo: str, commit: str) -> str:
-    base = repo[:-4] if repo.endswith(".git") else repo
-    return f"{base}/archive/{commit}.tar.gz"
-
-
 # What an unpacked checkout keeps when it moves to a new pin: its environments and the weights beside them.
 KEPT_ACROSS_PINS = (".venv", "checkpoints", f"{MLX_SUBDIR}/.venv", f"{MLX_SUBDIR}/models/mlx")
 
 
-def remove_tree(path: Path) -> None:
-    """``path`` removed, read-only files too (git marks its objects so on Windows); raises when any of it stays."""
-    import stat  # noqa: PLC0415
-
-    def writable_then_again(func, p, _exc):
-        for q in (p, os.path.dirname(p)):
-            try:
-                os.chmod(q, os.stat(q).st_mode | stat.S_IWRITE | stat.S_IWUSR)
-            except OSError:
-                pass
-        func(p)
-    if path.exists():
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=writable_then_again)
-        else:
-            shutil.rmtree(path, onerror=writable_then_again)
-    if path.exists():
-        raise OSError(f"{path} could not be removed")
-
-
 def unpack_archive(url: str, root: Path, commit: str, kept: tuple = KEPT_ACROSS_PINS) -> None:
-    """Stability's code at the commit from its archive, when git is not usable here: the top folder stripped,
-    the commit recorded in .khaos-commit so the pin can still be read; an earlier unpack's environments and
-    weights carried across."""
-    import io  # noqa: PLC0415
-    import tarfile  # noqa: PLC0415
-    import urllib.request  # noqa: PLC0415
-    from khaos_attribution.engines.pins import COMMIT_FILE  # noqa: PLC0415
-    with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310 — the descriptor's own code repository
-        data = resp.read()
-    part = root.with_name(root.name + ".part")
-    old = root.with_name(root.name + ".old")
-    # Both are cleared before anything of the checkout moves, so a failure leaves it whole.
-    remove_tree(part)
-    remove_tree(old)
-    part.mkdir(parents=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        members = [m for m in tar.getmembers() if "/" in m.name]
-        for m in members:
-            m.name = m.name.split("/", 1)[1]
-        tar.extractall(part, members=members, filter="data")
-    (part / COMMIT_FILE).write_text(commit + "\n", encoding="utf-8")
-    for rel in kept:
-        if (root / rel).exists():
-            (part / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.rmtree(part / rel, ignore_errors=True)
-            shutil.move(str(root / rel), str(part / rel))
-    if root.exists():
-        try:
-            root.replace(old)
-        except OSError:
-            # The checkout could not be set aside (a file in it is open): its environments and weights go back.
-            for rel in kept:
-                if (part / rel).exists():
-                    (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(part / rel), str(root / rel))
-            raise
-    part.replace(root)
-    try:
-        remove_tree(old)
-    except OSError:
-        pass  # the checkout is in place; the next move clears what is left
+    """Stability's code at the commit from its archive, its environments and weights carried across."""
+    shared_environment.unpack_archive(url, root, commit, kept)
+
+
 
 
 MLX_TRAINER = Path("optimized") / "mlx" / "scripts" / "lora_train_mlx.py"
@@ -433,76 +309,6 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     return True, f"the engine's environment installed; {probe_note}" + (f"; {made}" if made else "")
 
 
-CONTRACT_SRC_ENV = "KHAOS_CONTRACT_SRC"
-CONTRACT_WHEEL_ENV = "KHAOS_CONTRACT_WHEEL"
-CONTRACT_REPO = "https://github.com/khaos-foundation/Khaos_Attribution.git"
-
-
-def contract_spec(root: Path) -> str:
-    """Where the contract comes from for the engine's environment: a checkout named in KHAOS_CONTRACT_SRC, a wheel
-    named in KHAOS_CONTRACT_WHEEL (the app ships one), the room's sibling checkout while it holds the code this room
-    imports, else the tagged release of this room's version."""
-    from khaos_attribution import __version__  # noqa: PLC0415
-    from khaos_attribution.engines.pins import contract_code_hash  # noqa: PLC0415
-    src = os.environ.get(CONTRACT_SRC_ENV, "").strip()
-    if src:
-        return src
-    wheel = os.environ.get(CONTRACT_WHEEL_ENV, "").strip()
-    if wheel:
-        return wheel
-    sibling = root.parent / "Khaos_Attribution"
-    package = sibling / "src" / "khaos_attribution"
-    if (sibling / "pyproject.toml").is_file() and package.is_dir() and \
-            contract_code_hash(package).split()[1] == contract_code_hash().split()[1]:
-        return str(sibling)
-    return f"khaos-attribution @ git+{CONTRACT_REPO}@v{__version__}"
-
-
-CONTRACT_FINGERPRINT = "from khaos_attribution.engines.pins import contract_code_hash; print(contract_code_hash())"
-
-
-def contract_fingerprint(python: Path | None = None) -> str | None:
-    """"<version> <hash>" of the contract an interpreter imports (this process's own when None), or None when it
-    imports none or one too old to say."""
-    if python is None:
-        from khaos_attribution.engines.pins import contract_code_hash  # noqa: PLC0415
-        return contract_code_hash()
-    done = _run([python, "-c", CONTRACT_FINGERPRINT])
-    return done.stdout.strip() if done.returncode == 0 else None
-
-
-def contract_mismatch(python: Path) -> str:
-    """Why the engine's environment does not hold this contract, in words."""
-    return mismatch_words(contract_fingerprint(python), contract_fingerprint())
-
-
-def mismatch_words(theirs: str | None, ours: str) -> str:
-    """Why the fingerprint ``theirs`` is not this room's ``ours``, in words."""
-    if not theirs:
-        return "holds no contract, or one older than 0.41.1"
-    if theirs.split()[0] == ours.split()[0]:
-        return f"holds contract {theirs.split()[0]} built from other code than this room's"
-    return f"holds contract {theirs.split()[0]}, this room runs {ours.split()[0]}"
-
-
-def contract_present(python: Path) -> bool:
-    theirs = contract_fingerprint(python)
-    return theirs is not None and theirs == contract_fingerprint()
-
-
-def contract_into(python: Path, root: Path) -> tuple:
-    """The contract's gradient maths into the engine's environment, the version this room runs: the measure worker
-    projects its features with it."""
-    from khaos_attribution import __version__  # noqa: PLC0415
-    # With its base dependencies (jsonschema, numpy): the engine's own pins are Stability's, the contract's are light.
-    done = _run([uv_path(), "pip", "install", "-q", "--python", python, "--reinstall-package", "khaos-attribution", contract_spec(root)])
-    if done.returncode != 0:
-        return False, f"the contract could not be installed into the engine's environment: {done.stderr.strip()[-200:]}"
-    if not contract_present(python):
-        return False, f"khaos-attribution was installed into the engine's environment, but it {contract_mismatch(python)}"
-    return True, f"khaos-attribution {__version__} in the engine's environment"
-
-
 def cached(repo: str, filenames: list) -> bool:
     """Whether the Hugging Face cache holds every named file of the repo: the only place Stability's torch
     package reads weights from."""
@@ -565,14 +371,6 @@ def _mlx_from_mirror(repo: str, mlx: Path, components: list) -> str | None:
         return by_name.get(name) or f"{folder}/{name}"
 
     return mirror.fetch_into_dir(repo, mlx, [f"{MLX_REPO_DIR}/{n}" for n in by_name] + ["LICENSE*", "NOTICE"], place=place)
-
-
-def _from_mirror(fetch) -> bool:
-    """Whether the mirror served the set; a mirror that cannot is a fallback to the hub, never an error here."""
-    try:
-        return fetch() is not None
-    except (mirror.MirrorError, OSError):
-        return False
 
 
 def mlx_base_link(root: Path, weights_dir: Path) -> Path:

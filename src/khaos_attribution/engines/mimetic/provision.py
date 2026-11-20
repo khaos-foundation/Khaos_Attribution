@@ -12,8 +12,11 @@ from khaos_attribution import weights as mirror
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import find_root, venv_python
 from khaos_attribution.engines.worker_process import host_env
-from khaos_attribution.engines.sa3.provision import (Report, _from_mirror, _run, archive_url, contract_into, contract_mismatch,
-                                                     contract_present, git_usable, make_venv, unpack_archive, uv_path)
+from khaos_attribution.engines.contract_guard import contract_into, contract_mismatch, contract_present
+from khaos_attribution.engines.environment import (Report, archive_url, git_usable, make_venv, unpack_archive,
+                                                   uv_path)
+from khaos_attribution.engines.environment import from_mirror as _from_mirror
+from khaos_attribution.engines.environment import run as _run
 
 PYTHON_VERSION = "3.11"
 # The engine's lock takes torch from the CUDA 12.6 index on Linux, which cannot drive a Blackwell card; 12.8 can.

@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from khaos_attribution.engines.memory import (LOW_MEMORY_OVERRIDE_ENV, SYSTEM_RESERVE_GB, machine_memory_gb,  # noqa: F401
+                                             physical_memory_gb)
 from khaos_attribution.engines.acestep import DESCRIPTOR
 from khaos_attribution.engines.acestep.render import flush_accelerator
 
@@ -21,33 +23,12 @@ SCORER_CHECKPOINTED_GB_PER_SEC = float(_SCORER["checkpointed_gb_per_sec"])
 SCORER_PROCESS_GB = float(_SCORER["process_gb"])
 ENGINE_RESIDENT_GB = float(_MEMORY["resident_gb"])
 ENGINE_YIELDED_GB = float(_MEMORY["yielded_gb"])
-# What the machine keeps for itself whatever is scored, and the override that lets a small machine try anyway.
-SYSTEM_RESERVE_GB = 6.0
-LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
 
 __all__ = ["ENGINE_RESIDENT_GB", "ENGINE_YIELDED_GB", "LOW_MEMORY_OVERRIDE_ENV", "SCORER_BASE_GB",
            "SCORER_CHECKPOINTED_GB", "SCORER_CHECKPOINTED_GB_PER_SEC", "SCORER_GB_PER_SEC", "SCORER_PROCESS_GB",
            "SYSTEM_RESERVE_GB", "enable_checkpointing", "flush_accelerator", "index_rows", "machine_memory_gb",
            "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "physical_memory_gb",
            "scorer_need_gb"]
-
-
-def physical_memory_gb() -> float | None:
-    try:
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1024 ** 3
-    except (ValueError, OSError, AttributeError):
-        return None
-
-
-def machine_memory_gb(device_type: str) -> float | None:
-    """The memory the scorer shares: the card's on cuda, the machine's elsewhere."""
-    if device_type == "cuda":
-        try:
-            import torch  # noqa: PLC0415
-            return torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
-        except Exception:  # noqa: BLE001
-            return None
-    return physical_memory_gb()
 
 
 def scorer_need_gb(duration_sec: float, *, checkpointed: bool = False) -> float:

@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from khaos_attribution.engines import contract_guard as CG
+from khaos_attribution.engines import environment as EN
 from khaos_attribution.engines.sa3 import provision as P
+
+
+def _patch(monkeypatch, name, fake):
+    """A shared environment helper, patched both where sa3's provision binds it and in the shared module."""
+    monkeypatch.setattr(P, {"run": "_run"}.get(name, name), fake)
+    monkeypatch.setattr(EN, name, fake)
 
 
 def _done(code=0, out="", err=""):
@@ -16,7 +24,7 @@ def _done(code=0, out="", err=""):
 
 def test_check_reports_a_missing_checkout_and_changes_nothing(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: calls.append(cmd) or _done())
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: calls.append(cmd) or _done())
     report = P.provision(tmp_path / "sa3", tmp_path / "w", device="cuda", check_only=True)
     assert not report.passed and "not cloned" in report.text() and "CHECK FAILED" in report.text()
     assert calls == [] and not (tmp_path / "sa3").exists()
@@ -35,7 +43,7 @@ def test_check_compares_the_pin_and_the_environment_and_each_weight(tmp_path, mo
         if "-c" in cmd and "import torch" in cmd[-1]:
             return _done(0, "ok")
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
+    _patch(monkeypatch, "run", fake_run)
     monkeypatch.setattr(P, "contract_present", lambda python: True)
     (root / ".venv" / "bin").mkdir(parents=True)
     (root / ".venv" / "bin" / "python").write_text("")
@@ -69,7 +77,7 @@ def test_an_install_fills_the_cache_through_the_engines_own_downloader(tmp_path,
         if "snapshot_download" in " ".join(cmd):
             return _done(1, err="Connection timed out") if calls and sum("snapshot_download" in " ".join(c) for c, _ in calls) > 1 else _done()
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
+    _patch(monkeypatch, "run", fake_run)
     monkeypatch.setattr(P, "contract_present", lambda python: True)
     monkeypatch.setattr(P, "cached", lambda repo, files: any("snapshot_download" in " ".join(c) and c[-2] == repo for c, _ in calls))
     report = P.provision(root, tmp_path / "w", device="cuda")
@@ -111,7 +119,7 @@ def test_without_git_the_code_comes_from_the_archive_at_the_pin(tmp_path, monkey
 def test_a_moved_pin_is_named_not_moved_under_check(tmp_path, monkeypatch):
     root = tmp_path / "sa3"
     (root / ".git").mkdir(parents=True)
-    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: _done(out="deadbeef" * 5 + "\n") if "rev-parse" in [str(c) for c in cmd] else _done())
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: _done(out="deadbeef" * 5 + "\n") if "rev-parse" in [str(c) for c in cmd] else _done())
     ok, note = P.checkout(root, check_only=True)
     assert not ok and "pin is" in note
 
@@ -123,7 +131,7 @@ def test_the_mlx_runtime_wants_the_exported_base_weights(tmp_path, monkeypatch):
     mlx_python.parent.mkdir(parents=True)
     mlx_python.write_text("")
     pin = P.DESCRIPTOR.commit
-    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: _done(out=pin + "\n") if "rev-parse" in [str(c) for c in cmd] else _done(0, "ok"))
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: _done(out=pin + "\n") if "rev-parse" in [str(c) for c in cmd] else _done(0, "ok"))
     weights = tmp_path / "w"
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
     mlx = root / "optimized" / "mlx"
@@ -199,7 +207,7 @@ def _no_git_here(monkeypatch):
         if cmd and str(cmd[0]) == "git":
             raise FileNotFoundError(2, "The system cannot find the file specified")
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
+    _patch(monkeypatch, "run", fake_run)
 
 
 def test_a_clone_at_the_pin_needs_no_git_to_be_read(tmp_path, monkeypatch):
@@ -289,7 +297,7 @@ def test_a_leftover_that_cannot_be_cleared_stops_the_move_before_anything_moves(
         if path.name == "sa3.old":
             raise OSError(f"{path} could not be removed")
         real(path)
-    monkeypatch.setattr(P, "remove_tree", stuck)
+    _patch(monkeypatch, "remove_tree", stuck)
     import io
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: io.BytesIO(b""))
@@ -344,7 +352,7 @@ def test_a_fresh_clone_off_the_pin_is_moved_by_git_not_replaced(tmp_path, monkey
         if "rev-parse" in cmd:
             return _done(out="1" * 40 + "\n")
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
+    _patch(monkeypatch, "run", fake_run)
     monkeypatch.setattr(P, "unpack_archive", lambda *a, **k: pytest.fail("the archive replaced a git clone"))
     ok, note = P.checkout(root)
     assert ok and note == f"checked out {P.DESCRIPTOR.commit[:12]}"
@@ -373,8 +381,8 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
         if "-c" in cmd and "import torch" in cmd[-1]:
             return _done(0, "ok")
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "contract_present", lambda python: True)
     monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
@@ -414,12 +422,12 @@ def test_the_contract_comes_from_the_nearest_source(tmp_path, monkeypatch):
 
 def test_the_contract_counts_as_present_only_when_its_code_is_the_same(tmp_path, monkeypatch):
     """A version string alone would pass an engine environment holding older code of the same version."""
-    here = P.contract_fingerprint()
+    here = CG.contract_fingerprint()
     assert here and here.split()[0] == __import__("khaos_attribution").__version__
-    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: here if python is None else here.split()[0] + " other")
-    assert not P.contract_present(tmp_path / "python")
-    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: here)
-    assert P.contract_present(tmp_path / "python")
+    monkeypatch.setattr(CG, "contract_fingerprint", lambda python=None: here if python is None else here.split()[0] + " other")
+    assert not CG.contract_present(tmp_path / "python")
+    monkeypatch.setattr(CG, "contract_fingerprint", lambda python=None: here)
+    assert CG.contract_present(tmp_path / "python")
 
 
 def test_the_contract_hash_ignores_line_endings_and_names_a_same_version_mismatch(tmp_path, monkeypatch):
@@ -429,11 +437,11 @@ def test_the_contract_hash_ignores_line_endings_and_names_a_same_version_mismatc
         (tmp_path / name).mkdir()
         (tmp_path / name / "m.py").write_bytes(text)
     assert contract_code_hash(tmp_path / "lf").split()[1] == contract_code_hash(tmp_path / "crlf").split()[1]
-    ours = P.contract_fingerprint()
-    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: ours if python is None else ours.split()[0] + " other")
-    assert "built from other code" in P.contract_mismatch(tmp_path / "python")
-    monkeypatch.setattr(P, "contract_fingerprint", lambda python=None: ours if python is None else None)
-    assert "older than" in P.contract_mismatch(tmp_path / "python")
+    ours = CG.contract_fingerprint()
+    monkeypatch.setattr(CG, "contract_fingerprint", lambda python=None: ours if python is None else ours.split()[0] + " other")
+    assert "built from other code" in CG.contract_mismatch(tmp_path / "python")
+    monkeypatch.setattr(CG, "contract_fingerprint", lambda python=None: ours if python is None else None)
+    assert "older than" in CG.contract_mismatch(tmp_path / "python")
 
 
 def test_flash_attention_comes_ready_made_on_linux_and_matches_the_pins(monkeypatch):
@@ -458,8 +466,8 @@ def _torch_env_fakes(monkeypatch, root, venv_result, seen):
         if "export" in cmd:
             return _done(out="einops==0.8.0\n")
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
 
 
 def test_a_venv_uv_cannot_make_is_reported_in_uvs_words_and_nothing_installs(tmp_path, monkeypatch):
@@ -495,6 +503,7 @@ def test_mimetic_stops_at_a_venv_uv_cannot_make_and_leaves_no_folder(tmp_path, m
     _torch_env_fakes(monkeypatch, root, _done(2, err="error: No interpreter found for Python 3.11"), seen)
     monkeypatch.setattr(M, "_run", P._run)
     monkeypatch.setattr(M, "uv_path", lambda: "uv")
+    monkeypatch.setattr(EN, "uv_path", lambda: "uv")
     ok, note = M.environment(root, "cuda")
     assert not ok and "No interpreter found" in note, note
     assert not (root / ".venv").exists()
@@ -518,8 +527,8 @@ def test_where_uv_cannot_get_the_pinned_python_the_running_one_stands_in(tmp_pat
         if "export" in cmd:
             return _done(out="einops==0.8.0\n")
         return _done(0, "ok")
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
     monkeypatch.setattr(P, "WINDOWS", True)
     ok, note = P.environment(root, "torch")
@@ -560,7 +569,7 @@ def test_off_windows_there_is_no_fallback(tmp_path, monkeypatch):
 def test_the_fallback_takes_only_a_python_from_3_11_to_3_12(monkeypatch, tmp_path):
     """A running Python outside the range the engine and the contract take is refused, with uv's first reason."""
     calls = []
-    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: calls.append(cmd) or _done(2, err="error: no 3.11"))
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: calls.append(cmd) or _done(2, err="error: no 3.11"))
     for version in ((3, 10, 0), (3, 13, 0)):
         monkeypatch.setattr(P.sys, "version_info", version)
         calls.clear()
@@ -586,8 +595,8 @@ def test_an_environment_whose_interpreter_cannot_start_is_made_again(tmp_path, m
         if "export" in cmd:
             return _done(out="einops==0.8.0\n")
         return _done()
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
     P.environment(root, "torch")
     venv_at = next(i for i, c in enumerate(seen) if "venv" in c)
@@ -596,14 +605,14 @@ def test_an_environment_whose_interpreter_cannot_start_is_made_again(tmp_path, m
 
 def test_an_install_that_leaves_another_contract_is_refused_in_words(tmp_path, monkeypatch):
     """The contract is read back from the engine's environment after it is installed, never assumed."""
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
-    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: _done())
-    monkeypatch.setattr(P, "contract_present", lambda python: False)
-    monkeypatch.setattr(P, "contract_mismatch", lambda python: "holds contract 0.41.0, this room runs 0.57.0")
-    ok, note = P.contract_into(tmp_path / "python", tmp_path)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: _done())
+    monkeypatch.setattr(CG, "contract_present", lambda python: False)
+    monkeypatch.setattr(CG, "contract_mismatch", lambda python: "holds contract 0.41.0, this room runs 0.57.0")
+    ok, note = CG.contract_into(tmp_path / "python", tmp_path)
     assert not ok and "holds contract 0.41.0, this room runs 0.57.0" in note
-    monkeypatch.setattr(P, "contract_present", lambda python: True)
-    assert P.contract_into(tmp_path / "python", tmp_path)[0]
+    monkeypatch.setattr(CG, "contract_present", lambda python: True)
+    assert CG.contract_into(tmp_path / "python", tmp_path)[0]
 
 
 def _built_env(tmp_path, monkeypatch, record=None, lock=b"lock v1\n"):
@@ -623,8 +632,8 @@ def _built_env(tmp_path, monkeypatch, record=None, lock=b"lock v1\n"):
         if "export" in cmd:
             return _done(out="einops==0.8.0\n")
         return _done(0, "ok")
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "contract_present", lambda python: True)
     monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
     return root, seen
@@ -683,8 +692,8 @@ def test_a_fresh_build_pins_every_extra_and_records_itself(tmp_path, monkeypatch
         if "export" in cmd:
             return _done(out="einops==0.8.0\n")
         return _done(0, "ok")
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
     ok, note = P.environment(root, "torch")
     assert ok, note
@@ -728,8 +737,8 @@ def test_a_failed_flash_attention_fetch_stops_the_install_with_its_reason(tmp_pa
         if "export" in cmd:
             return _done(out="einops==0.8.0\n")
         return _done(0, "ok")
-    monkeypatch.setattr(P, "_run", fake_run)
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", fake_run)
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "flash_attn_requirement", lambda machine=None: P.FLASH_ATTN_WHEEL)
     monkeypatch.setattr(P, "fetch_flash_attn", lambda work: (None, "the wheel did not match its sha256"))
     ok, note = P.environment(root, "torch")
@@ -788,8 +797,8 @@ def test_an_mlx_environment_built_at_another_pin_fails_the_check_and_runs_the_po
     (root / P.MLX_SUBDIR / "requirements.txt").write_text("mlx==0.1\n")
     (python.parent.parent / P.BUILD_RECORD).write_text(json.dumps({"commit": "1" * 40, "lock_sha256": "x"}))
     seen = []
-    monkeypatch.setattr(P, "_run", lambda cmd, cwd=None, env=None: seen.append([str(c) for c in cmd]) or _done(0, "ok"))
-    monkeypatch.setattr(P, "uv_path", lambda: "uv")
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: seen.append([str(c) for c in cmd]) or _done(0, "ok"))
+    _patch(monkeypatch, "uv_path", lambda: "uv")
     monkeypatch.setattr(P, "contract_present", lambda python: True)
     monkeypatch.setattr(P, "contract_into", lambda python, root: (True, "contract"))
     ok, note = P.environment(root, "mlx", check_only=True)

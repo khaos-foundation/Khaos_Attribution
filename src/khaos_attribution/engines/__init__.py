@@ -64,6 +64,30 @@ class Engine(Protocol):
     def measure(self): ...
 
 
+class Slots:
+    """An engine's slots, each its package's module of that name, imported on first use so reading the descriptor
+    never loads a model."""
+    package: str = ""
+    descriptor: Descriptor | None = None
+
+    @property
+    def render(self):
+        return importlib.import_module(self.package + ".render")
+
+    @property
+    def train(self):
+        return importlib.import_module(self.package + ".train")
+
+    @property
+    def measure(self):
+        return importlib.import_module(self.package + ".measure")
+
+
+def slots(package: str, descriptor: Descriptor) -> type:
+    """The Engine class an engine package exports: its descriptor and its three slots."""
+    return type("Engine", (Slots,), {"package": package, "descriptor": descriptor})
+
+
 # The conditioning a generation form offers as controls, in the order the forms show them.
 MUSICAL_CONDITIONING = (("tempo", "tempo"), ("key", "key"), ("time_signature", "time signature"))
 # Every rework mode a room offers and what the room calls doing it.

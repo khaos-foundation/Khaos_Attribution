@@ -5,16 +5,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from khaos_attribution.engines.memory import (LOW_MEMORY_OVERRIDE_ENV, SYSTEM_RESERVE_GB,  # noqa: F401
+                                             process_memory_plan, process_scorer_need_gb)
 from khaos_attribution.engines.mimetic import DESCRIPTOR
-
-SYSTEM_RESERVE_GB = 6.0
-LOW_MEMORY_OVERRIDE_ENV = "KHAOS_INFLUENCE_LOW_MEMORY"
 
 __all__ = ["Handle", "LOW_MEMORY_OVERRIDE_ENV", "ROW_PREFIX", "SYSTEM_RESERVE_GB", "expected_dtype", "enable_checkpointing", "flush_accelerator",
            "index_rows", "memory_plan", "output_feature", "output_loss", "paired_loss", "parameter_count", "scorer_need_gb"]
-
-
-_SCORER = DESCRIPTOR.memory.get("scorer") or {}
 
 
 def expected_dtype(device_type: str) -> str:
@@ -22,36 +18,14 @@ def expected_dtype(device_type: str) -> str:
     return "fp32"
 
 
-def _scorer(device_type: str) -> dict:
-    """The worker's measured peak on a device type: CUDA's under "scorer", any other under "scorer_<device>"."""
-    if device_type == "cuda":
-        return _SCORER
-    return DESCRIPTOR.memory.get(f"scorer_{device_type}") or {}
-
-
 def scorer_need_gb(duration_sec: float, *, checkpointed: bool = False, device_type: str = "cuda") -> float:
     """What the feature worker needs on the device for any clip up to the longest the Workshop cuts."""
-    s = _scorer(device_type)
-    if not s.get("base_gb"):
-        raise NotImplementedError(f"{DESCRIPTOR.name}'s measure has not been measured on {device_type}")
-    return float(s["base_gb"]) + float(s.get("process_gb") or 0.0)
+    return process_scorer_need_gb(DESCRIPTOR, device_type)
 
 
 def memory_plan(device_type: str, duration_sec: float, *, total_gb: float | None = None, env: dict | None = None) -> dict:
-    """The worker runs in its own process on the device, so the plan is one number against the device's memory;
-    nothing is checkpointed and nothing of the engine is resident to yield."""
-    import os as _os  # noqa: PLC0415
-    from khaos_attribution.engines.acestep.measure import machine_memory_gb  # noqa: PLC0415
-    if not _scorer(device_type).get("base_gb"):
-        return {"fits": None, "checkpointed": False, "need_gb": None, "total_gb": total_gb,
-                "refusal": f"{DESCRIPTOR.name}'s features have not been measured on {device_type}; this machine scores on {device_type}"}
-    total = machine_memory_gb(device_type) if total_gb is None else total_gb
-    need = scorer_need_gb(duration_sec, device_type=device_type)
-    plan = {"fits": "resident", "checkpointed": False, "need_gb": round(need, 1), "total_gb": total, "refusal": None}
-    if total is None or need + SYSTEM_RESERVE_GB <= total or (env if env is not None else _os.environ).get(LOW_MEMORY_OVERRIDE_ENV) == "1":
-        return plan
-    return {**plan, "fits": None, "refusal": (f"measuring an output on {DESCRIPTOR.name} needs about {need + SYSTEM_RESERVE_GB:.0f} GB on the "
-                                              f"device, and this one has {total:.0f} GB")}
+    """One number, the worker's measured peak, against the device's memory: nothing is resident to yield."""
+    return process_memory_plan(DESCRIPTOR, device_type, total_gb=total_gb, env=env)
 
 
 def enable_checkpointing(module: Any) -> int:

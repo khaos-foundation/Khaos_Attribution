@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from khaos_attribution.engines.train import NoLossHooks
+from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.mock import DESCRIPTOR
 from khaos_attribution.engines.train import TrainingUnavailable
 
@@ -48,13 +50,8 @@ def pair_files(tensor_dir) -> list:
     return sorted(Path(tensor_dir).glob("*.pt"))
 
 
-def adapter_file_in(directory) -> Path | None:
-    directory = Path(directory)
-    for name in DESCRIPTOR.adapter["filenames"]:
-        if (directory / name).is_file():
-            return directory / name
-    files = sorted(directory.glob("*.safetensors"))
-    return files[0] if files else None
+def adapter_file_in(directory: Path | str) -> Path | None:
+    return _adapter_file_in(directory, DESCRIPTOR)
 
 
 def preprocess_pairs(api: TrainingApi, *, out_dir, checkpoint_root=None, variant=None, dataset_json=None, device="cpu",
@@ -75,19 +72,7 @@ def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=No
 from khaos_attribution.engines.train import TrainingUpdate  # noqa: E402
 
 
-class LossHooks:
-    def __init__(self, record_into=None):
-        self.flags = {"masked_loss": False, "length_buckets": False}
-        self._record_into = record_into
-
-    def manifest_fields(self) -> dict:
-        return {}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return None
+LossHooks = NoLossHooks
 
 
 class Session:

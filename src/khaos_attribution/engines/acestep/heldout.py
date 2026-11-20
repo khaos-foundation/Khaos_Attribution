@@ -4,38 +4,12 @@ rules that read the history stay in the room; the forward lives with the engine.
 
 from __future__ import annotations
 
-import zlib
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from khaos_attribution.engines.heldout import (DEFAULT_BUCKETS, HIGH_NOISE_T, bucket_key, bucket_timesteps,  # noqa: F401
+                                              pair_noise_seed, summary_of)
 from khaos_attribution.identifiers import track_of_segment
-
-# Buckets at or above this timestep are the high-noise band, the one that turns first when an adapter memorises.
-HIGH_NOISE_T = 0.8
-DEFAULT_BUCKETS = 10
-
-
-def bucket_timesteps(n_buckets: int = DEFAULT_BUCKETS) -> list[float]:
-    """Bucket centres on (0, 1): ``(i + 0.5) / n`` — for ten buckets,
-    0.05 … 0.95. Centres rather than edges so no bucket sits at t = 0
-    (pure data, trivial) or t = 1 (pure noise, no signal)."""
-    if n_buckets < 1:
-        raise ValueError("n_buckets must be >= 1")
-    return [round((i + 0.5) / n_buckets, 6) for i in range(int(n_buckets))]
-
-
-def bucket_key(t: float) -> str:
-    """The JSON key of a bucket — fixed two decimals so rows from
-    different evaluations line up as columns."""
-    return f"{t:.2f}"
-
-
-def pair_noise_seed(seed: int, pair_name: str) -> int:
-    """Per-pair noise seed: run seed mixed with a CRC of the pair's file
-    name. Deterministic across machines and independent of iteration
-    order (a sorted-glob order would silently change the noise if a pair
-    were added)."""
-    return (int(seed) * 1_000_003 + zlib.crc32(pair_name.encode("utf-8"))) % (2**31 - 1)
 
 
 def evaluate_heldout(
@@ -81,28 +55,7 @@ def evaluate_heldout(
             sums[bucket_key(t)] += mse
             row["sums"][bucket_key(t)] += mse
 
-    n = len(samples)
-    buckets = {k: v / n for k, v in sums.items()}
-    high = [buckets[bucket_key(t)] for t in ts if t >= HIGH_NOISE_T]
-
-    by_track = {}
-    for track, row in sorted(per_track.items()):
-        tb = {k: v / row["n_pairs"] for k, v in row["sums"].items()}
-        th = [tb[bucket_key(t)] for t in ts if t >= HIGH_NOISE_T]
-        by_track[track] = {
-            "mean": sum(tb.values()) / len(tb),
-            "high_noise": (sum(th) / len(th)) if th else None,
-            "n_pairs": row["n_pairs"],
-        }
-
-    return {
-        "buckets": buckets,
-        "mean": sum(buckets.values()) / len(buckets),
-        "high_noise": (sum(high) / len(high)) if high else None,
-        "n_pairs": n,
-        "timesteps": [float(t) for t in ts],
-        "by_track": by_track,
-    }
+    return summary_of(sums, per_track, len(samples), ts)
 
 
 def _target_of(sample: Any):
