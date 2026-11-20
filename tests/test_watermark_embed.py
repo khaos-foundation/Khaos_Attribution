@@ -21,19 +21,26 @@ class _Generator:
 
 
 class _Detector:
-    """Reads the id clean from ``needs`` strong, with one bit wrong from ``needs_one``, and with two wrong below."""
+    """Reads the id clean from ``needs`` strong, with one bit wrong from ``needs_one``, and with two wrong below; every
+    frame reads as marked, and each bit's logit says the bit."""
+
+    normalizer = None
 
     def __init__(self, needs: float, needs_one: float = 0.0):
         self.needs, self.needs_one = needs, needs_one
 
-    def detect_watermark(self, x, sample_rate=None):
+    def detector(self, x):
         strength = float(x.abs().max()) / 1e-3
         bits = [(WATERMARK_ID >> (15 - i)) & 1 for i in range(16)]
         if strength + 1e-6 < self.needs:
             bits[3] ^= 1
             if strength + 1e-6 < self.needs_one:
                 bits[9] ^= 1
-        return torch.tensor(0.99), torch.tensor([bits], dtype=torch.float32)
+        out = torch.zeros(1, 18, x.shape[-1])
+        out[:, 1, :] = 5.0
+        for i, bit in enumerate(bits):
+            out[:, 2 + i, :] = 1.0 if bit else -1.0
+        return out
 
 
 def _install(monkeypatch, needs, needs_one=None):
@@ -75,3 +82,38 @@ def test_a_mark_that_never_reads_back_is_kept_at_the_strongest_with_a_warning(mo
     assert strength == W.Watermarker.STRENGTHS[-1] == 2.0
     assert np.allclose(marked, 2e-3, atol=1e-6)
     assert "does not read back" in caplog.text
+
+
+def test_a_long_recordings_mark_reads_back_across_windows(monkeypatch):
+    """Past one window the read-back counts every window together and settles on the same strength as a short one."""
+    _install(monkeypatch, needs=1.4)
+    long = np.zeros((70 * SR, 2), dtype=np.float32)
+    assert len(W.detect_windows(len(long), SR)) == 3
+    marked, strength = W.Watermarker.embed_verified(long, SR, WATERMARK_ID)
+    assert strength == 1.5 and marked.shape == long.shape
+    assert W.Watermarker.detect_array(marked, SR)[1:] == (WATERMARK_ID, False)
+
+
+@pytest.mark.parametrize("marked_s", [0, 5])
+def test_one_window_is_audioseals_own_whole_reading_with_the_real_detector(marked_s):
+    """With the real 16-bit detector, a short recording's reading equals AudioSeal's detect_watermark exactly, unmarked
+    and with half its frames marked."""
+    try:
+        _, detector = W._load_models()
+    except Exception as exc:  # noqa: BLE001 — the weights are fetched by the rooms' installers, not by this suite
+        pytest.skip(f"AudioSeal's weights are not here: {exc}")
+    audio = (np.random.default_rng(7).standard_normal((10 * SR, 2)) * 0.1).astype(np.float32)
+    if marked_s:
+        audio[: marked_s * SR] = W.Watermarker.embed_array(audio[: marked_s * SR], SR, WATERMARK_ID)
+    mono = torch.from_numpy(audio).float().T.mean(dim=0, keepdim=True).unsqueeze(0)
+    with torch.inference_mode():
+        probability, message = detector.detect_watermark(mono, SR)
+    if marked_s:
+        assert 0.2 < float(probability) < 0.8, "the half-marked clip must read some frames each way"
+    raw = 0
+    for bit in message[0].tolist():
+        raw = (raw << 1) | int(bit)
+    decoded = W.decode_codeword(raw)
+    expected = (float(probability), *((None, False) if decoded is None else decoded[1:]))
+    got = W.Watermarker.detect_array(audio, SR)
+    assert abs(got[0] - expected[0]) < 1e-6 and got[1:] == expected[1:]
