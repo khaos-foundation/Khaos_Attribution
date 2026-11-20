@@ -220,8 +220,9 @@ def evidence_review_key(track):
     """What an operator's approval binds to: the matches and the evidence, so new evidence needs a new approval and a
     change of names or rights does not."""
     import hashlib  # noqa: PLC0415
+    from khaos_attribution.canonical import compact  # noqa: PLC0415
     body = {"track_id": track["track_id"], "state": track["state"], "matches": track["matches"], "evidence": track["evidence"]}
-    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+    return hashlib.sha256(compact(body)).hexdigest()
 
 
 def _check_groups(groups):

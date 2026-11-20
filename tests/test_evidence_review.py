@@ -47,3 +47,8 @@ def test_the_key_moves_with_the_evidence_and_the_matches_and_not_with_the_names_
         same = copy.deepcopy(TRACK)
         change(same)
         assert evidence_review_key(same) == k
+
+
+def test_the_key_of_a_recorded_review_is_the_hash_it_always_had():
+    """An approval binds to this key, so moving its serialisation to canonical.compact changes no byte of it."""
+    assert evidence_review_key(TRACK) == "55b8f8a4995d42bfa92d972db88fe8c2ef2907e1c3d8c5a3e1223f1b4d2777b8"
