@@ -206,7 +206,9 @@ def _session_api(tmp_path, seen: dict):
     def cfg_cls(adapter_type=None, model_variant=None, checkpoint_dir=None, dataset_dir=None, output_dir=None,
                 learning_rate=None, batch_size=None, max_epochs=None, seed=None, precision=None, device=None,
                 save_every_n_epochs=None, resume_from=None, linear_dim=None, linear_alpha=None, factor=None,
-                weight_decompose=None, attention_type=None, target_modules=None):
+                weight_decompose=None, attention_type=None, target_modules=None, weight_decay=None,
+                gradient_accumulation_steps=None, gradient_checkpointing=None, num_workers=None, pin_memory=None,
+                persistent_workers=None, prefetch_factor=None, scheduler_type=None):
         return dict(locals())
 
     def save_final(trainer, out_dir):
