@@ -27,7 +27,8 @@ CASES = SELFTEST.load_cases(HOOKS / "guard_cases.json")
 TABLE = [case for case in CASES if "raw" not in case]
 # A guard.sh that names folders guards them under the root above; one that names none guards this repository.
 NAMES, FLAGS = SELFTEST.guard_sh_args(GUARD_SH)
-needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="no bash here to run the hook")
+# The table only grows: a shorter one was cut, and would pass with fewer rows checked.
+LEAST_ROWS = 429
 
 
 def _named(case):
@@ -46,6 +47,12 @@ def places(tmp_path_factory):
 
 def _root(places):
     return places["{ROOT}" if NAMES else "{REPO}"]
+
+
+def test_the_table_is_whole_and_the_launcher_can_run():
+    """An empty or cut table would pass with nothing checked; the settings run guard.sh with bash, so it must be here."""
+    assert len(TABLE) >= LEAST_ROWS, f"guard_cases.json holds {len(TABLE)} rows, fewer than {LEAST_ROWS}"
+    assert shutil.which("bash"), "no bash here: the settings run guard.sh with it, so the guard cannot run either"
 
 
 @pytest.mark.parametrize("case", TABLE, ids=_named)
@@ -70,14 +77,12 @@ if os.name == "nt":
         assert ("refused" if why else "allowed") == case["expect"], why
 
 
-@needs_bash
 @pytest.mark.parametrize("case", SELFTEST.launched(CASES), ids=_named)
 def test_the_launcher_gives_the_guards_answer(case, guard, places):
     """guard.sh is what the settings run: it hands the call to guard.py and carries its answer in the exit code."""
     assert SELFTEST.launcher_wrong(guard, GUARD_SH, case, places, _root(places), NAMES, FLAGS) is None
 
 
-@needs_bash
 @pytest.mark.parametrize("title", list(SELFTEST.NO_PYTHON))
 def test_the_launcher_refuses_when_no_python_answers(title, tmp_path):
     """A python that does not run (Windows' Store stub) or a guard that crashes refuses the call, never allows it."""
