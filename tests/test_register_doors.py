@@ -51,6 +51,7 @@ def test_a_wardens_machine_releases_no_piece(register):
     ("https://space.example/", "https://space.example"),
     ("https://Space.Example:8443/artists/x?y=1", "https://space.example:8443"),
     ("http://127.0.0.1:8000", "http://127.0.0.1:8000"),
+    ("http://localhost:8000/", "http://localhost:8000"),
 ])
 def test_a_spaces_address_is_kept_as_its_origin(register, url, kept):
     app, store, http = register
@@ -66,7 +67,24 @@ def test_an_address_that_is_not_an_https_origin_is_refused(register, url):
     _, space = _machine(register, "artist-two", role="space")
     with pytest.raises(R.RegisterError) as e:
         space.served(serial, url, "serving")
-    assert e.value.status == 422
+    assert e.value.status == 422 and "public_url" in str(e.value)
+
+
+def test_a_spaces_older_address_row_is_its_origin_and_a_later_report_moves_it(register, tmp_path):
+    from register_service.store import Store
+    app, store, http = register
+    key, client, serial = _published(register)
+    space_key, space = _machine(register, "artist-two", role="space")
+    for url, at in (("https://Space.Example/artists/x", "2026-01-01T00:00:00Z"), ("https://space.example/", "2026-01-02T00:00:00Z"),
+                    ("http://space.example", "2026-01-03T00:00:00Z")):
+        store.db.execute("INSERT INTO served (serial, space_url, state, at, key_id) VALUES (?, ?, 'serving', ?, ?)",
+                         (serial, url, at, space_key.key_id))
+    reopened = Store(store.path)
+    rows = {r["space_url"]: r["at"] for r in reopened.record(serial)["served"]}
+    assert rows == {"https://space.example": "2026-01-02T00:00:00Z", "http://space.example": "2026-01-03T00:00:00Z"}
+    space.served(serial, "https://space.example/", "removed")
+    states = {r["space_url"]: r["state"] for r in store.record(serial)["served"]}
+    assert states["https://space.example"] == "removed"
 
 
 def test_an_unknown_caller_is_refused_before_its_body_is_read(register, monkeypatch):
@@ -108,6 +126,12 @@ def test_one_ipv6_host_has_one_bucket_however_many_addresses_it_takes(register):
     codes = [http.post("/api/verify", json=bad, headers={"X-Forwarded-For": str(net[i + 1])}).status_code
              for i in range(PUBLIC_LIMITS["/api/verify"] + 3)]
     assert codes[-1] == 429
+
+
+def test_an_ipv4_host_written_as_ipv6_shares_its_bucket():
+    from register_service.app import client_of
+    assert client_of("::ffff:203.0.113.5") == client_of("203.0.113.5") == "203.0.113.5"
+    assert client_of("2001:db8:1:2::9") == client_of("2001:db8:1:2:ffff::1") == "2001:db8:1:2::/64"
 
 
 def test_the_limiter_holds_a_bounded_table_and_never_scans_it_per_call():

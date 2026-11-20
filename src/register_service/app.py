@@ -27,7 +27,7 @@ from khaos_attribution import translog as T
 from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of, sha256_of
-from register_service.store import NOT_SERVED, Store, now_utc
+from register_service.store import LOOPBACK_HOSTS, NOT_SERVED, Store, now_utc, space_origin_of
 from register_service.translog import EntryRefused, LogBlocked, LogOff, export as export_log, export_lock, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
@@ -55,7 +55,6 @@ def settings() -> dict:
             "public_url": os.environ.get("REGISTER_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")}
 
 
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 PUBLIC_MIRROR_RAW = "https://raw.githubusercontent.com/guild-register/ledger/main"   # the public mirror the footer links
 
 
@@ -203,16 +202,11 @@ def write_ledger(store, path: Path, whole: bool = False) -> None:
 
 def space_origin(value) -> str:
     """A Space's address as the register keeps and links it: an https origin, or http on loopback for development."""
-    parts = urlsplit(str(value or "").strip())
-    host = (parts.hostname or "").lower()
-    try:
-        port = parts.port
-    except ValueError:
-        port, host = None, ""
-    if not host or parts.scheme not in ("https", "http") or (parts.scheme == "http" and host not in LOOPBACK_HOSTS):
-        raise HTTPException(422, "space_url is the Space's https address")
-    host = f"[{host}]" if ":" in host else host
-    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+    origin = space_origin_of(value)
+    if origin is None:
+        raise HTTPException(422, "space_url must be the Space's public https address (http only on loopback): "
+                                 "set the Space's public_url to its https address")
+    return origin
 
 
 def public_view(record: dict) -> dict:
@@ -231,12 +225,15 @@ def public_view(record: dict) -> dict:
 
 
 def client_of(address: str) -> str:
-    """The address a limit counts: an IPv6 host by its /64, which one machine holds whole; anything else as given."""
+    """The address a limit counts: an IPv6 host by its /64, which one machine holds whole; an IPv4 host as itself,
+    however it is written; anything else as given."""
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return address
-    return str(ipaddress.ip_network(f"{ip}/64", strict=False)) if ip.version == 6 and not ip.ipv4_mapped else str(ip)
+    if ip.version == 6 and ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False)) if ip.version == 6 else str(ip)
 
 
 class RateLimit:
