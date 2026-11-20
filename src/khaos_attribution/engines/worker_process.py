@@ -103,10 +103,27 @@ def run(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, labe
         _log_failure(label, stderr)
         raise WorkerFailed(str(reply["error"]))
     if proc.returncode != 0 or not isinstance(reply, dict) or (required and required not in reply):
-        tail = "\n".join((stderr or "").strip().splitlines()[-8:]) or (stdout or "")[-300:]
         _log_failure(label, stderr)
-        raise WorkerFailed(f"the {label} worker failed ({proc.returncode}): {tail}", why=tail)
+        raise _ended(label, proc.returncode, stderr, stdout)
     return reply
+
+
+def _exit_said(returncode) -> str:
+    """An exit status as a person reads it: the code, or the signal that ended the worker."""
+    if returncode is not None and returncode < 0:
+        try:
+            return f"killed by {signal.Signals(-returncode).name}"
+        except ValueError:
+            return f"killed by signal {-returncode}"
+    return str(returncode)
+
+
+def _ended(label: str, returncode, stderr: str | None, stdout: str | None) -> WorkerFailed:
+    """A worker that ended without a reply: how it exited and what it last said, its stderr first, else its stdout,
+    since a worker killed for memory often writes nothing to stderr."""
+    tail = "\n".join((stderr or "").strip().splitlines()[-8:]) or (stdout or "").strip()[-300:]
+    said = f": {tail}" if tail else ", having written nothing"
+    return WorkerFailed(f"the {label} worker failed ({_exit_said(returncode)}){said}", why=tail)
 
 
 def _log_failure(label: str, stderr: str | None) -> None:
@@ -243,11 +260,14 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
                 proc.stdin.close()
         err.seek(0)
         stderr = err.read()
-    reply = _last_json("".join(lines))
+    stdout = "".join(lines)
+    reply = _last_json(stdout)
     if not isinstance(reply, dict) or reply.get("error") or returncode != 0:
-        why = (reply.get("error") if isinstance(reply, dict) else None) or "\n".join(stderr.splitlines()[-6:])
         _log_failure(label, stderr)
-        raise WorkerFailed(f"the {label} worker failed: {why}", why=why)
+        error = reply.get("error") if isinstance(reply, dict) else None
+        if error:
+            raise WorkerFailed(f"the {label} worker failed: {error}", why=str(error))
+        raise _ended(label, returncode, stderr, stdout)
     missing = [k for k in required if k not in reply]
     if missing:
         raise WorkerFailed(f"the {label} worker's reply lacks {', '.join(missing)}")

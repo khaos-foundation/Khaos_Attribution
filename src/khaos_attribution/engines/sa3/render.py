@@ -22,6 +22,7 @@ from khaos_attribution.engines.worker_process import stop_tree  # noqa: F401 —
 from khaos_attribution.engines.render import RenderCancelled, RenderFailed, RenderRequest, RenderResult
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3 import rework as RW
+from khaos_attribution.engines.sa3.worker import part_path
 
 log = logging.getLogger(__name__)
 
@@ -168,7 +169,12 @@ class Renderer:
                 on_progress(done + min(row["step"] / row["of"], 1.0), total)
         if on_progress is not None:
             on_progress(done, total)
-        reply = run_worker(self.root, self.runtime, request, should_stop=should_stop, on_step=step)
+        try:
+            reply = run_worker(self.root, self.runtime, request, should_stop=should_stop, on_step=step)
+        except (RenderCancelled, RenderFailed):
+            # A worker stopped past its grace is killed before it can tidy up, so its unfinished audio goes here.
+            part_path(request["out"]).unlink(missing_ok=True)
+            raise
         if on_progress is not None:
             on_progress(done + 1, total)
         return reply

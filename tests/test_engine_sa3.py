@@ -155,6 +155,20 @@ def test_a_render_is_stopped_while_its_steps_still_come(stepping, tmp_path, monk
         raise AssertionError("the worker outlived the stop")
 
 
+def test_a_render_stopped_mid_write_leaves_no_unfinished_audio_beside_its_output(fake_engine, tmp_path, monkeypatch):
+    """A worker killed after its grace cannot tidy up; the renderer removes the part it was writing."""
+    from khaos_attribution.engines.sa3 import worker as WK
+    out = tmp_path / "o.wav"
+    for ending in (RenderCancelled(), RenderFailed("the Stable Audio 3 worker failed (killed by SIGKILL)")):
+        def dies(root, runtime, request, *, should_stop=None, on_step=None, ending=ending):
+            WK.part_path(request["out"]).write_bytes(b"half a render")
+            raise ending
+        monkeypatch.setattr(R, "run_worker", dies)
+        with pytest.raises(type(ending)):
+            R.Renderer(repo_dir=fake_engine, device="cpu").generate(RenderRequest(prompt="p", duration_seconds=5), None, out)
+        assert not WK.part_path(out).exists() and not out.exists()
+
+
 def test_a_render_with_no_output_path_is_refused_never_written_where_the_process_stands(fake_engine):
     with pytest.raises(RenderFailed, match="path to write"):
         R.Renderer(repo_dir=fake_engine, device="cpu").generate(RenderRequest(prompt="p", duration_seconds=5), None, None)

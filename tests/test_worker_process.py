@@ -108,8 +108,23 @@ def test_rows_stream_to_the_caller_and_the_reply_is_the_last_line(tmp_path):
         W.stream(Path(sys.executable), script, {"n": 3}, cwd=tmp_path, env=dict(os.environ), label="test", required=("matrix",))
     bad = tmp_path / "bad.py"
     bad.write_text("import sys\nsys.stdin.read()\nsys.stderr.write('the reason\\n')\nsys.exit(3)\n")
-    with pytest.raises(W.WorkerFailed, match="the test worker failed: the reason"):
+    with pytest.raises(W.WorkerFailed, match=r"the test worker failed \(3\): the reason"):
         W.stream(Path(sys.executable), bad, {}, cwd=tmp_path, env=dict(os.environ), label="test")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a signal ends a process only on POSIX")
+@pytest.mark.parametrize("ask", [W.run, W.stream], ids=["run", "stream"])
+def test_a_worker_killed_without_a_word_on_stderr_says_how_it_ended_and_what_it_last_printed(tmp_path, ask):
+    """A worker killed for memory often writes nothing to stderr: the failure names the signal and its stdout's end."""
+    script = tmp_path / "killed.py"
+    script.write_text("import os, signal, sys\nsys.stdin.read()\nprint('loading the weights', flush=True)\n"
+                      "os.kill(os.getpid(), signal.SIGKILL)\n")
+    with pytest.raises(W.WorkerFailed) as failed:
+        ask(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test")
+    assert "the test worker failed (killed by SIGKILL): loading the weights" in str(failed.value)
+    script.write_text("import os, signal, sys\nsys.stdin.read()\nos.kill(os.getpid(), signal.SIGKILL)\n")
+    with pytest.raises(W.WorkerFailed, match=r"failed \(killed by SIGKILL\), having written nothing"):
+        ask(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test")
 
 
 ECHO = ("import json, os, sys\nsys.stdin.read()\n"

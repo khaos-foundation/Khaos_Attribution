@@ -22,11 +22,26 @@ def _row(step: int, of: int) -> None:
     sys.stdout.flush()
 
 
+def part_path(out) -> Path:
+    """Where a render writes until its audio is whole; only a finished render takes the output's name."""
+    out = Path(out)
+    return out.with_name(f"{out.stem}.part{out.suffix}")
+
+
+def _fresh_part(out) -> Path:
+    # A part left by a render killed before it could tidy up is never taken for this render's audio.
+    part = part_path(out)
+    part.unlink(missing_ok=True)
+    return part
+
+
 def render_torch(req: dict) -> dict:
     import soundfile as sf  # noqa: PLC0415
     import torch  # noqa: PLC0415
     from khaos_attribution.engines.sa3.loading import load_model  # noqa: PLC0415
 
+    out = Path(req["out"])
+    part = _fresh_part(out)
     model = load_model(req["model"])
     if req.get("adapter"):
         model.load_lora([str(req["adapter"])])
@@ -52,10 +67,8 @@ def render_torch(req: dict) -> dict:
             kwargs["inpaint_mask_end_seconds"] = [float(e) for _, e in req["regions"]]
     audio = model.generate(**kwargs)
     rate = int(model.model.sample_rate)
-    out = Path(req["out"])
-    tmp = out.with_name(out.name + ".tmp.wav")
-    sf.write(str(tmp), audio[0].T.float().cpu().numpy(), rate, subtype="PCM_16")
-    tmp.replace(out)
+    sf.write(str(part), audio[0].T.float().cpu().numpy(), rate, subtype="PCM_16")
+    part.replace(out)
     return {"seed": seed, "sample_rate": rate, "dropped": [], "runtime": "torch"}
 
 
@@ -71,8 +84,7 @@ def render_mlx(req: dict) -> dict:
     seed = int(req["seed"]) if req.get("seed") is not None else int.from_bytes(os.urandom(4), "big") % (2 ** 31 - 1)
     dit = "medium"
     out = Path(req["out"])
-    # The script writes beside the output, and only a finished render takes the output's name.
-    part = out.with_name(f"{out.stem}.part{out.suffix}")
+    part = _fresh_part(out)
     args = ["--prompt", req["prompt"], "--dit", dit,
             "--decoder", "same-l", "--seconds", str(float(req["seconds"])), "--seed", str(seed),
             "--steps", str(int(req["steps"])), "--cfg", str(float(req["cfg_scale"])),
