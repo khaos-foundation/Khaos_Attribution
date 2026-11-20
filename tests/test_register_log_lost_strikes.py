@@ -158,7 +158,7 @@ def test_the_log_key_switch_destroys_the_retired_development_key():
 
 def test_the_unwitnessed_open_is_a_marker_used_once_and_refused_for_a_log_with_entries(tmp_path):
     cut_off = tmp_path / "cut-off"
-    cfg = {"data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
+    cfg = {"log_enable": True, "data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
            "log_witnesses": ["http://127.0.0.1:9/ledger"]}
     cut_off.mkdir()
     marker = cut_off / "log-open-unwitnessed"

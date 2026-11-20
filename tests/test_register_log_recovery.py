@@ -148,15 +148,15 @@ def test_no_readable_published_copy_fails_closed_unless_the_log_is_new(register,
         client.publish(_signed(key, run_id="run_4"))
     assert e.value.status == 503
     fresh = tmp_path / "fresh"
-    first = create_app({"data": fresh, "key_file": fresh / "register-key.pem", "dev_key": True, "public_url": "x",
+    first = create_app({"log_enable": True, "data": fresh, "key_file": fresh / "register-key.pem", "dev_key": True, "public_url": "x",
                         "log_witnesses": [str(tmp_path / "empty-repo")]})
     assert first.state.store.log.blocked is None and first.state.store.log.size() == 1, "the very first start opens"
     cut_off = tmp_path / "cut-off"
-    unsure = create_app({"data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
+    unsure = create_app({"log_enable": True, "data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
                          "log_witnesses": ["http://127.0.0.1:9/ledger"]})
     assert unsure.state.store.log.blocked, "a first start that cannot read the public copy cannot know it is the first"
     (cut_off / "log-open-unwitnessed").write_text("")
-    override = create_app({"data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
+    override = create_app({"log_enable": True, "data": cut_off, "key_file": cut_off / "register-key.pem", "dev_key": True, "public_url": "x",
                            "log_witnesses": ["http://127.0.0.1:9/ledger"]})
     assert override.state.store.log.blocked is None
 

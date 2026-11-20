@@ -107,7 +107,7 @@ LOG_ENTRIES="$(sqlite3 -readonly "$DATA/register.sqlite3" "SELECT COUNT(*) FROM 
 if [ -f "$DATA/log-started" ] || [ "${LOG_ENTRIES:-0}" -gt 0 ]; then
   echo "the signed log has started here; it goes on"
 elif [ "${REGISTER_LOG_ENABLE:-}" = 1 ] || grep -qs '^REGISTER_LOG_ENABLE=1' "$ENV_FILE"; then
-  echo "the signed log starts at this run's restart: REGISTER_LOG_ENABLE=1"
+  echo "REGISTER_LOG_ENABLE=1: the service starts the signed log when it next starts; /health says if it could not"
 else
   echo "the signed log stays off; every other door is served. REGISTER_LOG_ENABLE=1 starts it, the owner's decision"
 fi

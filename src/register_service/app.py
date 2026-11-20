@@ -90,8 +90,8 @@ def log_started(cfg: dict) -> bool:
 
 
 def log_runs(cfg: dict) -> bool:
-    """The log runs once it has started here, or on the owner's word that it may start; until then it is off."""
-    return log_started(cfg) or bool(cfg.get("log_enable", True))
+    """The service runs its log once it has started here, or on the owner's word that it may start; else it is off."""
+    return log_started(cfg) or bool(cfg.get("log_enable", False))
 
 
 def dev_marker(cfg: dict) -> Path:
@@ -870,6 +870,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     async def log_blocked(request: Request, exc: LogBlocked):
         return JSONResponse({"detail": f"the register is not taking changes: {exc}"}, status_code=503)
 
+    def log_on_or_404() -> None:
+        """An off log has nothing to show, whatever files a command left in the mirror."""
+        if store.log.off:
+            raise HTTPException(404, LOG_OFF)
+
     @app.exception_handler(LogOff)
     async def log_off(request: Request, exc: LogOff):
         return JSONResponse({"detail": f"the log takes no entry: {exc}"}, status_code=503)
@@ -904,6 +909,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/sth", methods=["GET", "HEAD"])
     def log_sth(request: Request):
+        log_on_or_404()
         head = store.log.head()
         if head is None:
             raise HTTPException(404, "the log is empty")
@@ -911,6 +917,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/sth/{size}", methods=["GET", "HEAD"])
     def log_sth_at(request: Request, size: int):
+        log_on_or_404()
         head = store.log.head(size)
         if head is None:
             raise HTTPException(404, "no head of that size")
@@ -919,6 +926,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/proof/{leaf_hash}", methods=["GET", "HEAD"])
     def log_proof(request: Request, leaf_hash: str, size: int | None = None):
+        log_on_or_404()
         if not T.is_hex256(leaf_hash):
             raise HTTPException(422, "a leaf hash is 64 lowercase hex characters")
         if size is not None and store.log.head(size_param(size, "size")) is None:
@@ -931,6 +939,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/consistency", methods=["GET", "HEAD"])
     def log_consistency(request: Request):
+        log_on_or_404()
         params = request.query_params
         a, b = size_param(params.get("from"), "from"), size_param(params.get("to"), "to")
         if not 0 < a <= b or store.log.head(a) is None or store.log.head(b) is None:
@@ -939,6 +948,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/entries", methods=["GET", "HEAD"])
     def log_entries(request: Request):
+        log_on_or_404()
         params = request.query_params
         start = size_param(params.get("start", 0), "start")
         end = size_param(params.get("end", start + 100), "end")
@@ -955,6 +965,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/anchors", methods=["GET", "HEAD"])
     def log_anchors(request: Request):
+        log_on_or_404()
         from register_service.translog import receipt_b64  # noqa: PLC0415
         rows = [{**{k: a[k] for k in ("tree_size", "root_sha256", "backend", "state", "stamped_at", "completed_at")},
                  "receipt_base64": receipt_b64(a["receipt"])} for a in store.log.anchors()]
@@ -963,6 +974,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/mirror/log/{name:path}", methods=["GET", "HEAD"])
     def log_mirror_file(name: str):
         """The static export, served as the mirror holds it, so the page and the command read the same files."""
+        log_on_or_404()
         base = (mirror / "log").resolve()
         path = (base / name).resolve()
         if base not in path.parents or not path.is_file() or path.suffix not in (".json", ".ots"):

@@ -149,7 +149,7 @@ def test_the_real_client_speaks_http_to_a_live_register(tmp_path):
     import uvicorn
     sys.path.insert(0, "src")
     from register_service.app import create_app
-    app = create_app({"data": tmp_path / "d", "key_file": tmp_path / "d" / "k.pem", "dev_key": True, "public_url": "http://x"})
+    app = create_app({"log_enable": True, "data": tmp_path / "d", "key_file": tmp_path / "d" / "k.pem", "dev_key": True, "public_url": "http://x"})
     app.state.store.create_account("a")
     invite = app.state.store.create_invite("a")
     with socket.socket() as s_:

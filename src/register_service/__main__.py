@@ -51,13 +51,13 @@ def main(argv=None) -> int:
         return 0
     cfg = settings()
     if a.cmd.startswith("log-"):
-        from register_service.app import LOG_OFF, log_runs  # noqa: PLC0415
-        if not log_runs(cfg):
-            # The daily jobs find nothing to do on a register whose log is off; the operator's commands say why.
+        from register_service.app import LOG_OFF, log_started  # noqa: PLC0415
+        # Only the service's own start begins a log, with its genesis: a command never does, setting or none.
+        if not log_started(cfg):
             if a.cmd in ("log-stamp", "log-upgrade"):
-                print(f"nothing to {a.cmd[4:]}: {LOG_OFF}")
+                print(f"nothing to {a.cmd[4:]}: the signed log has not started here. {LOG_OFF}")
                 return 0
-            raise SystemExit(LOG_OFF)
+            raise SystemExit(f"the signed log has not started here. {LOG_OFF}")
     if a.cmd == "make-key":
         from pathlib import Path  # noqa: PLC0415
         from khaos_attribution.registry import SigningKey  # noqa: PLC0415
@@ -134,9 +134,9 @@ def main(argv=None) -> int:
         for place in ("mirror", "mirror-public"):
             export_anchors(store.log, cfg["data"] / place)
     elif a.cmd == "check":
-        from register_service.app import LOG_OFF, log_places, log_runs  # noqa: PLC0415
+        from register_service.app import LOG_OFF, log_places, log_started  # noqa: PLC0415
         ok = store.ledger_ok()
-        if not log_runs(cfg):
+        if not log_started(cfg):
             print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {store.count()} models")
             print(f"log off: {LOG_OFF}")
             return 0 if ok else 1

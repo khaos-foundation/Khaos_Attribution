@@ -339,6 +339,9 @@ class TransLog:
             raise LogOff(self.off)
         if self.blocked:
             raise LogBlocked(self.blocked)
+        if entry.get("kind") != "genesis" and self.size() == 0:
+            # Only the service's own start begins a log, with the genesis that admits every record before it.
+            raise LogOff("a log begins with its genesis, which only the service appends when it starts the log")
         if self.signer is None:
             raise RuntimeError("the log key is not loaded; the log takes no entry")
         index, leaf_hex = self._insert_leaf(T.jcs(entry), entry)

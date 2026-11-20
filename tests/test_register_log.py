@@ -204,7 +204,7 @@ def test_the_genesis_migration_carries_the_old_ledger_tip_and_every_existing_rec
 
 def test_the_log_key_is_its_own_and_a_development_one_is_refused_without_its_setting(tmp_path):
     from register_service.app import load_log_key
-    cfg = {"data": tmp_path, "key_file": tmp_path / "register-key.pem", "dev_key": True, "log_dev_key": True,
+    cfg = {"log_enable": True, "data": tmp_path, "key_file": tmp_path / "register-key.pem", "dev_key": True, "log_dev_key": True,
            "log_key_file": tmp_path / "log-key.pem", "public_url": "x"}
     dev = load_log_key(cfg)
     assert (tmp_path / "log-key.dev").read_text().strip() == dev.key_id

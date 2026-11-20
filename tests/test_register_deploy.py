@@ -192,3 +192,39 @@ def test_the_bill_of_materials_names_what_the_register_runs(capsys):
     rows = {r["name"]: r for r in json.loads(capsys.readouterr().out)["packages"]}
     assert rows["khaos-attribution"]["version"] == khaos_attribution.__version__
     assert rows["fastapi"]["version"] and all("licence" in r for r in rows.values())
+
+
+def test_only_the_service_begins_a_log_whatever_the_setting_says(tmp_path, monkeypatch, capsys):
+    """The owner's setting written while the service still runs off: the daily job appends nothing, the service's
+    next start begins the log with its genesis, and an off service shows none of the log's files."""
+    from fastapi.testclient import TestClient
+    from register_service.__main__ import main
+    from register_service.app import create_app
+    from register_service.translog import LogOff
+    from tests.test_register_service import _machine, _signed
+    cfg = _off(tmp_path, log_dev_key=True)
+    app = create_app(cfg)
+    store, http = app.state.store, TestClient(app)
+    store.create_account("artist-one")
+    key, client = _machine((app, store, http), "artist-one")
+    client.publish(_signed(key))
+    stray = cfg["data"] / "mirror" / "log" / "sth"
+    stray.mkdir(parents=True)
+    (stray / "latest.json").write_text("{}")
+    assert http.get("/mirror/log/sth/latest.json").status_code == 404, "an off service serves no log file"
+    monkeypatch.setenv("REGISTER_DATA_DIR", str(cfg["data"]))
+    monkeypatch.setenv("REGISTER_DEV_KEY", "1")
+    monkeypatch.setenv("REGISTER_LOG_DEV_KEY", "1")
+    monkeypatch.setenv("REGISTER_LOG_ENABLE", "1")
+    assert main(["log-stamp"]) == 0 and "has not started" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="has not started"):
+        main(["log-export"])
+    assert store.log.size() == 0
+    store.log.off, store.log.signer = None, None
+    from register_service.app import load_log_key
+    store.log.signer = load_log_key({**cfg, "log_dev_key": True})
+    with pytest.raises(LogOff, match="genesis"), store._tx():
+        store.log.heartbeat_locked()
+    shutil.rmtree(cfg["data"] / "mirror" / "log")
+    on = create_app(_off(tmp_path, log_enable=True, log_dev_key=True)).state.store
+    assert on.log.entries(0, 1)[0]["entry"]["kind"] == "genesis"
