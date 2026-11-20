@@ -258,3 +258,140 @@ def test_an_unknown_field_under_a_known_version_is_named_in_plain_words():
     card["training_catalogue"][0]["tempo"] = 120
     with pytest.raises(AttributionValidationError, match="at training_catalogue/0: fields this contract does not know: tempo"):
         validate_model_card(card)
+
+
+def _rights(*shares):
+    return {"schema_version": "1.0.0", "track_id": "t", "title": "T", "isrc": {"status": "not_yet_looked_up"},
+            "iswc": {"status": "not_yet_looked_up"},
+            "writers": [{"name": f"W{i}", "role": "composer", "share_pct": s} for i, s in enumerate(shares)],
+            "publishers": [], "source": "operator-entered", "verified_date": "2026-08-01"}
+
+
+def _main_refuses(total) -> bool:
+    """The comparison every stored record was first validated under, as it stands on main."""
+    return abs(total - 100.0) > 0.01
+
+
+def _verdict(validate, record) -> bool:
+    try:
+        return bool(validate(record))
+    except AttributionValidationError:
+        return False
+
+
+@pytest.mark.parametrize("shares", [(33.33, 33.33, 33.33), (50.0, 49.99), (50.0, 50.01), (60.0, 40.01), (99.99,),
+                                    (50.0, 49.98), (50.0, 50.02), (50.0, 49.99004), (33.33, 33.33, 33.34),
+                                    (50.0, 49.9901), (33.3333, 33.3333, 33.3333)])
+def test_a_rights_sum_is_judged_exactly_as_it_always_was(shares):
+    """Stored rights are validated again when read, so a sum is accepted or refused exactly as main's comparison did."""
+    from khaos_attribution import validate_track_rights
+    assert _verdict(validate_track_rights, _rights(*shares)) is not _main_refuses(sum(shares)), shares
+
+
+def test_every_generated_rights_record_gets_mains_verdict():
+    """Shares with up to eight decimals, near and at the boundary: the verdict is main's for every one."""
+    import random
+    from khaos_attribution import validate_track_rights
+    rng = random.Random(7)
+    for _ in range(5000):
+        n = rng.randint(1, 5)
+        shares = [round(rng.uniform(0, 100), rng.randint(0, 8)) for _ in range(n - 1)]
+        shares.append(round(100.0 - sum(shares) + rng.choice([-0.01, -0.00995, -0.005, 0.0, 0.005, 0.00995, 0.01,
+                                                               0.0001, -0.0001, 0.01000001, -0.01000001]),
+                            rng.randint(2, 8)))
+        if not all(0 <= s <= 100 for s in shares):
+            continue   # the schema's own bounds, apart from the sum
+        assert _verdict(validate_track_rights, _rights(*shares)) is not _main_refuses(sum(shares)), shares
+
+
+def test_a_share_held_as_a_numpy_number_is_a_number():
+    """The schema takes numpy's floats as numbers, so the sum check does too."""
+    np = pytest.importorskip("numpy")
+    from khaos_attribution import validate_track_rights
+    assert validate_track_rights(_rights(np.float32(50.0), np.float64(50.0)))
+    with pytest.raises(AttributionValidationError, match="sum to"):
+        validate_track_rights(_rights(np.float32(50.0), np.float32(49.98)))
+    with pytest.raises(AttributionValidationError):
+        validate_track_rights(_rights(True, 99.0))
+
+
+def _estimate(writers, unattributed):
+    return {"schema_version": "1.1.0", "generation_id": "g", "artist_id": "a", "adapter_version": "r",
+            "created_at": "2026-10-07T00:00:00+00:00",
+            "method": {"kind": "dtrak", "estimator_version": "0.1.0", "exposure_basis": "x", "similarity_informative": False},
+            "influence": [{"track_id": "t", "title": "T", "exposure_share_pct": 100.0, "similarity_share_pct": None,
+                           "influence_share_pct": 100.0, "blended_share_pct": 100.0, "share_range_pct": [90.0, 100.0]}],
+            "splits": {"writers": [{"name": n, "share_pct": s, "share_range_pct": [0.0, 100.0]} for n, s in writers],
+                       "publishers": [], "masters": [], "unattributed_pct": unattributed},
+            "caveats": []}
+
+
+WRITER_SPLITS = [
+    [100.0], [50.0, 50.0], [33.3333, 33.3333, 33.3334], [14.2857] * 6 + [14.2858], [0.5] * 200,
+    [50.0, 49.9901], [50.0, 50.0099], [33.33, 33.33, 33.3399],
+]
+
+
+def test_an_estimate_made_from_valid_rights_always_validates():
+    """The estimator rounds the writers and the unattributed remainder together, so a document built from valid
+    rights (many writers, or a sum just inside the hundredth) passes the unwidened money check."""
+    import random
+    from khaos_attribution import blend, validate_attribution_estimate, validate_track_rights
+    for split in WRITER_SPLITS:
+        validate_track_rights(_rights(*split))
+    rng = random.Random(11)
+    for _ in range(999):
+        tracks = [f"t{i}" for i in range(rng.randint(1, 12))]
+        weights = [rng.random() + 0.01 for _ in tracks]
+        blended = {t: w / sum(weights) for t, w in zip(tracks, weights)}
+        rights = {t: {"writers": [{"name": f"{t}w{j}", "share_pct": s} for j, s in enumerate(rng.choice(WRITER_SPLITS))],
+                      "publishers": []}
+                  for t in tracks if rng.random() < 0.85}
+        money = blend.money_splits(blended, {}, rights)
+        doc = _estimate([(w["name"], w["share_pct"]) for w in money["writers"]], money["unattributed_pct"])
+        assert validate_attribution_estimate(doc), (len(tracks), len(money["writers"]))
+
+
+@pytest.mark.parametrize("writers, unattributed", [([("W", 99.9)], 0.0), ([("W", 100.0)], 0.01),
+                                                   ([("A", 50.0), ("B", 50.01)], 0.0), ([("A", 49.99)], 50.0),
+                                                   ([("A", 33.33), ("B", 33.33), ("C", 33.33)], 0.0),
+                                                   ([("A", 50.0)], 49.9901), ([("A", 60.0), ("B", 39.99004)], 0.0)])
+def test_the_money_is_judged_exactly_as_it_always_was(writers, unattributed):
+    """The money check is not widened: writers and the unattributed remainder get main's verdict."""
+    from khaos_attribution import validate_attribution_estimate
+    total = sum(s for _, s in writers) + unattributed
+    assert _verdict(validate_attribution_estimate, _estimate(writers, unattributed)) is not _main_refuses(total)
+
+
+def test_a_total_that_is_not_a_number_is_refused_everywhere_it_is_checked():
+    from khaos_attribution import validate_attribution_estimate
+    doc = _estimate([("W", 100.0)], 0.0)
+    doc["influence"][0]["blended_share_pct"] = doc["influence"][0]["influence_share_pct"] = float("nan")
+    with pytest.raises(AttributionValidationError):
+        validate_attribution_estimate(doc)
+
+
+def test_a_group_removal_estimates_groups_are_finite_shares_of_the_whole():
+    from khaos_attribution import validate_attribution_estimate
+    from khaos_attribution.validation import _check_groups
+    with pytest.raises(AttributionValidationError, match="not a finite share"):
+        _check_groups([{"group_id": "g1", "share_pct": float("inf")}, {"group_id": "g2", "share_pct": 0.0}])
+    with pytest.raises(AttributionValidationError, match="between 0 and 100"):
+        _check_groups([{"group_id": "g1", "share_pct": 120.0}, {"group_id": "g2", "share_pct": -20.0}])
+    _check_groups([{"group_id": "g1", "share_pct": 60.0}, {"group_id": "g2", "share_pct": 40.0}])
+    assert validate_attribution_estimate
+
+
+def test_a_record_that_is_not_an_object_is_refused_in_words():
+    from khaos_attribution import validate_track_rights
+    for record in ([], "rights", None):
+        with pytest.raises(AttributionValidationError):
+            validate_track_rights(record)
+
+
+def test_a_schemas_validator_is_built_once():
+    from khaos_attribution import validation as V
+    V._validator.cache_clear()
+    for _ in range(3):
+        V.validate_provenance_record(copy.deepcopy(GOOD_PROVENANCE_RECORD))
+    assert V._validator.cache_info().misses == 1

@@ -23,7 +23,7 @@ from khaos_attribution import ATTRIBUTION_ESTIMATE_SCHEMA_VERSION, blend
 from khaos_attribution.validation import validate_attribution_estimate
 
 INFLUENCE_METHOD = "dtrak"
-INFLUENCE_VERSION = "0.1.0"
+INFLUENCE_VERSION = "0.2.0"
 FEATURE_TARGET = "vnorm"
 LAMBDA_MULTIPLE = 10.0
 PROJECTION_DIM = 8192
@@ -415,8 +415,9 @@ def refusal_stands(record: Mapping | None, index_meta: Mapping | None) -> bool:
 
 
 def writer_shares(track_shares: Mapping[str, float], rights_by_track: Mapping[str, dict] | None) -> dict:
-    """Track shares through each track's writer split to writer shares; a
-    track without writers counts as unassigned."""
+    """Track shares through each track's writer split, normalised by that split's own total, to writer shares; a
+    track without writers counts as unassigned. The research readings' rule: the served document's money
+    (blend.money_splits) divides by 100, which agrees within the share tolerance on valid rights."""
     out: dict = {}
     for track, share in track_shares.items():
         writers = ((rights_by_track or {}).get(track) or {}).get("writers") or []

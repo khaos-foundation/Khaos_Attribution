@@ -16,7 +16,7 @@ import math
 
 import numpy as np
 
-ESTIMATOR_VERSION = "0.5.0"
+ESTIMATOR_VERSION = "0.6.0"
 # The version moves whenever the document's contents or the handling of a
 # collapsed signal change, so two estimates stamped alike are alike.
 TOP_K = 3            # segments per track that speak for it
@@ -30,10 +30,13 @@ def largest_remainder_pcts(shares: dict[str, float]) -> dict[str, float]:
     around 200 tracks; largest-remainder keeps the sum exact at any N.
     """
     total = sum(shares.values())
-    scaled = {t: (v / total if total > 0 else 0.0) * 100 for t, v in shares.items()}
+    if not (math.isfinite(total) and total > 0):
+        raise ValueError(f"shares that add to {total} have no percentages")
+    scaled = {t: v / total * 100 for t, v in shares.items()}
     floored = {t: math.floor(v * 10_000) / 10_000 for t, v in scaled.items()}
     residue = round((100 - sum(floored.values())) * 10_000)
-    by_remainder = sorted(shares, key=lambda t: -(scaled[t] - floored[t]))
+    # An equal remainder goes by name, so the result never depends on the order the shares were listed in.
+    by_remainder = sorted(shares, key=lambda t: (-(scaled[t] - floored[t]), str(t)))
     out = dict(floored)
     for t in by_remainder[:residue]:
         out[t] = round(out[t] + 0.0001, 4)
@@ -170,16 +173,33 @@ def money_splits(blended: dict[str, float],
         for m in rights.get("masters") or []:
             _accumulate(masters, m["name"], m["share_pct"], share, lo, hi)
 
-    def _pool(pool: dict) -> list[dict]:
+    def _pool(pool: dict, pcts: dict | None = None) -> list[dict]:
         # The hi bound sums independent per-track maxima and can pass 100%
         # for a party with shares in every track; nobody owns more than the whole.
         return [{"name": name,
-                 "share_pct": round(e["pct"] * 100, 4),
+                 "share_pct": pcts[name] if pcts is not None else round(e["pct"] * 100, 4),
                  "share_range_pct": [round(min(e["lo"], 1.0) * 100, 4),
                                      round(min(e["hi"], 1.0) * 100, 4)]}
                 for name, e in sorted(pool.items(),
                                       key=lambda kv: -kv[1]["pct"])]
 
-    return {"writers": _pool(writers), "publishers": _pool(publishers),
-            "masters": _pool(masters),
-            "unattributed_pct": round(unattributed * 100, 4)}
+    # The writers and the unattributed remainder are what the money check adds up, so they are rounded together.
+    money = _apportion_pcts({**{("writer", n): e["pct"] * 100 for n, e in writers.items()},
+                             ("unattributed",): unattributed * 100})
+    return {"writers": _pool(writers, {n: money[("writer", n)] for n in writers}),
+            "publishers": _pool(publishers), "masters": _pool(masters),
+            "unattributed_pct": money[("unattributed",)]}
+
+
+def _apportion_pcts(pcts: dict) -> dict:
+    """Percentages at four places that add up to their exact sum's own rounding: each is floored and the units left
+    go to the largest remainders, equal ones by name, so none moves from its own rounding by more than its
+    last digit."""
+    units = {k: v * 10_000 for k, v in pcts.items()}
+    if not all(math.isfinite(u) for u in units.values()):
+        return {k: round(v, 4) for k, v in pcts.items()}   # left for the validator to refuse in words
+    floored = {k: math.floor(u) for k, u in units.items()}
+    left = round(sum(units.values())) - sum(floored.values())
+    for k in sorted(units, key=lambda k: (floored[k] - units[k], str(k)))[:max(left, 0)]:
+        floored[k] += 1
+    return {k: n / 10_000 for k, n in floored.items()}

@@ -196,3 +196,54 @@ def test_the_temperature_sweep_is_what_makes_the_range_a_range():
     sharp = blend.blend_shares(exposure, blend.softmax_weights(scores, temperature * 0.5))
     assert swept["b"][1] == pytest.approx(sharp["b"])
     assert swept["a"][0] == pytest.approx(sharp["a"])
+
+
+def test_largest_remainder_refuses_shares_that_add_to_nothing():
+    """A zero or not-a-number total has no percentages; it is refused, never spread as 0.0001 each."""
+    import math
+    import pytest
+    for shares in ({"a": 0.0, "b": 0.0}, {"a": math.nan, "b": 1.0}):
+        with pytest.raises(ValueError, match="add to"):
+            blend.largest_remainder_pcts(shares)
+
+
+def test_the_money_is_rounded_together_and_no_share_moves_past_its_last_digit():
+    """Writers and the unattributed remainder add up to their exact sum's own rounding, each within 0.0001 of its own."""
+    import random
+    from decimal import Decimal
+    rng = random.Random(3)
+    for _ in range(500):
+        tracks = [f"t{i}" for i in range(rng.randint(1, 30))]
+        weights = [rng.random() + 0.001 for _ in tracks]
+        blended = {t: w / sum(weights) for t, w in zip(tracks, weights)}
+        rights = {t: {"writers": [{"name": f"w{rng.randint(0, 9)}{j}", "share_pct": s}
+                                  for j, s in enumerate(rng.choice([[100.0], [50.0, 50.0], [33.3333, 33.3333, 33.3334],
+                                                                    [14.2857] * 6 + [14.2858], [60.0, 39.9901]]))],
+                      "publishers": []} for t in tracks if rng.random() < 0.8}
+        splits = blend.money_splits(blended, {}, rights)
+        exact = {}
+        for t, share in blended.items():
+            for w in (rights.get(t) or {}).get("writers", []):
+                exact[w["name"]] = exact.get(w["name"], 0.0) + share * w["share_pct"]
+        exact_unattributed = sum(s for t, s in blended.items() if t not in rights) * 100
+        units = [round(Decimal(repr(w["share_pct"])) * 10_000) for w in splits["writers"]]
+        units.append(round(Decimal(repr(splits["unattributed_pct"])) * 10_000))
+        assert sum(units) == round((sum(exact.values()) + exact_unattributed) * 10_000)
+        for w in splits["writers"]:
+            assert abs(w["share_pct"] - exact[w["name"]]) <= 0.0001 + 1e-9, w
+        assert abs(splits["unattributed_pct"] - exact_unattributed) <= 0.0001 + 1e-9
+
+
+def test_equal_remainders_go_by_name_whatever_order_the_shares_came_in():
+    """Two documents from the same shares listed in another order carry the same numbers."""
+    import itertools
+    shares = {"c": 1 / 3, "a": 1 / 3, "b": 1 / 3}
+    seen = {tuple(sorted(blend.largest_remainder_pcts(dict(order)).items()))
+            for order in itertools.permutations(shares.items())}
+    assert seen == {(("a", 33.3334), ("b", 33.3333), ("c", 33.3333))}
+    rights = {t: {"writers": [{"name": w, "share_pct": 100.0}], "publishers": []} for t, w in (("t1", "Zed"), ("t2", "Amy"), ("t3", "Kit"))}
+    blended = {"t1": 1 / 3, "t2": 1 / 3, "t3": 1 / 3}
+    money = {tuple((w["name"], w["share_pct"]) for w in sorted(blend.money_splits(dict(order), {}, rights)["writers"],
+                                                                key=lambda w: w["name"]))
+             for order in itertools.permutations(blended.items())}
+    assert money == {(("Amy", 33.3334), ("Kit", 33.3333), ("Zed", 33.3333))}

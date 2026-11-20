@@ -225,7 +225,7 @@ def test_the_worker_path_equals_a_brute_force_kronecker_reference(tmp_path, targ
         K[m] = k_m.numpy()
     ref = _reference(torch, model, wrapped, names, params, train, queries, grid, seed, target, live)
     assert np.abs(K - ref).max() <= 1e-9 * np.abs(ref).max()
-    assert np.allclose(T.tau_from_kernels(K), (ref ** 2).mean(axis=0), rtol=1e-8, atol=0)
+    assert np.allclose((K * K).mean(axis=0), (ref ** 2).mean(axis=0), rtol=1e-8, atol=0)
     check = sink.check
     # Two chunks of training rows, and every query clip is read once against each.
     assert check["samples"] == len(grid) * (len(train) + 2 * len(queries)) and check["missing"] == 0

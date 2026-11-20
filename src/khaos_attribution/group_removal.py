@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 
 from khaos_attribution import blend
@@ -21,6 +22,10 @@ ESTIMATE_SCHEMA_VERSION = "1.2.0"
 
 class NoRise(ValueError):
     """No group's removal raised the piece's loss: the adapters say nothing about where it came from."""
+
+
+class LossNotFinite(NoRise):
+    """A loss under one of the adapters is not a number: nothing is said about where the piece came from."""
 
 
 class RecordRefused(ValueError):
@@ -57,6 +62,8 @@ def group_ids(groups: Sequence[Sequence[str]]) -> list[str]:
 
 def group_shares(full_loss: float, group_losses: Sequence[float]) -> list[float]:
     """Each group's share of the piece: its positive rise over the served adapter's loss, normalised."""
+    if not all(math.isfinite(float(x)) for x in (full_loss, *group_losses)):
+        raise LossNotFinite("a loss under one of the adapters is not finite, so the piece was not measured")
     rises = [max(float(g) - float(full_loss), 0.0) for g in group_losses]
     total = sum(rises)
     if not total > 0:

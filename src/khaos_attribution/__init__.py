@@ -22,7 +22,8 @@ MODEL_CARD_SCHEMA_VERSION = "1.1.0"  # writers stamp the newest; 1.0.0 still val
 TRACK_RIGHTS_SCHEMA_VERSION = "1.0.0"
 CATALOGUE_DELIVERY_SCHEMA_VERSION = "1.0.0"
 EVIDENCE_REVIEW_SCHEMA_VERSION = "1.0.0"
-ATTRIBUTION_ESTIMATE_SCHEMA_VERSION = "1.1.0"  # 1.0.0 still validates
+# 1.0.0 still validates; a group-removal estimate stamps its own, group_removal.ESTIMATE_SCHEMA_VERSION.
+ATTRIBUTION_ESTIMATE_SCHEMA_VERSION = "1.1.0"
 
 __all__ = [
     "ATTRIBUTION_ESTIMATE_SCHEMA_VERSION",

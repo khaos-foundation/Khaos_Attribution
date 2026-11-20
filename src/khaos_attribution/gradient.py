@@ -14,6 +14,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from khaos_attribution.identifiers import track_of_segment
+
 NORM_EPS = 1e-12
 PROJECTION_KIND = "count_sketch"
 TARGETS = ("loss", "vnorm")
@@ -38,10 +40,8 @@ def pair_noise_seed(seed: int, pair_name: str) -> int:
     return (int(seed) * 1_000_003 + zlib.crc32(pair_name.encode("utf-8"))) % (2**31 - 1)
 
 
-def track_of_pair(pair_id: str) -> str:
-    """The track a pair belongs to: everything before the last ``_seg_``."""
-    head, sep, _ = str(pair_id).rpartition("_seg_")
-    return head if sep else str(pair_id)
+# The track a pair belongs to, by the one segment-id rule.
+track_of_pair = track_of_segment
 
 
 def pair_noise(seed: int, shape: Sequence[int]) -> np.ndarray:

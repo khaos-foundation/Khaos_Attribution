@@ -1,7 +1,9 @@
 """Validators for the provenance record and model card schemas."""
 
+import functools
 import json
 import math
+import numbers
 import re
 from importlib import resources
 
@@ -44,16 +46,21 @@ def _words(error):
     return error.message
 
 
-def _validate(record, schema_name, record_kind):
+@functools.lru_cache(maxsize=None)
+def _validator(schema_name):
+    """A bundled schema's validator and newest version, built once: a record is validated many times a serve."""
     schema = load_schema(schema_name)
+    return Draft202012Validator(schema, format_checker=FormatChecker()), max(known_versions(schema), key=_version, default=None)
+
+
+def _validate(record, schema_name, record_kind):
+    validator, newest = _validator(schema_name)
     theirs = _version(record.get("schema_version")) if isinstance(record, dict) else None
-    newest = max(known_versions(schema), key=_version, default=None)
     # Said before anything else: a closed schema would otherwise report the newer record's fields one by one.
     if theirs and newest and theirs > _version(newest):
         raise WrittenByNewerContract(
             f"Invalid {record_kind}: it was written by a newer contract (schema_version {record['schema_version']}; "
             f"this contract reads up to {newest}). Update the contract here to read it.")
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
     errors = sorted(validator.iter_errors(record), key=lambda e: list(e.absolute_path))
     if not errors:
         return record
@@ -78,14 +85,25 @@ def validate_model_card(record):
     return _validate(record, "model_card.schema.json", "model card")
 
 
-# JSON Schema can bound each share but cannot add them up; the sum checks live here.
+# JSON Schema can bound each share but cannot add them up; the sum checks live here. A sum further than this from the
+# whole is refused, compared on the float total exactly as every stored record was first validated.
 _SHARE_TOLERANCE = 0.01
+
+
+def _real(v) -> bool:
+    """A finite real number of any type the schema takes as one, numpy's included; never a bool."""
+    return isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _off(total, whole=100.0) -> bool:
+    """Whether ``total`` lies further than the tolerance from ``whole``; a total that is not a finite number does."""
+    return not _real(total) or abs(total - whole) > _SHARE_TOLERANCE
 
 
 def _check_share_sum(parties, pool, record_kind, required=True):
     for p in parties:
         v = p.get("share_pct", 0)
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        if not _real(v):
             raise AttributionValidationError(
                 f"Invalid {record_kind}: a {pool[:-1]} share is not a finite number")
     total = sum(p.get("share_pct", 0) for p in parties)
@@ -94,7 +112,7 @@ def _check_share_sum(parties, pool, record_kind, required=True):
             raise AttributionValidationError(
                 f"Invalid {record_kind}: {pool} is empty")
         return
-    if abs(total - 100.0) > _SHARE_TOLERANCE:
+    if _off(total):
         raise AttributionValidationError(
             f"Invalid {record_kind}: {pool} shares sum to {total:g}, not 100")
 
@@ -113,8 +131,8 @@ _CODE_RULES = {
 def _check_code_fields(record, record_kind):
     """Say what is wrong with an ISRC/ISWC in words, not in regex; the
     schema enforces identical rules, these run first."""
-    import re
-
+    if not isinstance(record, dict):
+        raise AttributionValidationError(f"Invalid {record_kind}: a record is an object, not {type(record).__name__}")
     for key, (pattern, hint) in _CODE_RULES.items():
         field = record.get(key)
         if not isinstance(field, dict):
@@ -206,6 +224,24 @@ def evidence_review_key(track):
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def _check_groups(groups):
+    """A group-removal estimate's groups: each named once, each a finite share between 0 and 100, together the whole."""
+    ids = [g["group_id"] for g in groups]
+    if len(ids) != len(set(ids)):
+        raise AttributionValidationError("Invalid attribution estimate: a group appears twice")
+    for g in groups:
+        v = g["share_pct"]
+        if not _real(v):
+            raise AttributionValidationError(f"Invalid attribution estimate: group {g['group_id']} is not a finite share")
+        if not 0.0 <= v <= 100.0:
+            raise AttributionValidationError(
+                f"Invalid attribution estimate: group {g['group_id']}'s share {v:g} is not between 0 and 100")
+    group_total = sum(g["share_pct"] for g in groups)
+    if _off(group_total):
+        raise AttributionValidationError(
+            f"Invalid attribution estimate: group shares sum to {group_total:g}, not 100")
+
+
 def validate_attribution_estimate(record):
     """Validate an attribution estimate; raise AttributionValidationError if invalid.
 
@@ -214,16 +250,10 @@ def validate_attribution_estimate(record):
     """
     _validate(record, "attribution_estimate.schema.json", "attribution estimate")
     if (record.get("method") or {}).get("kind") == "group_removal":
-        ids = [g["group_id"] for g in record["groups"]]
-        if len(ids) != len(set(ids)):
-            raise AttributionValidationError("Invalid attribution estimate: a group appears twice")
-        group_total = sum(g["share_pct"] for g in record["groups"])
-        if abs(group_total - 100.0) > _SHARE_TOLERANCE:
-            raise AttributionValidationError(
-                f"Invalid attribution estimate: group shares sum to {group_total:g}, not 100")
+        _check_groups(record["groups"])
     else:
         influence_total = sum(t["blended_share_pct"] for t in record["influence"])
-        if abs(influence_total - 100.0) > _SHARE_TOLERANCE:
+        if _off(influence_total):
             raise AttributionValidationError(
                 f"Invalid attribution estimate: blended influence sums to "
                 f"{influence_total:g}, not 100")
@@ -245,14 +275,14 @@ def validate_attribution_estimate(record):
     # The money follows the influence: the writers' shares and the unattributed remainder are the whole.
     writers_total = sum(p["share_pct"] for p in record["splits"].get("writers") or [])
     unattributed = record["splits"].get("unattributed_pct", 0.0)
-    if abs(writers_total + unattributed - 100.0) > _SHARE_TOLERANCE:
+    if _off(writers_total + unattributed):
         raise AttributionValidationError(
             f"Invalid attribution estimate: writers ({writers_total:g}) plus unattributed "
             f"({unattributed:g}) is not 100")
     if (record.get("method") or {}).get("kind") == "dtrak":
         for entry in record["influence"]:
             if entry.get("influence_share_pct") is None or \
-                    abs(entry["influence_share_pct"] - entry["blended_share_pct"]) > _SHARE_TOLERANCE:
+                    _off(entry["influence_share_pct"] - entry["blended_share_pct"], whole=0.0):
                 raise AttributionValidationError(
                     f"Invalid attribution estimate: track {entry['track_id']} measured influence is not "
                     "the share the money follows")
