@@ -1,11 +1,12 @@
 """PreToolUse guard: nothing under a folder named data, artists or outputs is edited or removed from a session.
-Called by guard.sh with the tool call on stdin, then the root and the repositories under it (none: the root is one).
+Called by guard.sh with the call on stdin, then the root and the folders it guards under it (none: the root is one).
 """
 import json
 import os
 import re
 import shlex
 import sys
+import threading
 
 PROTECTED = ("data", "artists", "outputs")
 # Tracked notes inside a protected folder; they are source and stay editable.
@@ -45,6 +46,9 @@ CODE_REMOVE = re.compile(r"rmtree|removedirs|os\.(?:remove|unlink|rmdir)|\.(?:un
 CODE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?<!api/)(?<!operator/)(?:data|artists|outputs)" + SLASH)
 CODE_REMOVE_NAMED = re.compile(r"(?:rmtree|removedirs|remove|unlink|rmdir|rmSync|unlinkSync|rmdirSync)\(\s*[rfb]?[\"']"
                                r"[^\"']*(?<![A-Za-z0-9_])(?:data|artists|outputs)[\"']")
+# A protected folder joined as a path from its bare quoted name: Path(r) / "data", os.path.join(r, "data").
+CODE_JOINED = re.compile(r"(?:/\s*|\b(?:Path|PurePath)\s*\(\s*|\b(?:join|joinpath)\s*\((?:[^()]|\([^()]*\))*?)"
+                         r"[rfbu]?[\"'](?:data|artists|outputs)[\"']|[rfbu]?[\"'](?:data|artists|outputs)[\"']\s*/")
 CRUDE_VERB = re.compile(r"(?<![A-Za-z0-9_])(?:rm|remove|unlink|shred|truncate)|-delete|--del")
 # In the words of a command the guard does not model, a removing word is not an option (--rm) or part of a path.
 HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![\w-])-delete|--del")
@@ -57,6 +61,8 @@ GLOB_FOLDERS = 256
 EXPANSIONS = 256
 # Where a loop or a group ends: what it printed may be piped on from there.
 CLOSERS = ("done", "fi", "esac", "}")
+# Claude Code lets a call through when its hook outlasts the 10 seconds each settings.json gives it: refuse first.
+LIMIT_SECONDS = 8
 
 
 class Refuse(Exception):
@@ -103,18 +109,26 @@ def judge_edit(path, cwd, bases):
             raise Refuse(path + " is under a folder named " + name + "; artist material is never edited from a session")
 
 
+def main_checkout(root):
+    """The main checkout of the worktree at root, read from the link its .git file holds; None when root is not one."""
+    gitfile = os.path.join(root, ".git")
+    if not os.path.isfile(gitfile):
+        return None
+    # git writes the link with forward slashes on Windows too, and may write it relative to the worktree.
+    link = native(open(gitfile, encoding="utf-8").read().split("gitdir:", 1)[-1].strip())
+    gitdir = os.path.normpath(os.path.join(root, link))
+    found = gitdir.split(os.sep + ".git" + os.sep + "worktrees")[0]
+    return found if found != gitdir else None
+
+
 def judge_sibling(path, cwd, root):
     """Refuse a write into another repository: a folder beside this one, or beside its main checkout, holding .git."""
     given = os.path.abspath(os.path.join(native(cwd), native(path)))
     parents, own = set(), {os.path.basename(root)}
-    gitfile = os.path.join(root, ".git")
-    if os.path.isfile(gitfile):
-        # git writes the link with forward slashes on Windows too.
-        gitdir = os.path.normpath(native(open(gitfile, encoding="utf-8").read().split("gitdir:", 1)[-1].strip()))
-        main_checkout = gitdir.split(os.sep + ".git" + os.sep + "worktrees")[0]
-        if main_checkout != gitdir:
-            parents.add(os.path.dirname(main_checkout))
-            own.add(os.path.basename(main_checkout))
+    main = main_checkout(root)
+    if main:
+        parents.add(os.path.dirname(main))
+        own.add(os.path.basename(main))
     parents.add(os.path.dirname(root))
     for full in {given, os.path.realpath(given)}:
         for parent in parents | {os.path.realpath(p) for p in parents}:
@@ -170,8 +184,18 @@ def double_quoted(text, i, nested):
     raise ValueError("no closing quote")
 
 
+def code_path(text):
+    """True when code names a protected folder as a path: written with a slash, or joined from its bare name."""
+    return bool(CODE_PATH.search(text) or CODE_JOINED.search(text))
+
+
+def crude_path(text):
+    """The crude rules' protected path: a protected name and a slash anywhere, or a name joined as code joins it."""
+    return bool(CRUDE_PATH.search(text) or CODE_JOINED.search(text))
+
+
 def code_removes(code):
-    return bool(CODE_REMOVE.search(code) and CODE_PATH.search(code) or CODE_REMOVE_NAMED.search(code))
+    return bool(CODE_REMOVE.search(code) and code_path(code) or CODE_REMOVE_NAMED.search(code))
 
 
 def occurrences(text):
@@ -359,7 +383,7 @@ def removing(what, args, state, fed, feed, globs=True):
         return
     # A path in a variable, a substitution or a loop the guard cannot follow: the crude rule, a protected path
     # anywhere on the line, and any find on the line is taken as where the path comes from.
-    if CRUDE_PATH.search(state["text"]):
+    if crude_path(state["text"]):
         raise Refuse(what + " takes a path that is not written out, and the line holds a data/, artists/ or "
                      "outputs/ path")
     # Here only a path counts (a word with a slash), its names as the folders are written (not DATA, nor the system's
@@ -375,7 +399,7 @@ def removing(what, args, state, fed, feed, globs=True):
         # The find runs in a folder its own line's cd may have taken it to; where that cannot be followed, the old
         # rule for that line.
         if folders is None:
-            if CRUDE_VERB.search(line) and CRUDE_PATH.search(line):
+            if CRUDE_VERB.search(line) and crude_path(line):
                 raise Refuse(what + " takes a path that is not written out, from a find in a folder the guard cannot "
                              "follow, on a line that holds a data/, artists/ or outputs/ path")
             continue
@@ -606,7 +630,7 @@ def unmodelled(name, words, state, fed, feed, depth, quiet):
     """A command the guard does not model may run what it is handed: the crude rule for its own words, then its
     first word the guard knows is judged as its command. Its own options are not modelled."""
     handed = " ".join(words)
-    if CRUDE_PATH.search(handed) and (HANDED_VERB.search(handed) or CODE_REMOVE.search(handed)):
+    if crude_path(handed) and (HANDED_VERB.search(handed) or CODE_REMOVE.search(handed)):
         raise Refuse(name + " is not a command the guard reads, and its words hold a removing command and a "
                      "data/, artists/ or outputs/ path")
     i = recognised(words[1:])
@@ -796,7 +820,7 @@ def judge_bash(cmd, cwd, bases):
         judge(cmd, {"cwd": cwd, "inside": bool(inside), "vars": {}, "text": cmd, "tally": tally, "words": [],
                     "finds": []}, 0)
         # The floor: a removing word the guard could not place, on a line that holds a protected path.
-        if CODE_PATH.search(cmd) and occurrences(cmd) > (0 if tally["void"] else tally["placed"]):
+        if code_path(cmd) and occurrences(cmd) > (0 if tally["void"] else tally["placed"]):
             raise Refuse("the line holds a removing word the guard cannot place, and a data/, artists/ or outputs/ "
                          "path")
     except RecursionError:
@@ -805,16 +829,23 @@ def judge_bash(cmd, cwd, bases):
         raise Refuse(str(refusal) + "; artist material is never removed from a session")
     except Exception:
         # Not readable as shell: the crude rule, a removing word and a protected path anywhere in the text.
-        if CRUDE_VERB.search(cmd) and CRUDE_PATH.search(cmd):
+        if CRUDE_VERB.search(cmd) and crude_path(cmd):
             raise Refuse("the command could not be read, and it holds a removing command and a data/, artists/ or "
                          "outputs/ path; artist material is never removed from a session")
+
+
+def guarded(root, repos):
+    """The folders whose protected folders an edit may not reach: those named under the root, or the root itself,
+    and the same under its main checkout when the root is a worktree. Only those that are there count."""
+    tops = [root] + [main for main in [main_checkout(root)] if main]
+    homes = [home for top in tops for home in ([os.path.join(top, repo) for repo in repos] or [top])
+             if os.path.isdir(home)]
+    return sorted(set(homes) | {os.path.realpath(home) for home in homes})
 
 
 def verdict(call, root, repos=(), siblings_read_only=False):
     """Why a tool call (the hook's JSON, parsed) is refused, or None. No `repos`: the root is the repository."""
     root = os.path.abspath(native(root))
-    homes = [os.path.join(root, repo) for repo in repos] or [root]
-    bases = sorted(set(homes) | {os.path.realpath(home) for home in homes})
     try:
         tool, args = call.get("tool_name", ""), call.get("tool_input") or {}
         cwd = call.get("cwd") or root
@@ -827,9 +858,13 @@ def verdict(call, root, repos=(), siblings_read_only=False):
     except Exception:
         return "the tool call could not be read"
     try:
+        bases = guarded(root, repos)
         if tool == "Bash":
             judge_bash(target, cwd, bases)
         elif target:
+            # With none of them there, the edit rule would guard nothing, so nothing is let through unjudged.
+            if not bases:
+                raise Refuse("none of the folders the guard keeps is under " + root + ", so an edit cannot be judged")
             judge_edit(target, cwd, bases)
             if siblings_read_only:
                 judge_sibling(target, cwd, root)
@@ -840,16 +875,28 @@ def verdict(call, root, repos=(), siblings_read_only=False):
     return None
 
 
+def late():
+    print("refused: the guard did not finish judging the call within %g seconds" % LIMIT_SECONDS, file=sys.stderr)
+    sys.stderr.flush()
+    os._exit(2)
+
+
 def main():
+    timer = threading.Timer(LIMIT_SECONDS, late)
+    timer.daemon = True
+    timer.start()
     try:
-        call = json.load(sys.stdin)
-    except Exception:
-        call = None
-    repos = [arg for arg in sys.argv[2:] if not arg.startswith("--")]
-    why = verdict(call, sys.argv[1], repos, "--siblings-read-only" in sys.argv[2:])
-    if why:
-        print("refused: " + why, file=sys.stderr)
-        sys.exit(2)
+        try:
+            call = json.load(sys.stdin)
+        except Exception:
+            call = None
+        repos = [arg for arg in sys.argv[2:] if not arg.startswith("--")]
+        why = verdict(call, sys.argv[1], repos, "--siblings-read-only" in sys.argv[2:])
+        if why:
+            print("refused: " + why, file=sys.stderr)
+            sys.exit(2)
+    finally:
+        timer.cancel()
 
 
 if __name__ == "__main__":
