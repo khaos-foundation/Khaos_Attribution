@@ -323,7 +323,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                "record_sha256": rec["record_sha256"], "machine_key_id": rec["machine_key_id"],
                "machine_public_pem": rec.get("machine_public_pem"),
                "countersignature": rec["countersignature"], "served": rec["served"],
-               "withdrawn_at": rec["withdrawn_at"], "withdraw_reason": rec["withdraw_reason"],
+               "withdrawn_at": rec["withdrawn_at"],
                "log_state": "unresolved" if serial in unresolved else None}
         return (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
