@@ -2,7 +2,14 @@
 
 ## What this repo is
 
-The contract package the other three repos pin by tag: rights schemas, the estimator, the watermark codec, the seal. Every change is a version; the Space pins the tag in pyproject and the Workshop installs a copy of the sibling checkout, never an editable one, and pins its version in `src/common/contract.py`.
+The contract the rooms share: rights schemas and their validators, the estimators, the watermark codec, Content Credentials, the seal, the Guild Register's client, and the engine socket (`src/khaos_attribution/engines/`). Every change is a version; the Space pins the tag in pyproject and the Workshop installs a copy of the sibling checkout, never an editable one, and pins its version in `src/common/contract.py`.
+
+It also holds the Guild Register's service (`src/register_service/`, its deploy scripts in `deploy/`, its reference in `docs/registry-service.md`): one process on its own server, deployed from a tag by that tag's own `deploy/register-server.sh`.
+
+## The Register (house rule)
+
+- The service's code and configuration on the live server change only by the owner's deploy.
+- Its ledger and its signed log are permanent and public: a row or an entry is never edited or removed. A withhold hides a body from view, never a leaf; a strike is a new `revoke` entry, and an account's withdrawal a new `revoke` or, for a model already struck, a new `withdraw`.
 
 ## Comments and docstrings (house rule)
 

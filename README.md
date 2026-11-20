@@ -10,7 +10,8 @@ carries), and an **evidence review** (a published run's tracks cleared on the im
 functions that validate records against them using
 [jsonschema](https://python-jsonschema.readthedocs.io/), and the shared
 implementation modules the two apps pin: `watermark` (AudioSeal — SECDED
-codewords, a bucket per model derived from its machine key and run id, retirement, the recorded reset history),
+codewords, a model's bucket derived from its machine key and run id and shared by many models, retirement, the
+recorded reset history),
 `fingerprint`, `estimator` and `blend` (the attribution estimate and
 its blend of signals), `diagnostics` (whether that estimate's similarity
 signal varied with the output at all, or returns the same tracks whatever
@@ -63,15 +64,15 @@ khaos-verify song.wav                      # WAV, FLAC, MP3, OGG; M4A and AAC ne
 khaos-verify song.mp3 --register https://register.example --json
 ```
 
-The answer is one of six verdicts. **confirmed**: the audio matches a released Khaos output in the Register's
+The answer is one of seven verdicts. **confirmed**: the audio matches a released Khaos output in the Register's
 index. **signed**: an intact signed record claims Khaos made it; the signing machine is not yet certified, so this
 alone is not proof. **expired**: an intact signed record whose signing certificate is past its date; the file is
 as it was signed, and `status` is worked out as for **signed**. **tampered**: the file was changed after it was signed.
-**marked**: a watermark alone, which
-is not proof either. **none**: no Khaos mark was found, which never proves a person made the audio. Beside the
-verdict, `status` says it in one of five words: **DETECTED** (a Register match, or an intact record whose watermark
+**marked**: a watermark in Khaos's ID format alone, which is not proof either: other services mark with AudioSeal
+too. **foreign**: an AudioSeal mark that carries no Khaos ID, which says nothing about Khaos. **none**: no Khaos
+mark was found, which never proves a person made the audio. Beside the verdict, `status` says it in one of five words: **DETECTED** (a Register match, or an intact record whose watermark
 is heard too; a mark was found, which is not proof of origin), **INCONCLUSIVE** (a broken record, an intact record
-whose watermark is not heard or is contradicted, a watermark alone, or not every check could run), **NOT_DETECTED** (every check ran and found
+whose watermark is not heard or is contradicted, a watermark alone, a foreign mark, or not every check could run), **NOT_DETECTED** (every check ran and found
 nothing), **NOT_SUPPORTED** (nothing found, and the file's format cannot carry Content Credentials: OGG, Opus, AAC)
 and **ERROR**. The record is the C2PA assertion `dev.khaos.provenance`. Files longer than 20 minutes are not decoded. Authorities, researchers and the press can ask for a verify key at
 foundation@khaos.dev; it lifts the per-address limit (`--key` or `KHAOS_VERIFY_KEY`).
@@ -133,7 +134,7 @@ was made.
 | `timestamp` | When the output was generated, in ISO 8601 date-time form, e.g. `2026-08-10T12:00:00Z`. |
 | `base_model` | The name and version of the underlying base model the adapter was applied to. |
 | `base_model_licence` | The licence the base model is distributed under, so downstream users know what terms apply. |
-| `watermark_id` | *(optional)* A whole number between 0 and 65535 embedded in the audio watermark (AudioSeal): the codeword of the model's bucket, derived from its machine key and run id and written in its model card. Many models share a bucket, so the mark narrows a check to a few models and never names one; the Guild Register's serial names the model. `null` when the serving machine could not mark the output — the `/verify` surfaces say so loudly. |
+| `watermark_id` | *(optional)* A whole number between 0 and 65535 embedded in the audio watermark (AudioSeal): the codeword of the model's bucket, derived from its machine key and run id and written in its model card. Many models share a bucket, so the mark narrows a check to a few models and never names one; the Guild Register's serial names the model. `null` when the serving machine could not mark the output. |
 | `generation_mode` | *(optional, since v0.2.0)* How the output was produced: `text2music` for a fresh generation (the default when omitted), or `retake`, `repaint`, `extend`, `audio2audio` for outputs derived from an earlier one. |
 | `source_generation_id` | *(optional, since v0.2.0)* When the output was derived from an earlier generation, the generation ID of that source output, so lineage can be traced through the registry. `null` (or omitted) for fresh generations. |
 
