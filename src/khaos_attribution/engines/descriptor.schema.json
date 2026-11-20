@@ -346,9 +346,6 @@
       "properties": {
         "feature_version": {
           "type": "string"
-        },
-        "timestep_convention": {
-          "type": "string"
         }
       }
     },

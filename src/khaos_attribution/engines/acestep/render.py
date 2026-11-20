@@ -70,6 +70,9 @@ def force_codec_fp32(handler_cls) -> None:
     import torch  # noqa: PLC0415
     if getattr(handler_cls, "_khaos_codec_fp32_installed", False):
         return
+    if not callable(getattr(handler_cls, "_get_vae_dtype", None)):
+        log.warning("The engine has no _get_vae_dtype: its codec calls may not consult the fp32 rule installed here "
+                    "(the seams canary names what moved)")
 
     def _get_vae_dtype(self, device=None):
         return torch.float32
@@ -88,6 +91,9 @@ def lift_turbo_step_clamp(handler_cls) -> None:
         log.warning("The engine has no _normalize_service_generate_inputs: its turbo step clamp, if any, stands")
         return
     signature = inspect.signature(orig)
+    if "infer_steps" not in signature.parameters:
+        log.warning("The engine's _normalize_service_generate_inputs takes no infer_steps: its turbo step clamp, if "
+                    "any, stands (the seams canary names what moved)")
 
     def unclamped(self, *args, **kwargs):
         out = orig(self, *args, **kwargs)
@@ -121,10 +127,19 @@ def accepted_params(params_cls, kwargs: dict) -> tuple:
     return accepted, sorted(dropped)
 
 
-def lora_call_failed(result) -> bool:
-    """ACE-Step's LoRA controls report failure in the RETURN STRING, not an exception."""
-    s = str(result or "").strip()
-    return s.startswith(("⚠️", "❌")) or "❌" in s or s.lower().startswith("error")
+# Where a head extend's padded copy of the source is written, beside the output; removed with it.
+HEAD_SRC_DIR = ".head_src"
+
+
+def remove_temps(temps) -> None:
+    """The render's temporary files, and the head-extend folder they sat in once it is empty."""
+    for t in temps:
+        Path(t).unlink(missing_ok=True)
+        if Path(t).parent.name == HEAD_SRC_DIR:
+            try:
+                Path(t).parent.rmdir()
+            except OSError:
+                pass
 
 
 @contextlib.contextmanager
@@ -228,6 +243,18 @@ class AceStepRenderer:
         variant = variant or DESCRIPTOR.default_variant
         if variant not in DESCRIPTOR.variants:
             raise RuntimeError(f"ACE-Step has no variant {variant!r}")
+        handler, status = self._init_handler(variant)
+        self.handler = handler
+        self._handlers[variant] = handler
+        self._yielded = False
+        log.info("ACE-Step %s model loaded: %s", variant, status)
+
+    def _init_handler(self, variant: str) -> tuple:
+        """(handler, status) on the variant's weights, the engine's patches installed first; base loads with the hub
+        offline and is refused when its weights are absent or its checkpoint declares turbo, however it is asked for."""
+        if variant == "base" and not self.base_available():
+            log.error("Base checkpoint weights missing at %s", self.base_checkpoint_path())
+            raise RuntimeError("Base checkpoint not installed (the server log names the path)")
         from acestep.handler import AceStepHandler  # noqa: PLC0415
         if self._resolved_device() == "mps":
             force_mps_bf16(AceStepHandler)
@@ -241,34 +268,18 @@ class AceStepRenderer:
         with _hub_offline(variant == "base"):
             status, ok = handler.initialize_service(**self._init_kwargs(config_path))
         if not ok:
-            raise RuntimeError(f"ACE-Step failed to initialise: {status}")
-        self.handler = handler
-        self._handlers[variant] = handler
-        self._yielded = False
-        log.info("ACE-Step %s model loaded: %s", variant, status)
+            what = "ACE-Step base checkpoint" if variant == "base" else "ACE-Step"
+            raise RuntimeError(f"{what} failed to initialise: {status}")
+        if variant == "base" and handler.is_turbo_model():
+            raise RuntimeError(f"{self.base_checkpoint_path().name} declares is_turbo — not a base checkpoint")
+        return handler, status
 
     def _handler_for(self, variant: str):
         if variant in self._handlers:
             return self._handlers[variant]
         if variant != "base":
             raise RuntimeError(f"Engine variant {variant!r} is not loaded")
-        if not self.base_available():
-            log.error("Base checkpoint weights missing at %s", self.base_checkpoint_path())
-            raise RuntimeError("Base checkpoint not installed (the server log names the path)")
-        from acestep.handler import AceStepHandler  # noqa: PLC0415
-        if self._resolved_device() == "mps":
-            force_mps_bf16(AceStepHandler)
-        force_codec_fp32(AceStepHandler)
-        lift_turbo_step_clamp(AceStepHandler)
-        path = self.base_checkpoint_path()
-        config_path = path.name if path.parent == self.checkpoints_root().resolve() else str(path)
-        handler = AceStepHandler()
-        with _hub_offline(True):
-            status, ok = handler.initialize_service(**self._init_kwargs(config_path))
-        if not ok:
-            raise RuntimeError(f"ACE-Step base checkpoint failed to initialise: {status}")
-        if handler.is_turbo_model():
-            raise RuntimeError(f"{path.name} declares is_turbo — not a base checkpoint")
+        handler, status = self._init_handler("base")
         self._handlers["base"] = handler
         log.info("ACE-Step BASE model loaded: %s", status)
         return handler
@@ -398,7 +409,7 @@ class AceStepRenderer:
                 audio, sr = sf.read(str(src), dtype="float32", always_2d=True)
                 head = int(round(float(req.extend_head) * sr))
                 padded = np.concatenate([np.zeros((head, audio.shape[1]), dtype="float32"), audio])
-                pad_dir = Path(out_dir) / ".head_src"
+                pad_dir = Path(out_dir) / HEAD_SRC_DIR
                 pad_dir.mkdir(parents=True, exist_ok=True)
                 src = pad_dir / "head_padded_source.wav"
                 sf.write(str(src), padded, sr)
@@ -473,8 +484,7 @@ class AceStepRenderer:
         finally:
             for h in hooks:
                 h.remove()
-            for t in temps:
-                Path(t).unlink(missing_ok=True)
+            remove_temps(temps)
             if variant == "base" and release_base:
                 del handler
                 self.release_base()

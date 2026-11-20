@@ -175,8 +175,7 @@
   },
   "latent_fps": 25,
   "measure": {
-    "feature_version": "vnorm/1",
-    "timestep_convention": "t->1 is noise; flow-matching velocity x1-x0"
+    "feature_version": "vnorm/1"
   },
   "memory": {
     "resident_gb": 21.0,

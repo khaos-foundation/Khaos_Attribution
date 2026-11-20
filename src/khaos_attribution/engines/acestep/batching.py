@@ -21,6 +21,8 @@ from typing import Any, Iterator, Sequence
 
 import logging
 
+from khaos_attribution.engines.acestep import DESCRIPTOR
+
 log = logging.getLogger(__name__)
 
 # The attention mask of the batch currently inside training_step (B, T),
@@ -76,6 +78,12 @@ def install_masked_loss(module_cls) -> bool:
     real_f = getattr(mod, "F", None)
     if mod is None or real_f is None or not hasattr(real_f, "mse_loss"):
         log.error("masked_loss: %s has no module-level F to patch — leaving the loss unmasked",
+                  module_cls.__name__)
+        return False
+    # Claimed only where the step computes the loss it masks; a step whose code cannot be read is not claimed.
+    names = getattr(getattr(module_cls.training_step, "__code__", None), "co_names", ())
+    if "mse_loss" not in names:
+        log.error("masked_loss: %s.training_step computes no mse_loss that can be seen — leaving the loss unmasked",
                   module_cls.__name__)
         return False
     setattr(mod, "F", _FunctionalProxy(real_f))
@@ -166,45 +174,9 @@ class LengthBucketBatchSampler:
 
 
 def dataset_lengths(dataset, cache_name: str = ".khaos_lengths.json") -> list[int]:
-    """Latent length (frames) of every sample of an ACE-Step
-    ``PreprocessedTensorDataset`` (or a ``Subset`` of one), read from the
-    tensor files once and cached beside them keyed by name + mtime."""
-    import torch  # noqa: PLC0415
-
-    base = dataset
-    indices = None
-    if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):   # torch Subset
-        base, indices = dataset.dataset, list(dataset.indices)
-    paths = [Path(p) for p in getattr(base, "valid_paths", [])]
-    if not paths:
-        raise ValueError("length_buckets: the dataset exposes no valid_paths (not a PreprocessedTensorDataset)")
-    cache_path = paths[0].parent / cache_name
-    cache: dict[str, list] = {}
-    try:
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        cache = {}
-    lengths: list[int] = []
-    dirty = False
-    for p in paths:
-        key, mtime = p.name, p.stat().st_mtime
-        hit = cache.get(key)
-        if hit and abs(float(hit[0]) - mtime) < 1e-6:
-            lengths.append(int(hit[1]))
-            continue
-        data = torch.load(str(p), map_location="cpu", weights_only=True)
-        t = int(data["target_latents"].shape[0])
-        cache[key] = [mtime, t]
-        lengths.append(t)
-        dirty = True
-    if dirty:
-        try:
-            cache_path.write_text(json.dumps(cache), encoding="utf-8")
-        except OSError:
-            pass
-    if indices is not None:
-        lengths = [lengths[i] for i in indices]
-    return lengths
+    """Latent length (frames) of every sample of an ACE-Step ``PreprocessedTensorDataset`` (or a ``Subset`` of
+    one): :func:`dataset_facts`' frames, so both read the tensors once into one cache."""
+    return [f["frames"] for f in dataset_facts(dataset, cache_name)]
 
 
 def install_length_buckets(data_module_cls, seed: int, start_epoch: int = 0) -> bool:
@@ -278,9 +250,9 @@ def uninstall_length_buckets(data_module_cls) -> bool:
 # per frame). The crop is cut in the step hook on the main process, so loader
 # workers hold no state and the manifest counts what the model actually saw.
 
-# ACE-Step's VAE (AutoencoderOobleck, 48 kHz, 1920 samples a frame) puts
-# target_latents at exactly 25 frames a second; every per-frame companion shares the axis.
-LATENT_FPS = 25
+# ACE-Step's VAE (AutoencoderOobleck, 48 kHz, 1920 samples a frame) puts target_latents at the descriptor's latent
+# frame rate; every per-frame companion shares the axis.
+LATENT_FPS = DESCRIPTOR.latent_fps
 INSTRUMENTAL_LYRICS = "[Instrumental]"
 # The keys that share target_latents' time axis; named explicitly rather than
 # "every tensor whose first dim is T", or a caption of T tokens would be sliced.

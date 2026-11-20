@@ -95,12 +95,12 @@ _codec_precision = "fp32"     # what the patched codec loader encodes in during 
 def codec_precision_for(contract_version: str | None) -> str:
     """What the codec encoded a run's latents in: fp32 from CODEC_FP32_SINCE, bf16 before it or when the run
     recorded no version. A query encoded the other way does not match its index."""
-    try:
-        parts = tuple(int(x) for x in str(contract_version or "").split(".")[:3])
-    except ValueError:
+    import re  # noqa: PLC0415
+    found = re.match(r"v?(\d+)\.(\d+)\.(\d+)", str(contract_version or "").strip())
+    if not found:
         return "bf16"
     since = tuple(int(x) for x in CODEC_FP32_SINCE.split("."))
-    return "fp32" if len(parts) == 3 and parts >= since else "bf16"
+    return "fp32" if tuple(int(x) for x in found.groups()) >= since else "bf16"
 
 
 def patch_vae_precision() -> None:
@@ -122,54 +122,46 @@ def patch_vae_precision() -> None:
 
 
 def patch_mps_precision() -> None:
-    """MPS trains in bf16 as CUDA does: the engine's fp16 trips the GradScaler there and fp32 gives non-finite
-    gradients. Both modules import the selectors by value, so both are patched; a revision whose selectors take
-    requested_precision honours the config already and is left alone."""
-    import torch  # noqa: PLC0415
+    """MPS trains at the run's precision (bf16, as CUDA does): the pinned trainer's selectors take requested_precision
+    and honour it, so nothing is patched. A revision whose selectors cannot is refused: the engine is pinned."""
     from acestep.training_v2 import fixed_lora_module as _flm  # noqa: PLC0415
-    from acestep.training_v2 import trainer_fixed as _tf  # noqa: PLC0415
 
     if getattr(_flm, "_khaos_mps_precision_patched", False):
         return
-    orig_dtype, orig_precision = _flm._select_compute_dtype, _flm._select_fabric_precision
-    if "requested_precision" in inspect.signature(orig_dtype).parameters:
-        _flm._khaos_mps_precision_patched = True
-        log.info("ACE-Step's dtype selector honours requested_precision; MPS precision patch not needed")
-        return
-
-    def _compute_dtype(device_type: str):
-        return torch.bfloat16 if device_type == "mps" else orig_dtype(device_type)
-
-    def _fabric_precision(device_type: str):
-        return "bf16-mixed" if device_type == "mps" else orig_precision(device_type)
-
-    for mod in (_flm, _tf):
-        if hasattr(mod, "_select_compute_dtype"):
-            mod._select_compute_dtype = _compute_dtype
-        if hasattr(mod, "_select_fabric_precision"):
-            mod._select_fabric_precision = _fabric_precision
+    if "requested_precision" not in inspect.signature(_flm._select_compute_dtype).parameters:
+        raise TrainingUnavailable("this ACE-Step revision's precision selector takes no requested_precision, so a "
+                                  f"run's precision would not be honoured; move the checkout to the pin {DESCRIPTOR.commit[:12]}")
     _flm._khaos_mps_precision_patched = True
-    log.info("Patched ACE-Step MPS precision to bf16 / bf16-mixed")
 
 
-def accepted_kwargs(cls: Any, kwargs: dict, *, keep_none: bool = True, what: str | None = None) -> dict:
-    """Only the kwargs this revision's constructor takes, the rest logged and left out; a callable whose signature
-    cannot be read takes them all. None values are dropped unless kept, so a default applies in their place."""
+def _accepted_names(cls: Any, kwargs: dict) -> set:
     try:
-        accepted = set(inspect.signature(cls).parameters)
+        params = inspect.signature(cls).parameters
     except (TypeError, ValueError):
-        accepted = set(kwargs)
+        return set(kwargs)
+    return set(kwargs) if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()) else set(params)
+
+
+def accepted_kwargs(cls: Any, kwargs: dict, *, keep_none: bool = True, what: str | None = None,
+                    strict: bool = False) -> dict:
+    """Only the kwargs this revision's constructor takes, the rest logged and left out (refused when ``strict``); a
+    callable taking any keyword, or whose signature cannot be read, takes them all. None values are dropped unless
+    kept, so a default applies in their place."""
+    name = what or getattr(cls, "__name__", cls)
+    accepted = _accepted_names(cls, kwargs)
     kept = {k: v for k, v in kwargs.items() if k in accepted and (keep_none or v is not None)}
     dropped = sorted(set(kwargs) - accepted)
+    if dropped and strict:
+        raise TrainingUnavailable(f"{name} on this ACE-Step revision does not take {dropped}: the run would train "
+                                  "without them while its record kept them")
     if dropped:
-        log.warning("%s on this ACE-Step revision does not accept %s; omitting", what or getattr(cls, "__name__", cls),
-                    dropped)
+        log.warning("%s on this ACE-Step revision does not accept %s; omitting", name, dropped)
     return kept
 
 
-def accepted_config(cls: Any, kwargs: dict, *, keep_none: bool = True) -> Any:
+def accepted_config(cls: Any, kwargs: dict, *, keep_none: bool = True, strict: bool = False) -> Any:
     """``cls`` built from the kwargs it takes."""
-    return cls(**accepted_kwargs(cls, kwargs, keep_none=keep_none))
+    return cls(**accepted_kwargs(cls, kwargs, keep_none=keep_none, strict=strict))
 
 
 def adapter_kwargs(cfg: dict) -> tuple:
@@ -184,11 +176,11 @@ def adapter_kwargs(cfg: dict) -> tuple:
                           "attention_type": str(cfg["attention_type"]), "target_modules": cfg.get("target_modules")}
 
 
-def adapter_config(api: TrainingApi, cfg: dict, *, keep_none: bool = True) -> tuple:
+def adapter_config(api: TrainingApi, cfg: dict, *, keep_none: bool = True, strict: bool = False) -> tuple:
     """(adapter type, the engine's adapter config) for a recipe."""
     adapter_type, kwargs = adapter_kwargs(cfg)
     cls = api.LoKRConfig if adapter_type == "lokr" else api.LoRAConfig
-    return adapter_type, accepted_config(cls, kwargs, keep_none=keep_none)
+    return adapter_type, accepted_config(cls, kwargs, keep_none=keep_none, strict=strict)
 
 
 def resolve_device(requested: str = "auto") -> str:
@@ -477,17 +469,14 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
     model = api.load_decoder(str(checkpoint_root), cfg["model_variant"], device, precision)
     if on_model_loaded is not None:
         on_model_loaded(model)
-    adapter_type, adapter_cfg = adapter_config(api, cfg, keep_none=False)
     kwargs = training_config_kwargs(cfg, checkpoint_root=checkpoint_root, tensor_dir=tensor_dir, output_dir=output_dir,
                                     device=device, precision=precision, seed=seed, resume_from=resume_from)
-    try:
-        accepted = set(inspect.signature(api.TrainingConfig).parameters)
-    except (TypeError, ValueError):
-        accepted = set(kwargs)
-    if resume_from is not None and "resume_from" not in accepted:
+    if resume_from is not None and "resume_from" not in _accepted_names(api.TrainingConfig, kwargs):
         raise RuntimeError("This ACE-Step checkout has no resume_from support — cannot resume; update ACE-Step or "
                            "start a fresh run.")
-    train_cfg = accepted_config(api.TrainingConfig, kwargs)
+    # Every field the recipe sets reaches the trainer, or the run is refused: its record keeps them all.
+    adapter_type, adapter_cfg = adapter_config(api, cfg, keep_none=False, strict=True)
+    train_cfg = accepted_config(api.TrainingConfig, kwargs, strict=True)
     log.info("Adapter config: type=%s rank=%d alpha=%d lr=%g epochs=%d", adapter_type, int(cfg["adapter_rank"]),
              int(cfg["adapter_alpha"]), float(cfg["learning_rate"]), int(cfg["max_epochs"]))
     trainer = api.Trainer(model, adapter_cfg, train_cfg)
