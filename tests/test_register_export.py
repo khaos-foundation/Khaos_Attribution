@@ -247,7 +247,7 @@ def _crash_everywhere(store, tmp_path, clock, monkeypatch, mirror, public, full:
             if (keep / name).exists():
                 shutil.copytree(keep / name, where)
         store.db.execute("DELETE FROM log_exports")
-        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?)", record)
+        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?, ?)", record)
         finished = _export_dying_before(store, mirror, public, clock, monkeypatch, deaths, full)
         for where in (mirror, public):
             _every_leaf_proves(where, pem)
@@ -346,7 +346,7 @@ def test_whatever_a_crashed_export_left_log_export_makes_the_public_copy_verify(
             shutil.rmtree(where)
             shutil.copytree(keep / name, where)
         store.db.execute("DELETE FROM log_exports")
-        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?)", record)
+        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?, ?)", record)
         finished = _export_dying_before(store, mirror, public, clock, monkeypatch, k)
         try:
             _every_leaf_proves(public, pem)

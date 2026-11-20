@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS log_keys (key_id TEXT PRIMARY KEY, public_pem TEXT NO
 CREATE TABLE IF NOT EXISTS log_anchors (tree_size INTEGER PRIMARY KEY, root_sha256 TEXT NOT NULL, backend TEXT NOT NULL,
   stamped_at TEXT NOT NULL, receipt BLOB NOT NULL, state TEXT NOT NULL, completed_at TEXT);
 CREATE TABLE IF NOT EXISTS log_exports (place TEXT PRIMARY KEY, format INTEGER NOT NULL, key_id TEXT NOT NULL,
-  tree_size INTEGER NOT NULL, pending_from INTEGER);
+  tree_size INTEGER NOT NULL, pending_from INTEGER, tile_width INTEGER);
 """
 PAGE_MAX = 1000
 # The layout of the static export: leaf hashes and bodies in tiles of T.TILE, a proof naming the first head under the
@@ -79,6 +79,8 @@ class TransLog:
     def __init__(self, store):
         self.store, self.signer, self.blocked, self.off = store, None, None, None
         store.db.executescript(SCHEMA)
+        if "tile_width" not in {r["name"] for r in store.db.execute("PRAGMA table_info(log_exports)")}:
+            store.db.execute("ALTER TABLE log_exports ADD COLUMN tile_width INTEGER")
         self._one_head_per_size()
         self._mark_waiting_admits()
 
@@ -803,7 +805,7 @@ def _written(log: TransLog, root: Path) -> dict | None:
     """What the last export left under ``root``, while the newest head there is the one it wrote and still the
     database's head of that size; else None, and everything is written again."""
     row = log.db.execute("SELECT * FROM log_exports WHERE place = ?", (str(root.resolve()),)).fetchone()
-    if row is None or row["format"] != EXPORT_FORMAT or row["key_id"] != log._key_id():
+    if row is None or row["format"] != EXPORT_FORMAT or row["key_id"] != log._key_id() or row["tile_width"] != T.TILE:
         return None
     try:
         disk = json.loads((root / "sth" / "latest.json").read_text(encoding="utf-8"))
@@ -832,11 +834,13 @@ def export(log: TransLog, mirror: Path, key_doc: dict, public: Path | None = Non
                 # A withhold is an entry: the same size and delay mean the same files.
                 if not (record and record["tree_size"] == len(snap["leaves"]) and record["pending_from"] == pending):
                     latest = _write_log(root, snap, key_doc, pending, record)
-                    if latest is not None:
-                        with log.store._tx():
-                            log.db.execute("INSERT OR REPLACE INTO log_exports (place, format, key_id, tree_size, pending_from)"
-                                           " VALUES (?, ?, ?, ?, ?)", (str(root.resolve()), EXPORT_FORMAT, latest["key_id"],
-                                                                       latest["tree_size"], pending))
+                    if latest is None:
+                        # The files there are ahead of this snapshot: its anchors may be older than theirs too.
+                        continue
+                    with log.store._tx():
+                        log.db.execute("INSERT OR REPLACE INTO log_exports (place, format, key_id, tree_size, pending_from, tile_width)"
+                                       " VALUES (?, ?, ?, ?, ?, ?)", (str(root.resolve()), EXPORT_FORMAT, latest["key_id"],
+                                                                      latest["tree_size"], pending, T.TILE))
                 _write_anchors(root, snap["anchors"])
     except ExportBusy as e:
         logging.getLogger("register_service").warning("log export skipped: %s; the next export catches up", e)

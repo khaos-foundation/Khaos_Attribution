@@ -49,7 +49,7 @@ def _stops(store, clock, monkeypatch, tmp_path, mirror, public, tag: str, delay=
             if (keep / name).exists():
                 shutil.copytree(keep / name, where)
         store.db.execute("DELETE FROM log_exports")
-        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?)", record)
+        store.db.executemany("INSERT INTO log_exports VALUES (?, ?, ?, ?, ?, ?)", record)
         made, write, remove = [0], RT.write_whole, RT._remove
 
         def step():
@@ -106,7 +106,7 @@ def _format_three(store, root: Path) -> None:
     RT.write_whole(root / "sth" / "latest.json", RT._json(snap["heads"][-1]))
     RT.write_whole(root / "key.json", RT._json(_key_doc(store)))
     with store._tx():
-        store.db.execute("INSERT OR REPLACE INTO log_exports VALUES (?, 3, ?, ?, NULL)", (str(root.resolve()), store.log.signer.key_id, n))
+        store.db.execute("INSERT OR REPLACE INTO log_exports VALUES (?, 3, ?, ?, NULL, NULL)", (str(root.resolve()), store.log.signer.key_id, n))
 
 
 def test_a_full_tile_never_changes_and_a_sealed_body_tile_changes_only_for_a_withhold(tmp_path, clock):
@@ -316,3 +316,111 @@ def test_an_unchanged_file_is_answered_by_its_tag(tmp_path):
     again = http.get("/mirror/log/hashes/tail.json", headers={"If-None-Match": first.headers["etag"]})
     assert again.status_code == 304 and not again.content and again.headers["etag"] == first.headers["etag"]
     assert http.get("/mirror/log/hashes/tail.json", headers={"If-None-Match": '"other"'}).status_code == 200
+
+
+class _Turning(V.Mirror):
+    """A mirror that answers hashes/tail.json truly the first time and with a hostile width after."""
+
+    def __init__(self, where: str, width):
+        super().__init__(where)
+        self.asked, self.hostile = 0, width
+
+    def get(self, name: str):
+        doc = super().get(name)
+        if name == "hashes/tail.json":
+            self.asked += 1
+            if self.asked > 1:
+                doc = {**doc, "tile_width": self.hostile}
+        return doc
+
+
+def _victim(tmp_path) -> Path:
+    victim = tmp_path / "victim"
+    (victim / "keep").mkdir(parents=True, exist_ok=True)
+    (victim / "keep" / "file").write_text("mine")
+    return victim
+
+
+@pytest.mark.parametrize("hostile", ["victim", "../../victim", "/", 8, "4/../../.."])
+def test_a_mirror_never_names_a_path_the_cache_touches(tmp_path, clock, hostile):
+    """A tail that turns hostile mid-read is unreadable, and only the cache's own tiles of the width first read go."""
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    for i in range(9):
+        _publish(store, f"model-{i}")
+    _export(store, clock, mirror, public)
+    pem, key_id = store.log.signer.public_pem(), store.log.signer.key_id
+    cache, victim = tmp_path / "cache", _victim(tmp_path)
+    if hostile == "victim":
+        hostile = str(victim)
+    V.load_log(V.CachedMirror(V.Mirror(str(mirror)), cache, key_id), pem)
+    assert (cache / key_id / "4" / "hashes" / "0.json").is_file()
+    with pytest.raises(V.Unreadable):
+        V.load_log(V.CachedMirror(_Turning(str(mirror), hostile), cache, key_id), pem)
+    assert (victim / "keep" / "file").read_text() == "mine"
+    assert sorted(p.name for p in (cache / key_id).iterdir()) in ([], ["4"])
+
+
+@pytest.mark.parametrize("key_id", ["../../victim", "/tmp", "ABCDEF0123456789", "0123", ""])
+def test_a_key_id_that_is_not_one_is_refused_before_any_path_is_made(tmp_path, key_id):
+    with pytest.raises(ValueError):
+        V.CachedMirror(V.Mirror(str(tmp_path)), tmp_path / "cache", key_id)
+
+
+def test_a_linked_cache_folder_is_neither_written_nor_cleared(tmp_path, clock):
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    for i in range(9):
+        _publish(store, f"model-{i}")
+    _export(store, clock, mirror, public)
+    pem, key_id = store.log.signer.public_pem(), store.log.signer.key_id
+    cache, victim = tmp_path / "cache", _victim(tmp_path)
+    for link in (cache / key_id, cache / "other" / "4"):
+        link.parent.mkdir(parents=True, exist_ok=True)
+    (cache / key_id).symlink_to(victim, target_is_directory=True)
+    cached = V.CachedMirror(V.Mirror(str(mirror)), cache, key_id)
+    V.load_log(cached, pem)
+    cached.evict()
+    cached.evict("hashes/0.json")
+    assert sorted(p.name for p in victim.iterdir()) == ["keep"] and (victim / "keep" / "file").read_text() == "mine"
+    inner = tmp_path / "cache-inner"
+    (inner / key_id / "4").mkdir(parents=True)
+    (inner / key_id / "4" / "hashes").symlink_to(victim, target_is_directory=True)
+    cached = V.CachedMirror(V.Mirror(str(mirror)), inner, key_id)
+    V.load_log(cached, pem)
+    cached.evict("hashes/0.json")
+    assert sorted(p.name for p in victim.iterdir()) == ["keep"]
+
+
+def test_a_missing_tile_sends_the_command_to_the_next_mirror(tmp_path, clock):
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    shas = [_publish(store, f"model-{i}") for i in range(9)]
+    clock.pass_(24 * 30)
+    _export(store, clock, mirror, public)
+    holed = tmp_path / "holed"
+    shutil.copytree(mirror, holed)
+    (holed / "log" / "hashes" / "1.json").unlink()
+    with pytest.raises(V.Unreadable):
+        V.load_log(V.Mirror(str(holed)), store.log.signer.public_pem())
+    pem_file = tmp_path / "log.pub"
+    pem_file.write_text(store.log.signer.public_pem())
+    leaf = store.log.admit_leaf_of(shas[0])
+    # Proved from the second mirror (its head is a month old, so it says so), never "not found" from the first.
+    assert V.main([leaf, "--mirror", str(holed), "--mirror", str(public), "--key", str(pem_file), "--state", "none"]) == V.FROZEN
+
+
+def test_moving_from_the_old_layout_with_a_withhold_verifies_at_every_stop(tmp_path, clock, monkeypatch):
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    shas = [_publish(store, f"model-{i}") for i in range(9)]
+    clock.pass_(24 * 30)
+    for where in (mirror, public):
+        _format_three(store, where / "log")
+    leaf = store.log.admit_leaf_of(shas[2])
+    store.log_withhold(leaf, "a private name")
+    stops = _stops(store, clock, monkeypatch, tmp_path, mirror, public, "move-withhold")
+    _both_readers_verify(tmp_path, stops, store.log.signer.public_pem())
+    index = store.log.leaf(leaf)["idx"]
+    for where in (mirror, public):
+        assert LF.bodies(where / "log")[index] is None and not (where / "log" / "bodies.json").exists()

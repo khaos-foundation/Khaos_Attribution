@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -66,22 +67,44 @@ class Mirror:
             raise Unreadable(f"{self.where}: {e}") from None
 
 
+_TILE_NAME = re.compile(r"(hashes|bodies)/[0-9]{1,9}\.json")
+_KEY_ID = re.compile(r"[0-9a-f]{16}")
+
+
 class CachedMirror(Mirror):
     """A mirror whose full hash tiles and sealed body tiles are kept under ``base``/<key id>/<tile width>/: a tile's
-    bytes never change except a body tile under a withhold, and every tile read is still checked against the head."""
+    bytes never change except a body tile under a withhold, and every tile read is still checked against the head.
+    Nothing a mirror says names a path: the width is checked before it is used, and nothing outside ``base`` is touched."""
 
     def __init__(self, mirror: Mirror, base: Path, key_id: str):
+        if not isinstance(key_id, str) or not _KEY_ID.fullmatch(key_id):
+            raise ValueError("a log key id is 16 lowercase hex characters")
         self.mirror, self.base, self.key_id, self.width, self.cached = mirror, Path(base), key_id, None, set()
         self.where, self.timeout, self.local = mirror.where, mirror.timeout, mirror.local
 
-    def _place(self, name: str) -> Path | None:
-        if self.width is None or not name.startswith(("hashes/", "bodies/")) or name.endswith("/tail.json"):
+    def _folder(self) -> Path | None:
+        """This key's and width's folder, when it lies in the cache base with no link on the way; else None."""
+        if self.width is None:
             return None
-        return self.base / self.key_id / str(self.width) / name
+        base = self.base.resolve()
+        folder = self.base / self.key_id / str(self.width)
+        for step in (self.base / self.key_id, folder):
+            if step.is_symlink():
+                return None
+        return folder if folder.resolve() == base / self.key_id / str(self.width) else None
+
+    def _place(self, name: str) -> Path | None:
+        folder = self._folder()
+        if folder is None or not _TILE_NAME.fullmatch(name):
+            return None
+        sub = folder / name.split("/")[0]
+        if sub.is_symlink() or (sub.exists() and sub.resolve() != folder.resolve() / name.split("/")[0]):
+            return None
+        return folder / name
 
     def get(self, name: str):
         place = self._place(name)
-        if place is not None and place.is_file():
+        if place is not None and place.is_file() and not place.is_symlink():
             try:
                 doc = json.loads(place.read_text(encoding="utf-8"))
                 self.cached.add(name)
@@ -90,11 +113,15 @@ class CachedMirror(Mirror):
                 self.evict(name)
         doc = self.mirror.get(name)
         if name == "hashes/tail.json":
-            self.width = doc.get("tile_width") if isinstance(doc, dict) else None
+            width = _width(doc)
+            if self.width is not None and width != self.width:
+                raise Unreadable("the mirror's tile width changed while it was read; run again")
+            self.width = width
         elif place is not None:
             try:
                 place.parent.mkdir(parents=True, exist_ok=True)
-                place.write_text(json.dumps(doc), encoding="utf-8")
+                if self._place(name) == place:
+                    place.write_text(json.dumps(doc), encoding="utf-8")
             except OSError:
                 pass
         return doc
@@ -103,14 +130,23 @@ class CachedMirror(Mirror):
         """One tile, or with no name every tile of this key and width, read from the mirror again next time."""
         import shutil  # noqa: PLC0415
         if name is None:
-            if self.width is not None:
-                shutil.rmtree(self.base / self.key_id / str(self.width), ignore_errors=True)
+            folder = self._folder()
+            if folder is not None and folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
             self.cached.clear()
             return
         place = self._place(name)
-        if place is not None:
-            place.unlink(missing_ok=True)
+        if place is not None and (place.is_file() or place.is_symlink()):
+            place.unlink()
         self.cached.discard(name)
+
+
+class TileUnreadable(Unreadable):
+    """One tile that is not what its name says: only that tile is read again."""
+
+    def __init__(self, message: str, tile: str):
+        super().__init__(message)
+        self.tile = tile
 
 
 def cache_base() -> Path:
@@ -140,9 +176,14 @@ def _tail(doc, n: int, key: str) -> tuple:
 def _tiles(mirror: Mirror, folder: str, count: int, width: int, key: str) -> list:
     out = []
     for k in range(count):
-        tile = mirror.get(f"{folder}/{k}.json")
+        name = f"{folder}/{k}.json"
+        try:
+            tile = mirror.get(name)
+        except NotFound:
+            # A tile the tail counts and the mirror lacks makes the mirror unreadable, so the next one is asked.
+            raise Unreadable(f"the mirror lacks {name}") from None
         if not isinstance(tile, dict) or tile.get("tile") != k or not isinstance(tile.get(key), list) or len(tile[key]) != width:
-            raise Unreadable(f"{folder}/{k}.json is not tile {k} of {width}")
+            raise TileUnreadable(f"{name} is not tile {k} of {width}", name)
         out.extend(tile[key])
     return out
 
@@ -197,11 +238,11 @@ def load_log(mirror: Mirror, pem: str) -> dict:
         return _load_log(mirror, pem)
     try:
         log = _load_log(mirror, pem)
-    except (T.LogError, Unreadable, KeyError, TypeError, ValueError):
+    except (T.LogError, Unreadable, KeyError, TypeError, ValueError) as e:
         if not mirror.cached:
             raise
         # A kept tile that no longer checks is read from the mirror again; only the mirror's own copy can fail.
-        mirror.evict()
+        mirror.evict(e.tile if isinstance(e, TileUnreadable) and e.tile in mirror.cached else None)
         log = _load_log(mirror, pem)
     stale = {_body_tile(log, leaf, mirror.width) for leaf in log["withheld"]} & mirror.cached
     if stale:
