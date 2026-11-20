@@ -2,7 +2,7 @@
 Settings by environment: REGISTER_DATA_DIR (store, mirror), REGISTER_KEY_FILE (the
 register's private key; REGISTER_DEV_KEY=1 lets a missing one be made, for development
 only), REGISTER_LOG_KEY_FILE and REGISTER_LOG_DEV_KEY (the same for the log's own key),
-REGISTER_PUBLIC_URL.
+REGISTER_LOG_ENABLE=1 (the owner's word that a log never started here may start), REGISTER_PUBLIC_URL.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ def settings() -> dict:
             "log_key_file": Path(os.environ.get("REGISTER_LOG_KEY_FILE", str(data / "log-key.pem"))),
             # The log key has its own ceremony, so its development setting is its own; unset, it follows the register's.
             "log_dev_key": os.environ.get("REGISTER_LOG_DEV_KEY", "1" if dev_key else "0") == "1",
+            "log_enable": os.environ.get("REGISTER_LOG_ENABLE") == "1",
             "log_public_delay_days": float(os.environ.get("REGISTER_LOG_PUBLIC_DELAY_DAYS", "7")),
             "log_witnesses": [w.strip() for w in os.environ.get("REGISTER_LOG_WITNESSES", PUBLIC_MIRROR_RAW).split(",") if w.strip()],
             # A development key reachable from outside, by decision: the deploy sets it beside REGISTER_DEV_KEY.
@@ -66,6 +67,13 @@ def check_dev_key_exposure(cfg: dict, host: str) -> None:
     if public_host not in LOOPBACK_HOSTS and not cfg["dev_key_public"]:
         raise SystemExit(f"a development key is reachable at {cfg['public_url']} through a proxy; set "
                          "REGISTER_DEV_KEY_PUBLIC=1 to serve it there knowingly, or point REGISTER_PUBLIC_URL at loopback")
+
+
+def refuse_unstarted_log(cfg: dict, store) -> None:
+    """A log that never started here starts only on the owner's word: its first entries are public for good."""
+    if store.log.size() == 0 and not (cfg["data"] / "log-started").is_file() and not cfg.get("log_enable", True):
+        raise SystemExit("this register has never started its signed public log, and starting it is the owner's decision: "
+                         "set REGISTER_LOG_ENABLE=1 in /etc/register.env to start it knowingly")
 
 
 def dev_marker(cfg: dict) -> Path:
@@ -233,6 +241,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     mirror = cfg["data"] / "mirror"
     (mirror / "models").mkdir(parents=True, exist_ok=True)
     started, once = cfg["data"] / "log-started", cfg["data"] / "log-open-unwitnessed"
+    refuse_unstarted_log(cfg, store)
     store.log_open(log_places(cfg)[3], unwitnessed=once.is_file(), started=started.is_file())
     if not store.log.blocked:
         # Outside the database on purpose: a database that lost its log cannot also forget that one was started.

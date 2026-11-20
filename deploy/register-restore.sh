@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Put a backup back: stop the register, replace the two databases and the mirror, start it, check the ledger.
+# Put a backup back: stop the register, replace the two databases, the mirror and the verify keys, start it, check the ledger.
 #   register-restore.sh /srv/register/backups/register-<stamp>.tar.gz
 set -euo pipefail
 ARCHIVE="${1:?the backup archive}"
@@ -23,6 +23,7 @@ if [ -d "$WORK/mirror" ]; then
   rm -rf "$DATA/mirror/log"; [ -d "$WORK/published-log" ] && mv "$WORK/published-log" "$DATA/mirror/log"
   chown -R register:register "$DATA/mirror"
 fi
+if [ -f "$WORK/verify-keys.json" ]; then install -o register -g register -m 600 "$WORK/verify-keys.json" "$DATA/verify-keys.json"; fi
 # A restored register has started its log before, whether or not the archive says so.
 if [ -f "$WORK/log-started" ] || [ -d "$DATA/mirror/log" ]; then install -o register -g register -m 640 /dev/null "$DATA/log-started"; fi
 rm -rf "$WORK"

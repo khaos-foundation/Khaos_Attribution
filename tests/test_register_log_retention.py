@@ -9,9 +9,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "register-server.sh"
 def test_the_journal_drop_in_bounds_every_line_at_30_days():
     """The drop-in sorts after rsyslog's syslog.conf, bounds the journal by age, stops forwarding, and is applied."""
     text = SCRIPT.read_text()
-    m = re.search(r"cat > /etc/systemd/journald\.conf\.d/(\S+) <<'CONF'\n(.*?)\nCONF", text, re.S)
-    assert m, "the journald drop-in is written"
-    name, body = m.group(1), m.group(2).splitlines()
+    m = re.search(r'install -m 644 "\$CHECKOUT/deploy/journald-retention\.conf" /etc/systemd/journald\.conf\.d/(\S+)\n', text)
+    assert m, "the journald drop-in is installed from the tag's checkout"
+    name, body = m.group(1), (SCRIPT.parent / "journald-retention.conf").read_text().splitlines()
     assert name > "syslog.conf", "rsyslog's own drop-in would win"
     days = int(re.fullmatch(r"MaxRetentionSec=(\d+)day", body[1]).group(1))
     file_days = int(re.fullmatch(r"MaxFileSec=(\d+)day", body[2]).group(1))
@@ -30,4 +30,4 @@ def test_the_files_rsyslog_and_the_sign_in_records_keep_no_more_than_30_days():
         assert ["daily"] in words and not any(w[0] in ("weekly", "monthly", "yearly", "minsize", "notifempty") for w in words), path.name
         assert [int(w[1]) for w in words if w[0] == "rotate"] and all(int(w[1]) <= 28 for w in words if w[0] == "rotate"), path.name
     text = SCRIPT.read_text()
-    assert 'install -m 644 "$(dirname "$0")"/logrotate/{rsyslog,ufw,fail2ban,btmp,wtmp} /etc/logrotate.d/' in text
+    assert 'install -m 644 "$CHECKOUT"/deploy/logrotate/{rsyslog,ufw,fail2ban,btmp,wtmp} /etc/logrotate.d/' in text

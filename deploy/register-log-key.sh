@@ -42,6 +42,7 @@ switch)
     $SYSTEMCTL stop register.service || true
     [ -f "$RETIRED.pem" ] && mv -f "$RETIRED.pem" "$KEY" && mv -f "$RETIRED.pub" "${KEY%.pem}.pub" 2>/dev/null || true
     grep -q '^REGISTER_LOG_DEV_KEY=1' "$ENV_FILE" || echo 'REGISTER_LOG_DEV_KEY=1' >> "$ENV_FILE"
+    grep -q '^REGISTER_DEV_KEY_PUBLIC=' "$ENV_FILE" || echo 'REGISTER_DEV_KEY_PUBLIC=1' >> "$ENV_FILE"
     $SYSTEMCTL start register.service
   }
   trap rollback ERR
@@ -52,6 +53,8 @@ switch)
   install -o register -g register -m 644 "${STAGED%.pem}.pub" "${KEY%.pem}.pub"
   sed -i '/^REGISTER_LOG_DEV_KEY=/d' "$ENV_FILE"
   echo 'REGISTER_LOG_DEV_KEY=0' >> "$ENV_FILE"
+  # Serving a development key behind the proxy was said for that key; with none left, the setting goes too.
+  grep -q '^REGISTER_DEV_KEY=1' "$ENV_FILE" || sed -i '/^REGISTER_DEV_KEY_PUBLIC=/d' "$ENV_FILE"
   $SYSTEMCTL start register.service
   for _ in $(seq 1 20); do curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
   SERVED="$(curl -fsS "http://127.0.0.1:$PORT/log/key")"

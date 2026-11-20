@@ -11,6 +11,7 @@
     python -m register_service log-withhold <leaf_hash> <reason>    a body out of public view; proofs unchanged
     python -m register_service log-stamp | log-upgrade    the day's heartbeat entry and the anchor of its root; the upgrade
     python -m register_service log-recover    put back entries the published log holds and this database lost
+    python -m register_service bill-of-materials    what this environment runs, as JSON
 """
 
 from __future__ import annotations
@@ -41,7 +42,13 @@ def main(argv=None) -> int:
                                        "export whole; after a crashed export, run log-export")
     sub.add_parser("log-export", help="write every file of the static export and the mirror's ledger again; after a "
                                       "crashed export, run this")
+    sub.add_parser("bill-of-materials")
     a = p.parse_args(argv)
+    if a.cmd == "bill-of-materials":
+        import json  # noqa: PLC0415
+        from register_service.bom import bill_of_materials  # noqa: PLC0415
+        print(json.dumps(bill_of_materials(), indent=1, sort_keys=True))
+        return 0
     cfg = settings()
     if a.cmd == "make-key":
         from pathlib import Path  # noqa: PLC0415
@@ -148,7 +155,9 @@ def ledger_whole(cfg: dict, store: Store) -> None:
 
 def open_log(cfg: dict, store: Store, appending: bool = False):
     """The log key loaded and the database checked against the published log; an append is refused when it is behind."""
-    from register_service.app import load_log_key, log_places  # noqa: PLC0415
+    from register_service.app import load_log_key, log_places, refuse_unstarted_log  # noqa: PLC0415
+    if appending:
+        refuse_unstarted_log(cfg, store)
     key = load_log_key(cfg)
     store.log.signer = key
     with store._tx():

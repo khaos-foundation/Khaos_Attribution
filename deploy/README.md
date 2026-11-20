@@ -1,21 +1,24 @@
 # The Guild Register on its own server
 
-One small Ubuntu 24.04 server, SQLite, a few files. `register-server.sh` does the whole setup as root and can be run again after a change of tag.
+One small Ubuntu 24.04 server, SQLite, a few files. `register-server.sh` does the whole setup as root and can be run again after a change of tag. It is always the script of the tag it deploys: it checks out `REGISTER_TAG` (required) under `/srv/register`, compares its own folder with that checkout's `deploy/`, and refuses to go on when they differ.
 
 ```
 ssh root@<server>
 git clone https://github.com/khaos-foundation/Khaos_Attribution.git /root/Khaos_Attribution
-REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=v0.27.0 bash /root/Khaos_Attribution/deploy/register-server.sh
+git -C /root/Khaos_Attribution checkout --detach vX.Y.Z
+REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=vX.Y.Z REGISTER_LOG_ENABLE=1 bash /root/Khaos_Attribution/deploy/register-server.sh
 ```
+
+`REGISTER_LOG_ENABLE=1` is the owner's word that a register whose signed log never started may start it: the first start appends the log's first entries, which are public for good. Without it the script stops before installing anything, and the service itself refuses to start a log that never started (the setting is kept in `/etc/register.env` once given).
 
 What it leaves behind:
 
-- `/srv/register/`: the checkout at the tag, the venv (the `registry` and `service` extras only), `data/` (the two databases, the mirror files, the key), `backups/`.
-- `/etc/register.env`: the service's settings. `REGISTER_DEV_KEY=1` until the ceremony, with `REGISTER_DEV_KEY_PUBLIC=1` beside it: a development key serves behind the proxy only when the deploy says so (binding loopback keeps nothing private once Caddy fronts it).
+- `/srv/register/`: the checkout at the tag, the venv built from the contract's `uv.lock` (`uv sync --frozen`, the `registry` and `service` extras only) with a uv whose version and SHA-256 the script pins, `bill-of-materials.json` (every installed package with its version and licence, written after each install), `data/` (the two databases, the mirror files, the key), `backups/`.
+- `/etc/register.env`: the service's settings. `REGISTER_DEV_KEY=1` until the ceremony, with `REGISTER_DEV_KEY_PUBLIC=1` beside it: a development key serves behind the proxy only when the deploy says so (binding loopback keeps nothing private once Caddy fronts it). Each key's switch removes `REGISTER_DEV_KEY_PUBLIC` once no development key setting is left.
 - `register.service` on loopback port 8912; Caddy on 80 and 443 with the certificate for the domain (it writes no access log); the firewall open on 22, 80 and 443.
 - `/etc/systemd/journald.conf.d/zz-retention.conf`: the journal, which holds the service's request lines, keeps nothing older than 30 days (a file goes once its first line is 29 days old, and files turn over daily), and copies nothing on to rsyslog's `/var/log/syslog`. The name sorts after rsyslog's own `syslog.conf`, whose forwarding it overrides.
 - `/etc/logrotate.d/{rsyslog,ufw,fail2ban,btmp,wtmp}` from `deploy/logrotate/`: what rsyslog, the firewall and fail2ban still write, and the sign-in records, turn over daily and keep 28 days, in place of their packages' weeks and months. They replace files the packages own, so an update that changes one of them waits for an upgrade by hand (unattended-upgrades skips it); re-running this script puts ours back.
-- `register-backup.timer`: nightly at 03:30, a consistent copy of both databases and the mirror into `backups/`, kept 30 days, sent to `BACKUP_TARGET` over ssh when one is set in `/etc/register.env` (a Hetzner Storage Box takes rsync over ssh on port 23). The key is never in a backup.
+- `register-backup.timer`: nightly at 03:30, a consistent copy of both databases, the mirror and the verify keys' hashes (`verify-keys.json`) into `backups/`, kept 30 days, sent to `BACKUP_TARGET` over ssh when one is set in `/etc/register.env` (a Hetzner Storage Box takes rsync over ssh on port 23). The key is never in a backup.
 - `register-restore.sh <archive>`: the way back, ending with the ledger and log check.
 - `register-log-stamp.timer` (daily, 02:10) and `register-log-upgrade.timer` (four times a day): the newest root of the signed append-only log stamped with OpenTimestamps, and pending receipts completed once the calendars have them confirmed. Both run `register-cli log-stamp` / `log-upgrade` and write the receipts into `mirror/log/anchors/`. A calendar being down only delays an anchor.
 
@@ -23,7 +26,9 @@ Accounts and invites are made on the server with `register-cli account <name>` a
 
 ## Updating
 
-Update the register by re-running `register-server.sh` with the new `REGISTER_TAG`, never by checking out a tag and restarting by hand. The script also brings `/etc/register.env` up to what the new release needs: from 0.37.0 a development key serves behind Caddy only with `REGISTER_DEV_KEY_PUBLIC=1` beside `REGISTER_DEV_KEY=1`, and a settings file without that line makes the service refuse to start.
+First check out the new tag in root's clone, then run that tag's own script: `git -C /root/Khaos_Attribution fetch --tags && git -C /root/Khaos_Attribution checkout --detach <tag>`, then `REGISTER_DOMAIN=<domain> REGISTER_TAG=<tag> bash /root/Khaos_Attribution/deploy/register-server.sh`. A script from an older clone does not know the new release's steps; the new one refuses to run from a folder that is not the tag's own. On a register whose signed log never started, the update starts it at the restart, so it stops unless `REGISTER_LOG_ENABLE=1` is given: the owner's decision.
+
+Never update by checking out a tag under `/srv/register` and restarting by hand. The script also brings `/etc/register.env` up to what the new release needs: from 0.37.0 a development key serves behind Caddy only with `REGISTER_DEV_KEY_PUBLIC=1` beside `REGISTER_DEV_KEY=1`, and a settings file without that line makes the service refuse to start.
 
 ## The key
 
@@ -45,4 +50,4 @@ At start the service compares its database with the published log: the two expor
 
 **The very first start.** A register whose log is empty opens by itself when every copy it asks answers that nothing was published there yet (no `log/` folder, or a 404 from the public repository). If the public address cannot be reached at all (no network, a firewall), the register cannot know it is the first and stays closed: make it reachable, or, after checking by hand that the public repository holds no `log/` folder, create the one-shot marker `sudo -u register touch /srv/register/data/log-open-unwitnessed` and restart; the service deletes it on use, and refuses it for a log that already has entries (from then on the server's own export vouches for it). After the first start the service writes `data/log-started`, outside the database; from then on an empty log never opens on "nothing published" alone. The nightly backup carries that marker and `register-restore.sh` puts it back.
 
-The log signs its heads with its own key at `REGISTER_LOG_KEY_FILE`. `REGISTER_LOG_DEV_KEY=1` lets a development log key be made, exactly as for the countersigning key; its ceremony is `register-log-key make`, then `register-log-key switch "Name, Name"` (`key-ceremony.md`). The switch signs the current tree afresh with the Guild's key, which commits to every earlier entry, and prints the public half to commit at `src/khaos_attribution/translog/log-key.pub`.
+The log signs its heads with its own key at `REGISTER_LOG_KEY_FILE`. `REGISTER_LOG_DEV_KEY=1` lets a development log key be made, exactly as for the countersigning key; its ceremony is `register-log-key make`, then `register-log-key switch "Name, Name"` (`key-ceremony.md`). The switch's restart appends a heartbeat entry under the Guild's key, whose signed head commits to every earlier entry, and prints the public half to commit at `src/khaos_attribution/translog/log-key.pub`.
