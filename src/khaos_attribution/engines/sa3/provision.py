@@ -55,9 +55,6 @@ class Report:
         """Said, never failed on."""
         self.checks.append((None, what))
 
-    def add(self, good, what: str) -> None:
-        (self.note if good is None else self.ok if good else self.bad)(what)
-
     @property
     def passed(self) -> bool:
         return all(ok is not False for ok, _ in self.checks)
@@ -548,6 +545,11 @@ def licence_note(w: dict) -> str | None:
             "licence travelled with them")
 
 
+def licence_notes(runtime: str) -> list:
+    """The licence notes for this runtime's cached sets, kept apart from weights(), whose every line is a check."""
+    return [note for w in DESCRIPTOR.weights if w.get("runtime", runtime) == runtime and (note := licence_note(w))]
+
+
 # Stability's repository keeps the port's files under MLX/; the port reads them under models/mlx/.
 MLX_REPO_DIR = "MLX"
 
@@ -615,9 +617,6 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
         files = list(w.get("components") or ["config.json"])
         if cached(w["repo"], files):
             out.append((True, f"{w['repo']} in the Hugging Face cache"))
-            note = licence_note(w)
-            if note:
-                out.append((None, note))
             continue
         if check_only or not required:
             out.append((not required, f"{w['repo']} missing from the Hugging Face cache" + ("" if required else " (optional)")))
@@ -677,7 +676,9 @@ def provision(repo_dir=None, weights_dir=None, *, device: str = "auto", check_on
         (report.ok if ok else report.bad)(note)
     if ok:
         for good, line in weights(root, runtime, weights_dir, check_only=check_only):
-            report.add(good, line)
+            (report.ok if good else report.bad)(line)
+        for note in licence_notes(runtime):
+            report.note(note)
     return report
 
 

@@ -748,22 +748,36 @@ def test_a_weight_set_whose_licence_has_obligations_fetches_its_licence_files(en
             assert {"LICENSE*", "NOTICE*"} <= set(w.get("patterns") or []), w["repo"]
 
 
-def test_check_notes_a_cached_set_with_no_licence_beside_it_without_failing(tmp_path, monkeypatch):
-    """Weights already cached are not fetched again, so their licence files are reported, never assumed."""
+def _cached_without_licence(tmp_path, monkeypatch):
     snapshot = tmp_path / "hub" / "snapshots" / "rev"
     snapshot.mkdir(parents=True)
     (snapshot / "model.safetensors").write_bytes(b"w")
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
     monkeypatch.setattr(P, "cached_path", lambda repo, name: str(snapshot / name))
-    out = P.weights(tmp_path / "sa3", "torch", tmp_path / "w", check_only=True)
-    notes = [line for ok, line in out if "licence" in line]
-    assert notes and all(ok is None for ok, line in out if "licence" in line), out
+    return snapshot
+
+
+def test_check_notes_a_cached_set_with_no_licence_beside_it_without_failing(tmp_path, monkeypatch):
+    """Weights already cached are not fetched again, so their licence files are reported, never assumed."""
+    snapshot = _cached_without_licence(tmp_path, monkeypatch)
+    root = tmp_path / "sa3"
+    monkeypatch.setattr(P, "checkout", lambda root, check_only=False: (True, "at the pin"))
+    monkeypatch.setattr(P, "environment", lambda root, runtime, check_only=False: (True, "imports"))
+    report = P.provision(root, tmp_path / "w", device="cuda", check_only=True)
+    assert report.passed and "[note] no licence file beside stabilityai/stable-audio-3-medium-base" in report.text()
     (snapshot / "LICENSE.md").write_text("terms")
     (snapshot / "NOTICE").write_text("notice")
-    assert not [line for ok, line in P.weights(tmp_path / "sa3", "torch", tmp_path / "w", check_only=True) if "licence" in line]
-    report = P.Report()
-    report.note("a note")
-    assert report.passed and "[note] a note" in report.text()
+    assert P.licence_notes("torch") == [] and "[note]" not in P.provision(root, tmp_path / "w", device="cuda", check_only=True).text()
+
+
+def test_the_weights_check_the_workshop_reads_stays_a_list_of_passes_and_failures(tmp_path, monkeypatch):
+    """The Workshop counts every weights() line that is not ok as missing weights; a cached set with no licence file
+    beside it is a pass there, its note said only in the report."""
+    _cached_without_licence(tmp_path, monkeypatch)
+    lines = P.weights(tmp_path / "sa3", "torch", tmp_path / "w", check_only=True)
+    assert lines and all(ok is True for ok, _line in lines), lines
+    assert [line for ok, line in lines if not ok] == [], "what the Workshop's engine_weights_missing would read"
+    assert P.licence_notes("torch"), "the gap is still said, apart from the check"
 
 
 def test_an_mlx_environment_built_at_another_pin_fails_the_check_and_runs_the_ports_installer_again(tmp_path, monkeypatch):
