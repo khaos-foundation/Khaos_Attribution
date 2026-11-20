@@ -82,3 +82,13 @@ def test_a_mark_that_never_reads_back_is_kept_at_the_strongest_with_a_warning(mo
     assert strength == W.Watermarker.STRENGTHS[-1] == 2.0
     assert np.allclose(marked, 2e-3, atol=1e-6)
     assert "does not read back" in caplog.text
+
+
+def test_a_long_recordings_mark_reads_back_across_windows(monkeypatch):
+    """Past one window the read-back counts every window together and settles on the same strength as a short one."""
+    _install(monkeypatch, needs=1.4)
+    long = np.zeros((70 * SR, 2), dtype=np.float32)
+    assert len(W.detect_windows(len(long), SR)) == 3
+    marked, strength = W.Watermarker.embed_verified(long, SR, WATERMARK_ID)
+    assert strength == 1.5 and marked.shape == long.shape
+    assert W.Watermarker.detect_array(marked, SR)[1:] == (WATERMARK_ID, False)

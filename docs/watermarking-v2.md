@@ -222,11 +222,16 @@ Exact output: matched — generation f3a1… (99.2%)
 
 ### 6a. Reading the mark in windows
 
-`Watermarker.detect_array` reads a recording in windows of `DETECT_WINDOW_S` (30 s), a tail under `DETECT_MIN_TAIL_S` (5 s) joining the window before it; a recording up to 35 s is one window, read whole as before. It returns the most likely window with an uncorrected codeword among those at `LIKELY_MARKED` (0.5, Verify's bar) or above, else the most likely window of all. So the import's strong rule (0.9 and a clean codeword) holds when any window is strong, and Verify hears a recording when any window reaches 0.5.
+A recording is read in windows of `DETECT_WINDOW_S` (30 s), a tail under `DETECT_MIN_TAIL_S` (5 s) joining the window before it; up to 35 s is one window. AudioSeal's detector holds the whole array at once (4.7 GiB for 4 min, 9.3 GiB for 10 min on a Mac's CPU, and Verify reads up to 20 min); a window peaks at about 1.0 GiB whatever the length. Its streaming mode is a different calculation (frame outputs differ by up to 3.8 after the best alignment), so windows are read independently.
 
-Why: AudioSeal's detector reads the whole array at once, so memory grew with length (4.7 GiB for 4 min, 9.3 GiB for 10 min on a Mac's CPU) and Verify takes up to 20 min. Its streaming mode is a different calculation (frame outputs differ by up to 3.8 after the best alignment), so the windows are read independently. A window peaks at about 1.0 GiB whatever the length.
+- `Watermarker.detect_array`, which Verify and the read-back use, is the whole reading: every window's frames read as marked and each bit's logits are counted together, as AudioSeal counts a whole array. Up to 35 s it is exactly the whole reading.
+- `Watermarker.strongest_window` is one window's reading: the likeliest window with a clean codeword, then with a corrected one, among those at `LIKELY_MARKED` (0.5) or above, else the likeliest. A room may refuse on it, so a mark covering a whole window is caught inside a longer recording.
+- `detect_whole_and_window` gives both from one pass.
 
-Measured before the change, on 32 five-minute tracks of real music (30 built from Apple's royalty-free loops, 2 from librosa's example clips), each read unmarked, marked with a random id, and unmarked with a 30 s marked insert: unmarked, 0 of 32 strong or heard either way, and 0 of 320 windows (the highest window read 0.41); marked, 32 of 32 strong with the right id either way (lowest window 0.96); the insert, 0 of 32 caught whole and 31 of 32 strong with the right id in windows, 32 of 32 heard. The two readings took the same time (311 s whole, 320 s in windows).
+Measured on 32 five-minute tracks of real music (30 built from Apple's royalty-free loops, 2 from librosa's example clips), each read unmarked, marked with a random id, marked then through a 128 kbit/s MP3, unmarked with a 30 s marked insert on the window grid and one off it, and unmarked cut to leave 17 s and 6 s tails (224 readings):
+
+- The whole reading against AudioSeal's own whole-array reading: the same strong (0.9, clean) and likely (0.5) verdict on all 224. On marked audio, MP3 included, the same id on all 64 and a probability within 0.005. On unmarked audio it read lower (at most 0.15 against 0.24); an unmarked reading's id is noise, and agreed on 7 of 32. 774 s against 948 s.
+- The strongest window: unmarked, 0 of 96 strong or likely, the highest window 0.43 (tails included); marked and MP3, 32 of 32 strong with the right id each. A 30 s insert on the grid: 31 of 32 strong with the right id (the whole reading caught none). The same insert off the grid: 0 of 32 strong (each half-covered window read at most 0.80). So a window rule catches a marked stretch that covers a whole window, which any stretch of 60 s or more does; a shorter one only when it happens to line up.
 
 ## 7. Migration (amended by §0: NO re-embedding)
 
