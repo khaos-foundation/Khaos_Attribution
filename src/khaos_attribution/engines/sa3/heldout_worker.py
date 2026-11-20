@@ -10,6 +10,11 @@ import sys
 import zlib
 from pathlib import Path
 
+if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
+    import pathlib
+    import runpy
+    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")
+
 
 def pair_noise_seed(seed: int, name: str) -> int:
     return (int(seed) * 1_000_003 + zlib.crc32(name.encode("utf-8"))) % (2 ** 31 - 1)

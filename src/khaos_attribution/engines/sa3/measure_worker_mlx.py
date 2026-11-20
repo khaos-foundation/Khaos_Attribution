@@ -12,6 +12,11 @@ import json
 import sys
 from pathlib import Path
 
+if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
+    import pathlib
+    import runpy
+    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")
+
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 
 MLX_DIR = Path.cwd() / "optimized" / "mlx"

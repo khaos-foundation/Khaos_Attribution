@@ -12,6 +12,11 @@ import runpy
 import sys
 from pathlib import Path
 
+if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
+    import pathlib
+    import runpy
+    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")
+
 HERE = Path(__file__).resolve().parent
 # The script's own constants, read from it when the driver runs; these are what it holds at the pin.
 SAMPLE_RATE = 44100

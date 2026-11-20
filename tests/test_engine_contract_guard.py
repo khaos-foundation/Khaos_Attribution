@@ -1,127 +1,78 @@
-"""An engine environment holding another contract than this room's is refused in a sentence where its process
-would start; a refusal is read again at every start, a pass is kept until the environment's contract is installed
-again, and the running interpreter is never checked."""
+"""An engine's interpreter is refused in a sentence only when it is missing, read again at every start; whatever
+contract copy its environment holds is never read, and provisioning gives it the contract's base requirements at
+pyproject's floors while leaving any older copy where it is."""
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from khaos_attribution import __version__
 from khaos_attribution.engines import contract_guard as CG
+from khaos_attribution.engines import environment
 from khaos_attribution.engines.render import RenderFailed
+from khaos_attribution.engines.worker_process import POSIX_ONLY
 from khaos_attribution.engines.train import TrainingUnavailable
 from khaos_attribution.gradient import GradientUnavailable
 
-OURS = f"{__version__} 0123abcd"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def fingerprints(monkeypatch):
-    """The fingerprint subprocess replaced: ours for this process, the dict's entry for any other path, counted."""
-    seen = {None: OURS}
-    calls = []
-
-    def fake(python):
-        calls.append(python)
-        return seen.get(None if python is None else str(python))
-
-    monkeypatch.setattr(CG, "_fingerprint", fake)
-    monkeypatch.setattr(CG, "_PASSED", {})
-    return seen, calls
+def no_probe(monkeypatch):
+    """Nothing is started to check an interpreter that is there."""
+    def never(*a, **k):
+        raise AssertionError("the guard started a process")
+    monkeypatch.setattr(environment, "run", never)
 
 
-def test_a_stale_environment_is_refused_with_the_sentence_and_a_current_one_is_checked_once(tmp_path, fingerprints):
-    seen, calls = fingerprints
-    stale, current = tmp_path / "stale" / "python", tmp_path / "current" / "python"
-    seen[str(stale)] = "0.41.0 fedcba98"
-    seen[str(current)] = OURS
-    why = CG.refusal(stale, engine="Stable Audio 3", engine_id="stable-audio-3")
-    assert why == (f"the Stable Audio 3 environment at {stale} holds contract 0.41.0, this room runs {__version__}: "
-                   "run the installer with --engines stable-audio-3")
-    assert CG.refusal(current, engine="mimetic-a0", engine_id="mimetic-a0") is None
-    n = len(calls)
-    assert CG.refusal(current, engine="mimetic-a0", engine_id="mimetic-a0") is None
-    assert len(calls) == n, "a pass is remembered for that interpreter"
-    assert CG.refusal(stale, engine="Stable Audio 3", engine_id="stable-audio-3") == why
-    assert len(calls) > n, "a refusal is read again"
-    with pytest.raises(TrainingUnavailable, match="run the installer with --engines stable-audio-3"):
-        CG.require(stale, engine="Stable Audio 3", engine_id="stable-audio-3", error=TrainingUnavailable)
-
-
-def test_a_repaired_environment_is_accepted_without_restarting_the_room(tmp_path, fingerprints):
-    seen, _calls = fingerprints
-    python = tmp_path / "engine" / "python"
-    seen[str(python)] = "0.41.0 fedcba98"
-    assert CG.refusal(python, engine="x", engine_id="x")
-    seen[str(python)] = OURS
-    assert CG.refusal(python, engine="x", engine_id="x") is None
-
-
-def test_an_environment_whose_contract_is_installed_again_is_checked_again(tmp_path, fingerprints):
-    """A pass holds while the environment's khaos_attribution dist-info is unchanged; a refresh in place reads anew."""
-    seen, calls = fingerprints
-    venv = tmp_path / "venv"
-    python = venv / "bin" / "python"
-    python.parent.mkdir(parents=True)
-    python.write_text("")
-    dist = venv / "lib" / "python3.11" / "site-packages" / "khaos_attribution-0.57.0.dist-info"
-    dist.mkdir(parents=True)
-    os.utime(dist, ns=(1_000_000_000, 1_000_000_000))
-    seen[str(python)] = OURS
-    assert CG.refusal(python, engine="x", engine_id="x") is None
-    n = len(calls)
-    assert CG.refusal(python, engine="x", engine_id="x") is None and len(calls) == n
-    os.utime(dist, ns=(2_000_000_000, 2_000_000_000))
-    seen[str(python)] = "0.41.0 fedcba98"
-    assert "holds contract 0.41.0" in CG.refusal(python, engine="x", engine_id="x")
-
-
-def test_other_code_at_the_same_version_and_no_contract_at_all_are_said_so(tmp_path, fingerprints):
-    seen, _calls = fingerprints
-    seen[str(tmp_path / "a")] = f"{__version__} 89abcdef"
-    assert "built from other code than this room's: run the installer" in CG.refusal(tmp_path / "a", engine="x", engine_id="x")
-    assert "holds no contract, or one older than 0.41.1: run the installer" in CG.refusal(tmp_path / "b", engine="x", engine_id="x")
-
-
-def test_the_running_interpreter_is_never_checked(fingerprints):
-    _seen, calls = fingerprints
-    assert CG.refusal(sys.executable, engine="x", engine_id="x") is None
-    assert CG.refusal(Path(sys.executable), engine="x", engine_id="x") is None
-    assert calls == []
-
-
-@pytest.fixture
-def stale(tmp_path, fingerprints, monkeypatch):
-    """A fake engine interpreter holding an older contract, and a Popen that must never be reached."""
-    seen, _calls = fingerprints
+def test_an_interpreter_that_is_there_passes_whatever_contract_its_environment_holds(tmp_path, no_probe):
     python = tmp_path / "engine" / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.write_text("")
-    seen[str(python)] = "0.41.0 fedcba98"
+    assert CG.refusal(python, engine="Stable Audio 3", engine_id="stable-audio-3") is None
 
+
+def test_a_missing_interpreter_is_refused_in_a_sentence_and_read_again_at_every_start(tmp_path, no_probe):
+    python = tmp_path / "venv" / "bin" / "python"
+    why = CG.refusal(python, engine="Stable Audio 3", engine_id="stable-audio-3")
+    assert why == f"the Stable Audio 3 environment has no interpreter at {python}: run the installer with --engines stable-audio-3"
+    with pytest.raises(TrainingUnavailable, match="run the installer with --engines stable-audio-3"):
+        CG.require(python, engine="Stable Audio 3", engine_id="stable-audio-3", error=TrainingUnavailable)
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    assert CG.refusal(python, engine="Stable Audio 3", engine_id="stable-audio-3") is None, "a repaired one needs no restart"
+
+
+def test_the_running_interpreter_is_never_checked(no_probe):
+    assert CG.refusal(sys.executable, engine="x", engine_id="x") is None
+    assert CG.refusal(Path(sys.executable), engine="x", engine_id="x") is None
+
+
+@pytest.fixture
+def missing(tmp_path, monkeypatch):
+    """An engine interpreter that is not there, and a Popen that must never be reached."""
     def never(*a, **k):
-        raise AssertionError("the engine process was started on a stale environment")
-
+        raise AssertionError("the engine process was started without its interpreter")
     monkeypatch.setattr(subprocess, "Popen", never)
-    return python
+    return tmp_path / "engine" / "bin" / "python"
 
 
-SENTENCE = r"holds contract 0\.41\.0, this room runs .*: run the installer with --engines "
+SENTENCE = r"environment has no interpreter at .*: run the installer with --engines "
 
 
-def test_the_sa3_measure_render_and_trainer_refuse_a_stale_environment_before_starting_it(tmp_path, stale, monkeypatch):
+def test_the_sa3_measure_render_and_trainer_refuse_a_missing_interpreter_before_starting(tmp_path, missing, monkeypatch):
     from khaos_attribution.engines.sa3 import measure as M
     from khaos_attribution.engines.sa3 import render as R
     from khaos_attribution.engines.sa3 import train as T
-    handle = M.Handle(root=tmp_path, python=stale, adapter=tmp_path / "a.safetensors")
-    with pytest.raises(GradientUnavailable, match="the Stable Audio 3 environment at .*" + SENTENCE + "stable-audio-3"):
+    handle = M.Handle(root=tmp_path, python=missing, adapter=tmp_path / "a.safetensors")
+    with pytest.raises(GradientUnavailable, match="the Stable Audio 3 " + SENTENCE + "stable-audio-3"):
         M._ask(handle, {"command": "parameters"})
-    monkeypatch.setattr(R, "python_for", lambda root, runtime: stale)
+    monkeypatch.setattr(R, "python_for", lambda root, runtime: missing)
     with pytest.raises(RenderFailed, match=SENTENCE + "stable-audio-3"):
         R.run_worker(tmp_path, "torch", {"prompt": "x"})
-    api = T.TrainingApi(root=tmp_path, runtime="torch", python=stale)
+    api = T.TrainingApi(root=tmp_path, runtime="torch", python=missing)
     clips = tmp_path / "clips"
     clips.mkdir()
     (clips / "a_seg_000.wav").write_bytes(b"")
@@ -134,17 +85,17 @@ def test_the_sa3_measure_render_and_trainer_refuse_a_stale_environment_before_st
     assert not (tmp_path / "run" / T.TRAINER_DIRNAME / "train_command.json").exists(), "no record of a run that never started"
 
 
-def test_the_mimetic_measure_render_and_trainer_refuse_a_stale_environment_before_starting_it(tmp_path, stale, monkeypatch):
+def test_the_mimetic_measure_render_and_trainer_refuse_a_missing_interpreter_before_starting(tmp_path, missing, monkeypatch):
     from khaos_attribution.engines.mimetic import measure as M
     from khaos_attribution.engines.mimetic import render as R
     from khaos_attribution.engines.mimetic import train as T
-    handle = M.Handle(root=tmp_path, python=stale, adapter=tmp_path / "a.safetensors")
-    with pytest.raises(GradientUnavailable, match="the mimetic-a0 environment at .*" + SENTENCE + "mimetic-a0"):
+    handle = M.Handle(root=tmp_path, python=missing, adapter=tmp_path / "a.safetensors")
+    with pytest.raises(GradientUnavailable, match="the mimetic-a0 " + SENTENCE + "mimetic-a0"):
         M._ask(handle, {"command": "parameters"})
-    monkeypatch.setattr(R, "python_for", lambda root: stale)
+    monkeypatch.setattr(R, "python_for", lambda root: missing)
     with pytest.raises(RenderFailed, match=SENTENCE + "mimetic-a0"):
         R.run_worker(tmp_path, {"prompt": "x"})
-    api = T.TrainingApi(root=tmp_path, runtime="torch", python=stale)
+    api = T.TrainingApi(root=tmp_path, runtime="torch", python=missing)
     clips = tmp_path / "clips"
     clips.mkdir()
     for i in range(T.MIN_PAIRS):
@@ -156,7 +107,42 @@ def test_the_mimetic_measure_render_and_trainer_refuse_a_stale_environment_befor
     assert not (tmp_path / "run" / T.TRAINER_DIRNAME / "train_command.json").exists()
 
 
-def test_a_missing_interpreter_is_refused_in_a_sentence_not_an_os_error(tmp_path):
-    from khaos_attribution.engines import contract_guard as g
-    why = g.refusal(tmp_path / "venv" / "bin" / "python", engine="Stable Audio 3", engine_id="stable-audio-3")
-    assert why.startswith("the Stable Audio 3 environment has no interpreter at") and "--engines stable-audio-3" in why
+def test_the_requirements_are_the_contracts_own_dependencies_at_their_floors():
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = text[text.index("dependencies = ["):text.index("]", text.index("dependencies = ["))]
+    assert tuple(re.findall(r'^\s*"([^"]+)"', block, re.M)) == CG.REQUIREMENTS
+
+
+@pytest.mark.skipif(os.name == "nt", reason=POSIX_ONLY)
+def test_an_environment_that_cannot_load_the_contract_is_said_so(tmp_path):
+    """The probe runs in the engine's interpreter; a base requirement that will not import is named."""
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "jsonschema.py").write_text("raise ImportError('no jsonschema here')\n")
+    engine = tmp_path / "python"
+    engine.write_text(f'#!/bin/sh\nPYTHONPATH={shadow} exec {sys.executable} "$@"\n')
+    engine.chmod(0o755)
+    assert CG.requirements_missing(engine) == "cannot load the room's contract (ImportError: no jsonschema here)"
+    assert CG.requirements_missing(sys.executable) is None
+
+
+def test_provisioning_installs_the_requirements_and_never_touches_the_contract_copy(tmp_path, monkeypatch):
+    """Only the requirements at their floors are installed; an older contract copy stays for a rollback image."""
+    calls, state = [], {"present": False}
+
+    def fake_run(cmd, cwd=None, env=None):
+        calls.append([str(c) for c in cmd])
+        if cmd[1:3] == ["-c", CG.REQUIREMENTS_PROBE]:
+            return subprocess.CompletedProcess(cmd, 0 if state["present"] else 1, "", "ModuleNotFoundError: jsonschema")
+        state["present"] = True
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(environment, "run", fake_run)
+    monkeypatch.setattr(environment, "uv_path", lambda: "uv")
+    ok, note = CG.requirements_into(tmp_path / "python")
+    assert ok and "requirements installed" in note
+    installs = [c for c in calls if c[:2] == ["uv", "pip"]]
+    assert installs == [["uv", "pip", "install", "-q", "--python", str(tmp_path / "python"), *CG.REQUIREMENTS]]
+    assert not any("khaos-attribution" in part or "khaos_attribution" in part for c in calls for part in c)
+    calls.clear()
+    assert CG.requirements_into(tmp_path / "python")[0] and not [c for c in calls if c[0] == "uv"], "present: nothing installed"

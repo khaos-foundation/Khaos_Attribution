@@ -12,7 +12,7 @@ from khaos_attribution import weights as mirror
 from khaos_attribution.engines.mimetic import DESCRIPTOR
 from khaos_attribution.engines.mimetic.render import find_root, venv_python
 from khaos_attribution.engines.worker_process import host_env
-from khaos_attribution.engines.contract_guard import contract_into, contract_mismatch, contract_present
+from khaos_attribution.engines.contract_guard import requirements_into, requirements_missing
 from khaos_attribution.engines.environment import (Report, archive_url, git_usable, make_venv, unpack_archive,
                                                    uv_path)
 from khaos_attribution.engines.environment import from_mirror as _from_mirror
@@ -102,11 +102,12 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     if python.is_file():
         probe = _run([python, "-c", code])
         if probe.returncode == 0:
-            if contract_present(python):
+            lacks = requirements_missing(python)
+            if lacks is None:
                 return True, note
             if check_only:
-                return False, f"the environment at {python} runs the engine but {contract_mismatch(python)}"
-            ok, cnote = contract_into(python, root)
+                return False, f"the environment at {python} runs the engine but {lacks}"
+            ok, cnote = requirements_into(python)
             return ok, (note + "; " + cnote) if ok else cnote
         if check_only:
             return False, f"the environment at {python} cannot run the engine: {probe.stderr.strip()[-200:]}"
@@ -133,7 +134,7 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         done = _run(cmd, cwd=root)
         if done.returncode != 0:
             return False, f"environment step failed ({' '.join(str(c) for c in cmd[:4])}…): {done.stderr.strip()[-300:]}"
-    ok, cnote = contract_into(python, root)
+    ok, cnote = requirements_into(python)
     if not ok:
         return False, f"the engine's environment installed; {cnote}"
     probe = _run([python, "-c", code])

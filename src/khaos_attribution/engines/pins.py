@@ -68,9 +68,9 @@ def checkout_commit(root) -> str | None:
     return sha if _SHA_RE.match(sha) else None
 
 
-def contract_code_hash(root=None) -> str:
-    """"<version> <sha256>" of the khaos_attribution package this interpreter imports (or the package folder given):
-    every .py and .json file by its path, line endings normalised so a Windows checkout and a wheel agree."""
+def package_sha256(root=None) -> str:
+    """sha256 of the khaos_attribution package this interpreter imports (or the package folder given): every .py and
+    .json file by its path, line endings normalised so a Windows checkout and a wheel agree. A room pins it."""
     import hashlib  # noqa: PLC0415
 
     import khaos_attribution  # noqa: PLC0415
@@ -80,5 +80,10 @@ def contract_code_hash(root=None) -> str:
         if p.suffix in (".py", ".json") and "__pycache__" not in p.parts:
             h.update(p.relative_to(root).as_posix().encode())
             h.update(p.read_bytes().replace(b"\r\n", b"\n"))
-    return f"{khaos_attribution.__version__} {h.hexdigest()}"
+    return h.hexdigest()
 
+
+def contract_code_hash(root=None) -> str:
+    """"<version> <package_sha256>" of the package this interpreter imports, or of the package folder given."""
+    import khaos_attribution  # noqa: PLC0415
+    return f"{khaos_attribution.__version__} {package_sha256(root)}"

@@ -11,6 +11,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
+    import pathlib
+    import runpy
+    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")
+
 
 REWORKS = ("retake", "audio2audio", "repaint", "extend")
 # The prefix the contract's worker loop reads a progress row by; the driver prints it too.
@@ -98,10 +103,11 @@ def render_mlx(req: dict) -> dict:
         args += ["--init-audio", str(req["source_audio"]), "--init-noise-level", str(float(req.get("noise_level") or 1.0))]
     if regions:
         args += ["--inpaint-range", f"{min(s for s, _ in regions)},{max(e for _, e in regions)}"]
+    from khaos_attribution.engines.worker_process import command  # noqa: PLC0415
     # The script masks one range: the driver masks every part, and the script is given their span.
-    cmd = [sys.executable, str(Path(__file__).with_name("render_driver_mlx.py")), str(script),
-           *(["--khaos-base"] if req.get("model") == BASE_CONFIG else []),
-           *(["--khaos-regions", ";".join(f"{s},{e}" for s, e in regions)] if regions else []), *args]
+    cmd = command(sys.executable, Path(__file__).with_name("render_driver_mlx.py"), script,
+                  *(["--khaos-base"] if req.get("model") == BASE_CONFIG else []),
+                  *(["--khaos-regions", ";".join(f"{s},{e}" for s, e in regions)] if regions else []), *args)
     try:
         done = _run_forwarding_stop(cmd, cwd=str(here))
         if done.returncode != 0:

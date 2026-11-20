@@ -4,6 +4,11 @@ at, with their lora_config embedded as stable-audio-tools reads it. Run in the e
 import json
 import sys
 
+if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
+    import pathlib
+    import runpy
+    runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "launch.py"), run_name="khaos_contract_check")
+
 
 def main(src: str, dst: str) -> int:
     from safetensors.torch import save_file

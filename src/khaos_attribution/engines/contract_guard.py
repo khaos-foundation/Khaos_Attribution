@@ -1,7 +1,7 @@
-"""The engine environment's contract, checked where an engine process is started: an interpreter that imports
-another contract than this room's is refused in a sentence. A refusal is read again at every start, so a repaired
-environment needs no restart; a pass is kept until the environment's contract is installed again. The running
-interpreter is never checked, so a test's fake worker spawns nothing."""
+"""What an engine's own interpreter needs before a room's work starts there. Engine scripts run on the contract of
+the room that starts them (engines/launch.py), so the interpreter is only refused, in a sentence, when it is missing;
+the environment needs the contract's base requirements, never its own copy of the contract. The running interpreter
+is never checked, so a test's fake worker spawns nothing."""
 
 from __future__ import annotations
 
@@ -11,16 +11,9 @@ from pathlib import Path
 
 from khaos_attribution.engines import environment
 
-_PASSED: dict = {}
-# What _fingerprint answers for an interpreter that cannot be started at all.
-MISSING = "missing"
-
-
-def _fingerprint(python) -> str | None:
-    try:
-        return contract_fingerprint(python)
-    except OSError:
-        return MISSING
+# The contract's own dependencies, at pyproject's floors: what loading the room's contract in an engine needs.
+REQUIREMENTS = ("jsonschema>=4.18", "numpy>=1.24")
+REQUIREMENTS_PROBE = "import jsonschema, numpy"
 
 
 def _is_this_interpreter(python) -> bool:
@@ -30,35 +23,12 @@ def _is_this_interpreter(python) -> bool:
         return False
 
 
-def _installed(python) -> tuple | None:
-    """When the contract in the interpreter's venv was last installed (its dist-info's name and mtime), or None
-    where it cannot be read; the interpreter's own path is kept, since a venv's python links outside it."""
-    venv = Path(python).parent.parent
-    try:
-        sites = [venv / "Lib" / "site-packages", *sorted((venv / "lib").glob("python*/site-packages"))]
-        found = sorted(d for site in sites for d in site.glob("khaos_attribution-*.dist-info"))
-        return tuple((d.name, d.stat().st_mtime_ns) for d in found) or None
-    except OSError:
-        return None
-
-
 def refusal(python, *, engine: str, engine_id: str) -> str | None:
-    """Why ``python`` must not run this room's work for ``engine``, or None."""
+    """Why ``python`` cannot run this room's work for ``engine``, or None; read again at every start."""
     path = str(python)
-    if _is_this_interpreter(path):
+    if _is_this_interpreter(path) or Path(path).is_file():
         return None
-    installed = _installed(path)
-    if path in _PASSED and _PASSED[path] == installed:
-        return None
-    ours, theirs = _fingerprint(None), _fingerprint(Path(path))
-    if theirs is MISSING:
-        _PASSED.pop(path, None)
-        return f"the {engine} environment has no interpreter at {path}: run the installer with --engines {engine_id}"
-    if theirs == ours:
-        _PASSED[path] = installed
-        return None
-    _PASSED.pop(path, None)
-    return f"the {engine} environment at {path} {mismatch_words(theirs, ours)}: run the installer with --engines {engine_id}"
+    return f"the {engine} environment has no interpreter at {path}: run the installer with --engines {engine_id}"
 
 
 def require(python, *, engine: str, engine_id: str, error: type) -> None:
@@ -68,7 +38,30 @@ def require(python, *, engine: str, engine_id: str, error: type) -> None:
         raise error(why)
 
 
-# ── the contract an engine's environment holds ────────────────────────────────
+def requirements_missing(python) -> str | None:
+    """What the interpreter lacks to load the room's contract, in words, or None when it has it all."""
+    done = environment.run([python, "-c", REQUIREMENTS_PROBE])
+    if done.returncode == 0:
+        return None
+    said = (done.stderr or "").strip().splitlines()
+    return f"cannot load the room's contract ({said[-1] if said else 'its base requirements do not import'})"
+
+
+def requirements_into(python) -> tuple:
+    """The contract's base requirements into the engine's environment when they are missing; an older contract
+    copy there is left alone, for a room or a rollback image that still reads it."""
+    if requirements_missing(python) is None:
+        return True, "the room's contract loads in the engine's environment"
+    done = environment.run([environment.uv_path(), "pip", "install", "-q", "--python", python, *REQUIREMENTS])
+    if done.returncode != 0:
+        return False, f"the contract's requirements could not be installed: {done.stderr.strip()[-200:]}"
+    why = requirements_missing(python)
+    if why:
+        return False, f"the engine's environment {why}"
+    return True, "the contract's requirements installed in the engine's environment"
+
+
+# ── the engine environment's own copy, read by rooms from before the launcher ─
 
 CONTRACT_SRC_ENV = "KHAOS_CONTRACT_SRC"
 CONTRACT_WHEEL_ENV = "KHAOS_CONTRACT_WHEEL"
