@@ -6,40 +6,42 @@ landmark hashes, never audio.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import sqlite3
 import threading
+from collections import Counter
 from pathlib import Path
 
 from khaos_attribution.fingerprint import best_phase_profile, dominant, is_confident
 from register_service.store import now_utc, refuse_newer
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS outputs (generation_id TEXT PRIMARY KEY, serial INTEGER NOT NULL, payload INTEGER NOT NULL,
-  artist_id TEXT NOT NULL, released_at TEXT NOT NULL, released_by TEXT NOT NULL, kind TEXT NOT NULL, landmarks INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS fingerprints (hash INTEGER NOT NULL, generation_id TEXT NOT NULL, offset_ms INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS fingerprints_hash ON fingerprints (hash);
-CREATE INDEX IF NOT EXISTS fingerprints_gen ON fingerprints (generation_id);
+CREATE TABLE IF NOT EXISTS outputs (oid INTEGER PRIMARY KEY, generation_id TEXT UNIQUE NOT NULL, serial INTEGER NOT NULL,
+  payload INTEGER NOT NULL, artist_id TEXT NOT NULL, released_at TEXT NOT NULL, released_by TEXT NOT NULL, kind TEXT NOT NULL,
+  landmarks INTEGER NOT NULL, withdrawn INTEGER NOT NULL DEFAULT 0, removed_at TEXT, sha256 TEXT);
 CREATE INDEX IF NOT EXISTS outputs_payload ON outputs (payload);
-CREATE INDEX IF NOT EXISTS fingerprints_vote ON fingerprints (hash, generation_id, offset_ms);
+CREATE TABLE IF NOT EXISTS landmarks (hash INTEGER NOT NULL, oid INTEGER NOT NULL, offset_ms INTEGER NOT NULL,
+  n INTEGER NOT NULL, PRIMARY KEY (hash, oid, offset_ms)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS manifests (generation_id TEXT PRIMARY KEY, store BLOB NOT NULL, sha256 TEXT NOT NULL,
     kept_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS claims (claim_id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, serial INTEGER NOT NULL,
   track_id TEXT NOT NULL, declaration TEXT NOT NULL, claimed_at TEXT NOT NULL, claimed_by TEXT NOT NULL,
   landmarks INTEGER NOT NULL, UNIQUE (serial, track_id));
-CREATE TABLE IF NOT EXISTS claim_fingerprints (hash INTEGER NOT NULL, claim_id INTEGER NOT NULL, offset_ms INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS claim_fingerprints_hash ON claim_fingerprints (hash);
-CREATE INDEX IF NOT EXISTS claim_fingerprints_vote ON claim_fingerprints (hash, claim_id, offset_ms);
-CREATE INDEX IF NOT EXISTS claim_fingerprints_claim ON claim_fingerprints (claim_id);
+CREATE TABLE IF NOT EXISTS claim_landmarks (hash INTEGER NOT NULL, claim_id INTEGER NOT NULL, offset_ms INTEGER NOT NULL,
+  n INTEGER NOT NULL, PRIMARY KEY (hash, claim_id, offset_ms)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_landmarks_claim ON claim_landmarks (claim_id);
 CREATE TABLE IF NOT EXISTS claim_shares (claim_id INTEGER NOT NULL, other_claim INTEGER NOT NULL, votes INTEGER NOT NULL,
   at TEXT NOT NULL, PRIMARY KEY (claim_id, other_claim));
 """
-# The shape of file this code writes (PRAGMA user_version): it opens no file a newer register wrote.
-INDEX_VERSION = 1
+# The shape of file this code writes (PRAGMA user_version): it opens no file a newer register wrote. 2: a landmark is
+# keyed by its hash, so a lookup reads the shared rows alone; a landmark a fingerprint repeats is counted in n.
+INDEX_VERSION = 2
 MAX_LANDMARKS = 200_000
 MAX_PHASES = 8
-# Columns a first-version index file gains in place.
+# Columns an index file from before version 1 lacked; the move to version 2 carries them over.
 _ADDED = (("outputs", "withdrawn", "INTEGER NOT NULL DEFAULT 0"), ("outputs", "removed_at", "TEXT"), ("outputs", "sha256", "TEXT"))
+_OUTPUT_COLUMNS = "generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks, withdrawn, removed_at, sha256"
 CANDIDATES = 50
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -62,12 +64,59 @@ class Index:
         version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
         refuse_newer(self.path, version, INDEX_VERSION)
         self.db.execute("PRAGMA journal_mode=WAL")
+        if "oid" not in {r["name"] for r in self.db.execute("PRAGMA table_info(outputs)")} and self._tables() & {"outputs", "fingerprints"}:
+            self._to_landmarks()
         self.db.executescript(SCHEMA)
-        for table, column, declaration in _ADDED:
-            if column not in {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}:
-                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-        if version < INDEX_VERSION:
+        if int(self.db.execute("PRAGMA user_version").fetchone()[0]) < INDEX_VERSION:
             self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
+
+    def _tables(self) -> set:
+        return {r["name"] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+    def _to_landmarks(self) -> None:
+        """An index from before version 2, moved in one transaction: its pieces numbered, each landmark keyed by its
+        hash with its repeats counted, its claims likewise, and the version stamped in the same transaction; then the old
+        tables are gone and the file is compacted."""
+        db, log = self.db, logging.getLogger("register_service")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            tables = self._tables()
+            for table, column, declaration in _ADDED:
+                if table in tables and column not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            db.execute("ALTER TABLE outputs RENAME TO outputs_v1")
+            db.execute("DROP INDEX IF EXISTS outputs_payload")
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    db.execute(statement)
+            db.execute(f"INSERT INTO outputs ({_OUTPUT_COLUMNS}) SELECT {_OUTPUT_COLUMNS} FROM outputs_v1 ORDER BY rowid")
+            if "fingerprints" in tables:
+                orphans = db.execute("SELECT COUNT(*) FROM fingerprints f LEFT JOIN outputs o ON o.generation_id = f.generation_id"
+                                     " WHERE o.oid IS NULL").fetchone()[0]
+                if orphans:
+                    log.warning("index move: %d landmark rows name no released piece and are not carried over", orphans)
+                db.execute("INSERT INTO landmarks (hash, oid, offset_ms, n) SELECT f.hash, o.oid, f.offset_ms, COUNT(*)"
+                           " FROM fingerprints f JOIN outputs o ON o.generation_id = f.generation_id GROUP BY f.hash, o.oid, f.offset_ms")
+                db.execute("DROP TABLE fingerprints")
+            if "claim_fingerprints" in tables:
+                db.execute("INSERT INTO claim_landmarks (hash, claim_id, offset_ms, n) SELECT hash, claim_id, offset_ms, COUNT(*)"
+                           " FROM claim_fingerprints GROUP BY hash, claim_id, offset_ms")
+                db.execute("DROP TABLE claim_fingerprints")
+            db.execute("DROP TABLE outputs_v1")
+            # Stamped inside the move: a file is version 2 exactly when it has version 2's shape.
+            db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
+            db.execute("COMMIT")
+        except BaseException as exc:
+            db.execute("ROLLBACK")
+            log.error("index move to version %d refused, nothing changed: %s", INDEX_VERSION, exc)
+            raise
+        log.warning("index moved to version %d", INDEX_VERSION)
+        try:
+            db.execute("VACUUM")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            # The move is committed; a file left at its old size is no reason not to start.
+            log.warning("index moved but not compacted: %s", exc)
 
     @property
     def db(self) -> sqlite3.Connection:
@@ -84,7 +133,7 @@ class Index:
                 released_by: str, kind: str, sha256: str | None = None) -> dict:
         """One released output under its model's bucket, with its file's sha256 when sent (it breaks a near-copy tie
         and is never answered); the same id again is the first release, unchanged."""
-        rows = [(h, generation_id, o) for h, o in _landmarks(fingerprint)]
+        rows = _landmarks(fingerprint)
         sha256 = sha256_of(sha256)
         with self._lock:
             have = self.output(generation_id)
@@ -93,14 +142,17 @@ class Index:
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 at = now_utc()
-                self.db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks, sha256)"
-                                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                (generation_id, serial, payload, artist_id, at, released_by, kind, len(rows), sha256))
-                self.db.executemany("INSERT INTO fingerprints (hash, generation_id, offset_ms) VALUES (?, ?, ?)", rows)
+                oid = self.db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks, sha256)"
+                                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                      (generation_id, serial, payload, artist_id, at, released_by, kind, len(rows), sha256)).lastrowid
+                self.db.executemany("INSERT INTO landmarks (hash, oid, offset_ms, n) VALUES (?, ?, ?, ?)",
+                                    [(h, oid, o, n) for (h, o), n in sorted(Counter(rows).items())])
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+            # The planner's statistics follow the table as it grows; cheap when nothing changed.
+            self.db.execute("PRAGMA optimize")
         return {"generation_id": generation_id, "serial": serial, "payload": payload, "artist_id": artist_id,
                 "released_at": at, "released_by": released_by, "kind": kind, "landmarks": len(rows), "already": False}
 
@@ -161,12 +213,14 @@ class Index:
         return bool(row) and not row["withdrawn"] and row["removed_at"] is None
 
     def output(self, generation_id: str) -> dict | None:
-        """A released piece as any answer may show it: never its file's hash, which an asker could otherwise repeat."""
+        """A released piece as any answer may show it: never its file's hash, which an asker could otherwise repeat, nor
+        the index's own number for it."""
         row = self.db.execute("SELECT * FROM outputs WHERE generation_id = ?", (generation_id,)).fetchone()
         if not row:
             return None
         out = dict(row)
         out.pop("sha256", None)
+        out.pop("oid", None)
         return out
 
     def _by_bytes(self, generation_ids: list, sha256: str) -> str | None:
@@ -192,20 +246,21 @@ class Index:
         try:
             db.execute("DELETE FROM query_hashes")
             db.executemany("INSERT INTO query_hashes (h) VALUES (?)", [(h,) for h in hashes])
-            shared = (" FROM query_hashes q JOIN fingerprints f ON f.hash = q.h JOIN outputs ou ON ou.generation_id = f.generation_id"
+            # CROSS JOIN keeps the query's hashes outside: each is one seek into the landmarks' key, never a scan.
+            shared = (" FROM query_hashes q CROSS JOIN landmarks f ON f.hash = q.h JOIN outputs ou ON ou.oid = f.oid"
                       " WHERE ou.withdrawn = 0" + (" AND ou.payload = ?" if payload is not None else ""))
             bucket = [] if payload is None else [payload]
             # Ties keep the order a hash-by-hash reading meets them in: the lowest shared hash, then the id.
-            top = [r["g"] for r in db.execute(
-                "SELECT f.generation_id AS g" + shared + " GROUP BY f.generation_id"
-                " ORDER BY COUNT(*) DESC, MIN(f.hash), f.generation_id LIMIT ?", [*bucket, CANDIDATES])]
-            rows: dict = {g: [] for g in top}
+            top = [(r["g"], r["oid"]) for r in db.execute(
+                "SELECT ou.generation_id AS g, f.oid AS oid" + shared + " GROUP BY f.oid"
+                " ORDER BY SUM(f.n) DESC, MIN(f.hash), ou.generation_id LIMIT ?", [*bucket, CANDIDATES])]
+            rows: dict = {g: [] for g, _ in top}
             for i in range(0, len(top), 900):
-                chunk = top[i:i + 900]
-                for row in db.execute("SELECT f.generation_id AS g, f.hash AS h, f.offset_ms AS o" + shared
-                                      + " AND f.generation_id IN (%s) ORDER BY f.hash, f.generation_id, f.offset_ms" % ",".join("?" * len(chunk)),
+                chunk = [oid for _, oid in top[i:i + 900]]
+                for row in db.execute("SELECT ou.generation_id AS g, f.hash AS h, f.offset_ms AS o, f.n AS n" + shared
+                                      + " AND f.oid IN (%s) ORDER BY f.hash, ou.generation_id, f.offset_ms" % ",".join("?" * len(chunk)),
                                       [*bucket, *chunk]):
-                    rows[row["g"]].append((row["h"], row["o"]))
+                    rows[row["g"]].extend([(row["h"], row["o"])] * row["n"])
         finally:
             db.execute("COMMIT")
         return rows
@@ -249,9 +304,10 @@ class Index:
         rows: dict = {}
         for i in range(0, len(hashes), 900):
             chunk = hashes[i:i + 900]
-            q = "SELECT claim_id AS c, hash AS h, offset_ms AS o FROM claim_fingerprints WHERE hash IN (%s)" % ",".join("?" * len(chunk))
+            q = ("SELECT claim_id AS c, hash AS h, offset_ms AS o, n FROM claim_landmarks WHERE hash IN (%s)"
+                 " ORDER BY hash, claim_id, offset_ms" % ",".join("?" * len(chunk)))
             for row in self.db.execute(q, chunk):
-                rows.setdefault(row["c"], []).append((row["h"], row["o"]))
+                rows.setdefault(row["c"], []).extend([(row["h"], row["o"])] * row["n"])
         query_len = len(phases[0]) if phases else 0
         out = []
         for c in sorted(rows, key=lambda c: len(rows[c]), reverse=True)[:CANDIDATES]:
@@ -297,8 +353,8 @@ class Index:
                 cur = self.db.execute("INSERT INTO claims (account_id, serial, track_id, declaration, claimed_at, claimed_by, landmarks)"
                                       " VALUES (?, ?, ?, ?, ?, ?, ?)", (account_id, serial, track_id, declaration, now_utc(), claimed_by, len(rows)))
                 cid = cur.lastrowid
-                self.db.executemany("INSERT INTO claim_fingerprints (hash, claim_id, offset_ms) VALUES (?, ?, ?)",
-                                    [(h, cid, o) for h, o in rows])
+                self.db.executemany("INSERT INTO claim_landmarks (hash, claim_id, offset_ms, n) VALUES (?, ?, ?, ?)",
+                                    [(h, cid, o, n) for (h, o), n in sorted(Counter(rows).items())])
                 self.db.executemany("INSERT OR IGNORE INTO claim_shares (claim_id, other_claim, votes, at) VALUES (?, ?, ?, ?)",
                                     [(cid, c["claim_id"], v, now_utc()) for v, c in others])
                 self.db.execute("COMMIT")
@@ -313,7 +369,7 @@ class Index:
             ids = [r["claim_id"] for r in self.db.execute("SELECT claim_id FROM claims WHERE serial = ?", (serial,))]
             self.db.execute("BEGIN IMMEDIATE")
             try:
-                self.db.executemany("DELETE FROM claim_fingerprints WHERE claim_id = ?", [(i,) for i in ids])
+                self.db.executemany("DELETE FROM claim_landmarks WHERE claim_id = ?", [(i,) for i in ids])
                 self.db.executemany("DELETE FROM claim_shares WHERE claim_id = ? OR other_claim = ?", [(i, i) for i in ids])
                 self.db.execute("DELETE FROM claims WHERE serial = ?", (serial,))
                 self.db.execute("COMMIT")
