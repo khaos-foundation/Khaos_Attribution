@@ -10,7 +10,8 @@ carries), and an **evidence review** (a published run's tracks cleared on the im
 functions that validate records against them using
 [jsonschema](https://python-jsonschema.readthedocs.io/), and the shared
 implementation modules the two apps pin: `watermark` (AudioSeal — SECDED
-codewords, a bucket per model derived from its machine key and run id, retirement, the recorded reset history),
+codewords, a model's bucket derived from its machine key and run id and shared by many models, retirement, the
+recorded reset history),
 `fingerprint`, `estimator` and `blend` (the attribution estimate and
 its blend of signals), `diagnostics` (whether that estimate's similarity
 signal varied with the output at all, or returns the same tracks whatever
