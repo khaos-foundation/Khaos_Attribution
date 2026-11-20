@@ -21,6 +21,9 @@ from khaos_attribution import translog as T  # noqa: E402
 from khaos_attribution.translog import verify as V  # noqa: E402
 from register_service.app import create_app, export_all, log_places  # noqa: E402
 from tests.test_register_service import _machine, _signed, _Transport, register  # noqa: E402,F401
+from tests import log_files as LF  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("tile_widths", "confined")
 
 
 def _age_every_head(store, days):
@@ -67,10 +70,9 @@ def test_a_mirror_cannot_hold_back_an_old_strike_by_calling_it_delayed(register,
     refresh_head(app.state.cfg, store)
     lie = tmp_path / "lie"
     shutil.copytree(app.state.cfg["data"] / "mirror-public", lie)
-    doc = json.loads((lie / "log" / "bodies.json").read_text())
-    revoke_index = json.loads((lie / "log" / "hashes.json").read_text())["leaves"].index(store.log.struck()[leaf]["leaf_hash"])
-    doc["pending_from"], doc["bodies"][revoke_index] = revoke_index, None
-    (lie / "log" / "bodies.json").write_text(json.dumps(doc))
+    revoke_index = LF.leaves(lie / "log").index(store.log.struck()[leaf]["leaf_hash"])
+    LF.set_pending_from(lie / "log", revoke_index)
+    LF.set_body(lie / "log", revoke_index, None)
     with pytest.raises(T.LogError, match="publication delay"):
         V.prove(leaf, V.Mirror(str(lie)), store.log.signer.public_pem())
 

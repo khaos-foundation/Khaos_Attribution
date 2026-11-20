@@ -228,20 +228,69 @@
     return true;
   }
 
+  // The tiles' width as the export states it in hashes/tail.json: a power of two from 2 to 4096.
+  function tileWidth(tail) {
+    const w = tail.tile_width;
+    if (!Number.isInteger(w) || w < 2 || w > 4096 || (w & (w - 1)) !== 0) throw new Error("the mirror's tile width is not a power of two from 2 to 4096");
+    return w;
+  }
+
+  // A tail's first index and items, checked: a tile's start, no further than its size, and exactly the rest.
+  function tailOf(doc, n, key, width) {
+    if (!doc || !Array.isArray(doc[key]) || !Number.isInteger(doc.first) || !Number.isInteger(doc.tree_size)) throw new Error("a tail file holds no " + key);
+    if (doc.tree_size < n) throw new Error("the mirror changed while it was read; try again");
+    if (doc.first < 0 || doc.first > doc.tree_size || doc.first % width !== 0 || doc[key].length !== doc.tree_size - doc.first) {
+      throw new Error("a tail's first and length do not fit its size");
+    }
+    return [doc.first, doc[key]];
+  }
+
+  async function tiles(folder, count, width, key) {
+    const out = [];
+    for (let k = 0; k < count; k++) {
+      const tile = await get(folder + "/" + k + ".json");
+      if (!tile || tile.tile !== k || !Array.isArray(tile[key]) || tile[key].length !== width) throw new Error(folder + "/" + k + ".json is not tile " + k + " of " + width);
+      out.push(...tile[key]);
+    }
+    return out;
+  }
+
+  // The first n leaf hashes from the tiles and the tail; from hashes.json only where the mirror has no tiles (a 404).
+  async function readLeaves(n) {
+    const tail = await get("hashes/tail.json");
+    if (tail === null) return (((await get("hashes.json")) || {}).leaves || []).slice(0, n);
+    const width = tileWidth(tail);
+    const [first, rest] = tailOf(tail, n, "leaves", width);
+    return (await tiles("hashes", first / width, width, "leaves")).concat(rest).slice(0, n);
+  }
+
+  async function readBodies(n) {
+    const tail = await get("hashes/tail.json");
+    if (tail === null) {
+      const bundle = (await get("bodies.json")) || {};
+      return { bodies: (bundle.bodies || []).slice(0, n), pending_from: bundle.pending_from };
+    }
+    const width = tileWidth(tail);
+    const doc = await get("bodies/tail.json");
+    if (doc === null) throw new Error("the mirror has hash tiles but no body tail");
+    const [first, rest] = tailOf(doc, n, "bodies", width);
+    return { bodies: (await tiles("bodies", first / width, width, "bodies")).concat(rest).slice(0, n), pending_from: doc.pending_from };
+  }
+
   // Every leaf and published body, checked against the newest signed head; a missing body needs a proved withhold.
   async function loadLog(pem) {
     const latest = await get("sth/latest.json");
     if (!latest) throw new Error("the log has no signed head yet");
     let signed = await checkHead(latest, pem);
     const n = latest.tree_size;
-    const hashes = ((await get("hashes.json")) || {}).leaves || [];
+    const hashes = await readLeaves(n);
     if (hashes.length < n) throw new Error("the mirror changed while it was read; try again");
     const leaves = hashes.slice(0, n);
     if (!leaves.every(isHex) || hex(await treeHash(leaves.map(unhex))) !== latest.root_sha256) {
       throw new Error("the mirror's leaf hashes do not make its signed root");
     }
-    const bundle = (await get("bodies.json")) || {};
-    const texts = bundle.bodies || [];
+    const bundle = await readBodies(n);
+    const texts = bundle.bodies;
     const entries = new Array(n).fill(null);
     for (let i = 0; i < n && i < texts.length; i++) {
       if (texts[i] === null || texts[i] === undefined) continue;

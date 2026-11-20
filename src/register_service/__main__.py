@@ -135,8 +135,7 @@ def main(argv=None) -> int:
             done = anchor.upgrade_pending(store, anchor.OpenTimestamps())
             print(f"completed: {done}" if done else "no receipt completed yet")
         from register_service.translog import export_anchors  # noqa: PLC0415
-        for place in ("mirror", "mirror-public"):
-            export_anchors(store.log, cfg["data"] / place)
+        export_anchors(store.log, cfg["data"] / "mirror", cfg["data"] / "mirror-public")
     elif a.cmd == "check":
         from register_service.app import LOG_OFF, log_places, log_started  # noqa: PLC0415
         ok = store.ledger_ok()

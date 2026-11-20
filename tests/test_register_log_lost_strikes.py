@@ -19,6 +19,8 @@ from khaos_attribution.translog import verify as V  # noqa: E402
 from register_service.app import create_app, export_all, log_places  # noqa: E402
 from tests.test_register_service import _machine, _signed, _Transport, register  # noqa: E402,F401
 
+pytestmark = pytest.mark.usefixtures("tile_widths", "confined")
+
 
 def _vrun(target, where, pem, tmp_path, capsys):
     key = tmp_path / "k.pub"

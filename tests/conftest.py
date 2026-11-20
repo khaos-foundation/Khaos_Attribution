@@ -2,6 +2,8 @@
 A test that does not run to a verdict, skipped or expected to fail, fails the run unless its reason is named here."""
 import os
 import re
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -23,12 +25,22 @@ _unexpected: list = []
 
 
 @pytest.fixture(autouse=True)
-def _no_real_weights_mirror(monkeypatch):
+def _no_real_weights_mirror(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("KHAOS_WEIGHTS_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("REGISTER_LOG_WITNESSES", "")
     # Every git a test runs reads no configuration of this machine's.
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # khaos-log-verify's tile cache stays inside the test.
+    monkeypatch.setenv("KHAOS_LOG_CACHE", str(tmp_path_factory.mktemp("log-cache")))
+
+
+@pytest.fixture(params=[256, 4], ids=["tiles256", "tiles4"])
+def tile_widths(request, monkeypatch):
+    """The log's export at its own tile width and at 4, so a test's few leaves fill sealed tiles too."""
+    from khaos_attribution import translog as T
+    monkeypatch.setattr(T, "TILE", request.param)
+    return request.param
 
 
 def _reason(report) -> str | None:
@@ -64,3 +76,35 @@ def pytest_terminal_summary(terminalreporter):
 def pytest_sessionfinish(session, exitstatus):
     if _unexpected and exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture
+def confined(tmp_path, monkeypatch):
+    """No removal or replacement reaches outside this test's own folder, whatever the code under test asks: such a
+    request fails the test and changes nothing. A hostile-path test must hold even against code that does not yet
+    resist it."""
+    import os
+    root = tmp_path.resolve()
+    real = {"rmtree": shutil.rmtree, "unlink": os.unlink, "remove": os.remove, "rmdir": os.rmdir, "replace": os.replace}
+
+    def inside(path) -> bool:
+        """The path's folder resolved, its last part kept as it is: a link inside the folder is the folder's to remove."""
+        try:
+            whole = Path(os.path.abspath(os.fsdecode(path)))
+            return (whole.parent.resolve() / whole.name).is_relative_to(root)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def guard(name):
+        def guarded(*paths_and_args, **k):
+            count = 2 if name == "replace" else 1
+            if k.get("dir_fd") is None and k.get("src_dir_fd") is None:
+                for path in paths_and_args[:count]:
+                    if not inside(path):
+                        raise AssertionError(f"{name} outside the test's folder was asked for: {path}")
+            return real[name](*paths_and_args, **k)
+        return guarded
+    monkeypatch.setattr(shutil, "rmtree", guard("rmtree"))
+    for name in ("unlink", "remove", "rmdir", "replace"):
+        monkeypatch.setattr(os, name, guard(name))
+    return root
