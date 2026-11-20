@@ -16,16 +16,16 @@ from collections.abc import Iterable
 from khaos_attribution.caption_fit import fit, profile, tokens
 from khaos_attribution.catalogue_guard import MIN_CORPUS_CAPTIONS, hold
 from khaos_attribution.prompt_expansion import tidy_caption
-from khaos_attribution.translation import (_DIGITS, _SOUND_ALIKE, _THEORY, LINT_WORDS, MAX_ATTEMPTS, RETRY_SEED,
-                                           RETRY_TEMPERATURE, TranslatorUnavailable, _names, _WORD, clean_request,
-                                           parse_answer, vocal_hits)
+from khaos_attribution.translation import (_DIGITS, _SOUND_ALIKE, _THEORY, DEFAULT_TIMEOUT_SEC, LINT_WORDS, MAX_ATTEMPTS,
+                                           RETRY_SEED, RETRY_TEMPERATURE, TRANSLATION_WORDS, TranslatorUnavailable, _names,
+                                           _WORD, clean_request, parse_answer, vocal_hits)
 
 __all__ = ["CATALOGUE_PROMPT_VERSION", "FITS_FLOOR", "catalogue_prompt", "lint_catalogue", "stitched", "build_prompt"]
 
 CATALOGUE_PROMPT_VERSION = "0.1.0"
 # The share of a served prompt's words that must come from the artist's captions (the page's "Fits" meter).
 FITS_FLOOR = 0.60
-WORDS = (25, 55)
+WORDS = TRANSLATION_WORDS
 
 _SYSTEM = (
     "You write one description of a piece of music by this artist, in the words this artist's music is "
@@ -124,7 +124,7 @@ def catalogue_prompt(request: str, *, pool: Iterable[str], ranked: list[dict], i
     rejects: list[dict] = []
     attempts = 0
     if llm is not None:
-        deadline = time.monotonic() + 30.0 if deadline is None else deadline
+        deadline = time.monotonic() + DEFAULT_TIMEOUT_SEC if deadline is None else deadline
         for n in range(MAX_ATTEMPTS):
             if cancelled() or deadline - time.monotonic() <= 0.5:
                 break

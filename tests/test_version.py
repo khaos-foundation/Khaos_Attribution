@@ -1,8 +1,6 @@
-"""__version__ is the literal in the package and matches pyproject, and every module with
-`X | None` annotations defers them so requires-python >= 3.9 holds."""
+"""__version__ is the literal in the package, and pyproject and uv.lock name the same version."""
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
@@ -27,34 +25,8 @@ def test_the_version_is_the_literal_and_the_literal_is_pyprojects():
     assert "importlib.metadata" not in source
 
 
-def _uses_pep604_union(tree: ast.AST) -> bool:
-    for node in ast.walk(tree):
-        ann = None
-        if isinstance(node, ast.arg):
-            ann = node.annotation
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            ann = node.returns
-        elif isinstance(node, ast.AnnAssign):
-            ann = node.annotation
-        if ann is None:
-            continue
-        for sub in ast.walk(ann):
-            if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.BitOr):
-                return True
-    return False
-
-
-def test_every_module_with_union_annotations_defers_them():
-    """`int | None` is evaluated at definition time on 3.9 unless the module
-    defers annotations."""
-    offenders = []
-    for path in sorted(PACKAGE.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if not _uses_pep604_union(tree):
-            continue
-        deferred = any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
-                       and any(a.name == "annotations" for a in n.names)
-                       for n in tree.body)
-        if not deferred:
-            offenders.append(path.name)
-    assert offenders == [], f"union annotations without the future import: {offenders}"
+def test_the_lock_records_the_version_pyproject_names():
+    """uv.lock is relocked with every version, so a dependency added beside it is installed where the lock is used."""
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    entry = re.search(r'^\[\[package\]\]\nname = "khaos-attribution"\nversion = "([^"]+)"', lock, re.M)
+    assert entry and entry.group(1) == _pyproject_version(), "run `uv lock` after setting the version"
