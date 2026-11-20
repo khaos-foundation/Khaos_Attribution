@@ -79,7 +79,24 @@ class TransLog:
     def __init__(self, store):
         self.store, self.signer, self.blocked, self.off = store, None, None, None
         store.db.executescript(SCHEMA)
+        self._one_head_per_size()
         self._mark_waiting_admits()
+
+    def _one_head_per_size(self) -> None:
+        """A file whose log_heads predates its UNIQUE tree_size gets that rule as an index; a second head of a size is
+        moved to log_heads_superseded, never dropped."""
+        for ix in self.db.execute("PRAGMA index_list(log_heads)").fetchall():
+            if ix["unique"] and [c["name"] for c in self.db.execute(f'PRAGMA index_info("{ix["name"]}")')] == ["tree_size"]:
+                return
+        with self.store._tx() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS log_heads_superseded AS SELECT * FROM log_heads WHERE 0")
+            moved = db.execute("INSERT INTO log_heads_superseded SELECT * FROM log_heads h"
+                               " WHERE id > (SELECT MIN(id) FROM log_heads WHERE tree_size = h.tree_size)").rowcount
+            db.execute("DELETE FROM log_heads WHERE id IN (SELECT id FROM log_heads_superseded)")
+            db.execute("CREATE UNIQUE INDEX log_heads_one_per_size ON log_heads (tree_size)")
+        if moved:
+            import logging  # noqa: PLC0415
+            logging.getLogger("register_service").warning("%d second head(s) of a size moved to log_heads_superseded", moved)
 
     def _mark_waiting_admits(self) -> None:
         """``waits`` on an admit: 1 when its body names lost leaves it waits on (pending_lost), else 0. A column so the
@@ -329,7 +346,11 @@ class TransLog:
             raise LogOff(self.off)
         if self.blocked:
             raise LogBlocked(self.blocked)
-        if entry.get("kind") != "genesis" and self.size() == 0:
+        have = self.db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(idx) + 1, 0) AS n FROM log_leaves").fetchone()
+        if have["c"] != have["n"]:
+            # A head signed past a missing leaf would publish a tree no one can rebuild.
+            raise LogBlocked(f"{have['n'] - have['c']} of the log's {have['n']} leaves are missing; nothing is appended")
+        if entry.get("kind") != "genesis" and have["n"] == 0:
             # Only the service's own start begins a log, with the genesis that admits every record before it.
             raise LogOff("a log begins with its genesis, which only the service appends when it starts the log")
         if self.signer is None:
@@ -898,7 +919,9 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
         # A verifier reads hashes.json and bodies.json; files an earlier layout wrote beside them go.
         for name in ("records.json", "struck.json", "withheld.json"):
             _remove(root / name)
-        shutil.rmtree(root / "entries", ignore_errors=True)
+        if (root / "entries").exists():
+            # A removal that fails raises: the export is not recorded, so the next one is whole and tries again.
+            shutil.rmtree(root / "entries")
     return latest
 
 
