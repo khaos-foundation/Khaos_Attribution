@@ -18,6 +18,8 @@ import re
 from importlib import resources
 from typing import Sequence
 
+from khaos_attribution.canonical import compact_ascii
+
 __all__ = [
     "CHARSET", "COLOURWAYS", "SealRefused", "artist_mark_of", "render_seal", "render_marks_row",
     "seal_for_provenance", "marks_row_for_provenance", "provenance_values", "model_seal_document",
@@ -345,7 +347,7 @@ def render_marks_row(artist_mark: str, standard_version: str, date_letter: str, 
 # ── provenance binding ──────────────────────────────────────────────────────
 
 def _canonical(record: dict) -> bytes:
-    return json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return compact_ascii(record)
 
 
 def _record_digest(record: dict) -> bytes:

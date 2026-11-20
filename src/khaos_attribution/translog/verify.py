@@ -144,7 +144,8 @@ def resolve(target: str, log: dict) -> tuple:
         if isinstance(doc.get("record"), dict) and doc.get("signed_version"):
             from khaos_attribution import registry as R  # noqa: PLC0415
             if R.sha256_hex(R.canonical_bytes(doc["record"])) != doc["record_sha256"]:
-                raise T.LogError("the signed record's hash is not over its own record")
+                raise T.LogError("the signed record's hash is not over its own record: it was changed, or written again by a "
+                                 "tool that rewrote its numbers (50.0 as 50)")
         return _by_record(doc["record_sha256"], log)
     raise NotFound("the document is neither a log entry nor a register record")
 

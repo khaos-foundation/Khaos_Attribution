@@ -9,6 +9,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from khaos_attribution.canonical import compact
+
 
 def rights_sha256(path: Path | str) -> str | None:
     """sha256 of the canonical ``tracks`` mapping in a rights.json, or None
@@ -22,5 +24,4 @@ def rights_sha256(path: Path | str) -> str | None:
     tracks = data.get("tracks")
     if not isinstance(tracks, dict):
         return None
-    canonical = json.dumps(tracks, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(compact(tracks)).hexdigest()

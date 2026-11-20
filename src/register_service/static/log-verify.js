@@ -4,6 +4,8 @@
   const form = document.getElementById("log-form");
   const out = document.getElementById("log-result");
   const input = document.getElementById("log-input");
+  // The tests read the record form here, where no page is loaded.
+  if (globalThis.__khaosCanonical) globalThis.__khaosCanonical.pythonCompact = pythonCompact;
   if (!form) return;
   const base = form.dataset.mirror + "/log/";
   const enc = new TextEncoder();
@@ -30,6 +32,140 @@
     if (v === null || typeof v !== "object") return JSON.stringify(v);
     if (Array.isArray(v)) return "[" + v.map(jcs).join(",") + "]";
     return "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + jcs(v[k])).join(",") + "}";
+  }
+
+  // A register record's own form (khaos_attribution.canonical.compact) of a JSON text, as Python reads and writes it:
+  // numbers keep their lexeme (an integer stays exact, a float takes Python's repr), keys sort by code point, and
+  // only quotes, backslashes and control characters are escaped. Anything Python would not write is refused.
+  function readPython(text) {
+    let i = 0;
+    const fail = (why) => { throw new Error("the record cannot be read in its own form: " + why); };
+    const ws = () => { while (i < text.length && " \t\n\r".includes(text[i])) i++; };
+    // A loop, not a lookbehind pattern: older browsers cannot parse one, and the whole page would stop.
+    function loneSurrogate(s) {
+      for (let j = 0; j < s.length; j++) {
+        const u = s.charCodeAt(j);
+        if (u >= 0xd800 && u <= 0xdbff) {
+          const next = s.charCodeAt(j + 1);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+          j++;
+        } else if (u >= 0xdc00 && u <= 0xdfff) return true;
+      }
+      return false;
+    }
+    function str() {
+      let s = "";
+      i++;
+      for (;;) {
+        if (i >= text.length) fail("an unterminated string");
+        const c = text[i++];
+        if (c === '"') break;
+        if (c < " ") fail("a control character inside a string");
+        if (c !== "\\") { s += c; continue; }
+        const e = text[i++];
+        const simple = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }[e];
+        if (simple !== undefined) { s += simple; continue; }
+        if (e !== "u" || !/^[0-9a-fA-F]{4}$/.test(text.slice(i, i + 4))) fail("a bad escape");
+        s += String.fromCharCode(parseInt(text.slice(i, i + 4), 16));
+        i += 4;
+      }
+      if (loneSurrogate(s)) fail("a lone surrogate");
+      return s;
+    }
+    function value() {
+      ws();
+      const c = text[i];
+      if (c === "{") {
+        i++;
+        const kv = new Map();
+        ws();
+        if (text[i] === "}") { i++; return { o: kv }; }
+        for (;;) {
+          ws();
+          if (text[i] !== '"') fail("a key that is not a string");
+          const k = str();
+          ws();
+          if (text[i++] !== ":") fail("a missing colon");
+          kv.delete(k);
+          kv.set(k, value());
+          ws();
+          const d = text[i++];
+          if (d === "}") return { o: kv };
+          if (d !== ",") fail("a missing comma");
+        }
+      }
+      if (c === "[") {
+        i++;
+        const items = [];
+        ws();
+        if (text[i] === "]") { i++; return { a: items }; }
+        for (;;) {
+          items.push(value());
+          ws();
+          const d = text[i++];
+          if (d === "]") return { a: items };
+          if (d !== ",") fail("a missing comma");
+        }
+      }
+      if (c === '"') return { s: str() };
+      for (const [word, v] of [["true", true], ["false", false], ["null", null]]) {
+        if (text.startsWith(word, i)) { i += word.length; return { k: v }; }
+      }
+      const m = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?/.exec(text.slice(i));
+      if (!m || !m[0]) fail("an unexpected character");
+      // Python reads no integer of more than 4300 digits.
+      if (m[2] === undefined && m[3] === undefined && m[1].length > 4300) fail("an integer too long to read");
+      i += m[0].length;
+      return { n: m[0], float: m[2] !== undefined || m[3] !== undefined };
+    }
+    const pyStr = (s) => '"' + s.replace(/[\u0000-\u001f"\\]/g, (ch) => ({ '"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r",
+      "\t": "\\t", "\b": "\\b", "\f": "\\f" })[ch] || "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0")) + '"';
+    function pyFloat(lexeme) {
+      const x = Number(lexeme);
+      if (x === Infinity || x === -Infinity) return x > 0 ? "Infinity" : "-Infinity";
+      if (x === 0) return Object.is(x, -0) ? "-0.0" : "0.0";
+      const [mant, exp] = Math.abs(x).toExponential().split("e");
+      const digits = mant.replace(".", "");
+      const e = parseInt(exp, 10);
+      const point = e + 1;
+      let body;
+      if (point > -4 && point <= 16) {
+        if (point <= 0) body = "0." + "0".repeat(-point) + digits;
+        else if (point >= digits.length) body = digits + "0".repeat(point - digits.length) + ".0";
+        else body = digits.slice(0, point) + "." + digits.slice(point);
+      } else {
+        body = digits[0] + (digits.length > 1 ? "." + digits.slice(1) : "") + "e" + (e < 0 ? "-" : "+") + String(Math.abs(e)).padStart(2, "0");
+      }
+      return (x < 0 ? "-" : "") + body;
+    }
+    const byCodePoint = (a, b) => {
+      const x = Array.from(a, (ch) => ch.codePointAt(0)), y = Array.from(b, (ch) => ch.codePointAt(0));
+      for (let j = 0; j < Math.min(x.length, y.length); j++) if (x[j] !== y[j]) return x[j] - y[j];
+      return x.length - y.length;
+    };
+    function render(v) {
+      if ("o" in v) return "{" + [...v.o.keys()].sort(byCodePoint).map((k) => pyStr(k) + ":" + render(v.o.get(k))).join(",") + "}";
+      if ("a" in v) return "[" + v.a.map(render).join(",") + "]";
+      if ("s" in v) return pyStr(v.s);
+      if ("k" in v) return JSON.stringify(v.k);
+      return v.float ? pyFloat(v.n) : BigInt(v.n).toString();
+    }
+    const top = value();
+    ws();
+    if (i !== text.length) fail("text after the document");
+    return { top, render };
+  }
+
+  function pythonCompact(text) {
+    const { top, render } = readPython(text);
+    return render(top);
+  }
+
+  // The bytes a pasted signed record's record_sha256 is over, read from the text as pasted.
+  function recordBytes(text) {
+    const { top, render } = readPython(text);
+    const record = top.o && top.o.get("record");
+    return record && record.o ? enc.encode(render(record)) : null;
   }
 
   // RFC 6962's tree hash: split at the largest power of two below the size.
@@ -158,8 +294,10 @@
       return [i, "the entry pasted, hashed here", doc, null];
     }
     if (doc && isHex(doc.record_sha256)) {
+      const full = doc.signed_version && doc.record && typeof doc.record === "object" && !Array.isArray(doc.record);
+      if (full && hex(await sha(recordBytes(t))) !== doc.record_sha256) throw new Error("the signed record's hash is not over its own record: it was changed, or written again by a tool that rewrote its numbers (50.0 as 50)");
       const r = byRecord(doc.record_sha256, log);
-      r[1] = "the record's hash as the pasted document states it; the command also rehashes a full signed record";
+      r[1] = full ? "the signed record pasted, rehashed here" : "the record's hash as the pasted document states it";
       return r;
     }
     throw new Error("neither a log entry nor a register record");

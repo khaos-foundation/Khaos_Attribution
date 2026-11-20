@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
 
+from khaos_attribution import canonical
+
 LOG_ID = "guild-register"
 # The public mirror's repository, read raw by verifiers and witnesses, and linked from the register's pages.
 PUBLIC_MIRROR_PAGE = "https://github.com/guild-register/ledger"
@@ -31,8 +33,7 @@ class LogError(ValueError):
 
 def jcs(doc) -> bytes:
     """RFC 8785 canonical JSON. It does not normalise unicode: callers send strings already in NFC."""
-    import rfc8785  # noqa: PLC0415
-    return rfc8785.dumps(doc)
+    return canonical.jcs(doc)
 
 
 def leaf_hash(entry_bytes: bytes) -> bytes:
