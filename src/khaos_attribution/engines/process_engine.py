@@ -87,13 +87,18 @@ class ProcessSession:
 
     def _run_trainer(self, cmd: list, record: dict, *, cwd: Path, env: dict, follow, stop_tree):
         """The trainer started with its record beside it, its updates followed; no trainer outlives the loop."""
-        (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
         log_file = (self.save_dir / "trainer_stdout.log").open("ab")
         # In the job's own process group, so the room's Stop and Pause signals reach the trainer as they do the job.
         # The record keeps the trainer's own command; a contract driver is started through the launcher.
-        self.process = subprocess.Popen(W.command(*cmd), cwd=str(cwd), env=env, stdout=log_file,
-                                        stderr=subprocess.STDOUT)
         try:
+            self.process = subprocess.Popen(W.command(*cmd), cwd=str(cwd), env=env, stdout=log_file,
+                                            stderr=subprocess.STDOUT)
+        except OSError as exc:
+            log_file.close()
+            raise TrainingUnavailable(f"the {self.label} trainer could not start: {exc}") from None
+        try:
+            # Written once the trainer runs, so a run that never started leaves no record of one.
+            (self.save_dir / "train_command.json").write_text(json.dumps(record, indent=1) + "\n")
             yield from follow()
         finally:
             stop_tree(self.process)

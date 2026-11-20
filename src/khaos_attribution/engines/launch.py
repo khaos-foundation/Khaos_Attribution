@@ -104,9 +104,11 @@ def main(argv=None) -> None:
     script = Path(argv[0]).resolve()
     os.environ[PACKAGE_ENV] = str(PACKAGE)
     ensure(PACKAGE)
-    # As `python <script>` would leave them: the script's own folder first, its own name as argv[0].
+    # As `python <script>` would leave them: its own name as argv[0], and its own folder first where the interpreter
+    # puts a script's folder on the path at all (not under -I, -P or PYTHONSAFEPATH).
     sys.argv = [str(script), *argv[1:]]
-    sys.path[0] = str(script.parent)
+    if not (sys.flags.isolated or getattr(sys.flags, "safe_path", False)):
+        sys.path[0] = str(script.parent)
     runpy.run_path(str(script), run_name="__main__")
 
 

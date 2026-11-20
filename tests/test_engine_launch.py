@@ -17,6 +17,7 @@ from khaos_attribution.engines import launch as L
 
 PACKAGE = Path(khaos_attribution.__file__).resolve().parent
 NO_PY311 = "no Python 3.11 on this machine to load the contract under"
+NO_PY311_REQUIREMENTS = "no Python 3.11 with numpy and jsonschema on this machine to import the contract under"
 
 
 @pytest.fixture()
@@ -163,22 +164,38 @@ def test_a_spawned_child_of_a_launched_script_loads_the_rooms_contract(room, dec
     assert Path(got["child"]).resolve() == (room / "__init__.py").resolve()
 
 
-def _python311() -> str | None:
-    found = shutil.which("python3.11")
-    if found:
-        return found
+def _pythons311() -> list:
+    """Every Python 3.11 this machine already has, the engine environments beside this checkout among them; none is
+    ever installed."""
+    found = [os.environ.get("KHAOS_PY311", ""), shutil.which("python3.11") or ""]
     uv = shutil.which("uv")
-    if uv is None:
-        return None
-    done = subprocess.run([uv, "python", "find", "3.11"], capture_output=True, text=True, timeout=30,
-                          env={**os.environ, "UV_PYTHON_DOWNLOADS": "never"})
-    return done.stdout.strip() or None if done.returncode == 0 else None
+    if uv:
+        done = subprocess.run([uv, "python", "find", "3.11"], capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "UV_PYTHON_DOWNLOADS": "never"})
+        found.append(done.stdout.strip() if done.returncode == 0 else "")
+    siblings = Path(__file__).resolve().parents[1].parent
+    found += [str(siblings / "stable-audio-3" / rel) for rel in (".venv/bin/python", "optimized/mlx/.venv/bin/python")]
+    out = []
+    for python in found:
+        if python and Path(python).is_file() and python not in out:
+            done = subprocess.run([python, "-c", "import sys; print(sys.version_info[:2] == (3, 11))"],
+                                  capture_output=True, text=True, timeout=30)
+            if done.stdout.strip() == "True":
+                out.append(python)
+    return out
 
 
-def test_the_contract_and_its_launcher_load_under_python_311(tmp_path):
-    """Engine environments run Python 3.11: every module of the contract compiles there and the launcher starts."""
-    python = _python311()
-    if python is None:
+def _with_requirements(pythons: list) -> str | None:
+    for python in pythons:
+        if subprocess.run([python, "-c", "import jsonschema, numpy"], capture_output=True, timeout=60).returncode == 0:
+            return python
+    return None
+
+
+def test_every_module_of_the_contract_compiles_under_python_311():
+    """Engine environments run Python 3.11: no module may use syntax a later Python added."""
+    pythons = _pythons311()
+    if not pythons:
         pytest.skip(NO_PY311)
     sources = [str(p) for p in PACKAGE.rglob("*.py") if "__pycache__" not in p.parts]
     code = ("import sys\n"
@@ -190,10 +207,41 @@ def test_the_contract_and_its_launcher_load_under_python_311(tmp_path):
             "        bad.append(f'{f}: {exc}')\n"
             "print('\\n'.join(bad))\n"
             "sys.exit(1 if bad else 0)\n")
-    done = subprocess.run([python, "-c", code, *sources], capture_output=True, text=True, timeout=120)
+    done = subprocess.run([pythons[0], "-c", code, *sources], capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, f"modules that Python 3.11 cannot compile:\n{done.stdout}{done.stderr}"
-    usage = subprocess.run([python, str(PACKAGE / "engines" / "launch.py")], capture_output=True, text=True, timeout=60)
-    assert usage.returncode == 2 and "usage" in usage.stderr
+
+
+IMPORT_ALL = """
+    import importlib, json, pkgutil
+    import khaos_attribution
+    failed = {}
+    for info in pkgutil.walk_packages(khaos_attribution.__path__, "khaos_attribution."):
+        if info.name.endswith("__main__"):
+            continue
+        try:
+            importlib.import_module(info.name)
+        except ModuleNotFoundError as exc:
+            if (exc.name or "").startswith("khaos_attribution"):
+                failed[info.name] = repr(exc)
+        except Exception as exc:
+            failed[info.name] = repr(exc)
+    print(json.dumps({"file": khaos_attribution.__file__, "failed": failed}))
+"""
+
+
+def test_the_launcher_imports_the_whole_contract_under_python_311(room):
+    """Through the launcher, as an engine starts it, every module imports under 3.11; only a third-party package the
+    engine lacks (torch, soundfile, a signing library) may be missing."""
+    python = _with_requirements(_pythons311())
+    if python is None:
+        pytest.skip(NO_PY311_REQUIREMENTS)
+    script = _script(room, "import_all.py", IMPORT_ALL)
+    done = subprocess.run([python, str(room / "engines" / "launch.py"), str(script)], capture_output=True, text=True,
+                          env=_env(), timeout=300)
+    assert done.returncode == 0, done.stderr
+    got = _reply(done)
+    assert Path(got["file"]).resolve() == (room / "__init__.py").resolve()
+    assert got["failed"] == {}, f"modules that do not import under Python 3.11: {got['failed']}"
 
 
 def test_the_contracts_own_scripts_start_through_the_launcher_and_anyone_elses_directly(tmp_path):
@@ -209,3 +257,11 @@ def test_a_contract_copy_refuses_to_load_in_a_process_started_on_another(room, d
     done = subprocess.run([sys.executable, "-c", "import khaos_attribution"], capture_output=True, text=True, timeout=60,
                           env=_env(PYTHONPATH=str(room.parent), **{L.PACKAGE_ENV: str(decoy / "khaos_attribution")}))
     assert done.returncode != 0 and "ImportError: this process runs the room's contract at" in done.stderr
+
+
+def test_under_a_safe_path_the_launcher_puts_no_folder_on_the_path(room):
+    """With PYTHONSAFEPATH the interpreter puts no script folder first, and neither does the launcher."""
+    script = _script(room, "report.py", REPORT)
+    got = _reply(_launch(room, script, env=_env(PYTHONSAFEPATH="1")))
+    assert Path(got["path0"]).resolve() != script.parent.resolve()
+    assert Path(got["path0"]).resolve() != (room / "engines").resolve()

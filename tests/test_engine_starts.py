@@ -115,6 +115,16 @@ def test_every_script_the_engines_launch_is_one_that_checks():
                 assert target in checked, f"{_rel(path)}:{node.lineno} starts {target}, which does not check its launcher"
 
 
+def _session(tmp_path):
+    from khaos_attribution.engines import process_engine as PE
+    session = PE.ProcessSession(PE.TrainingApi(root=tmp_path, runtime="torch", python=tmp_path / "py"), {},
+                                checkpoint_root=tmp_path, tensor_dir=tmp_path, output_dir=tmp_path / "run", seed=1,
+                                steps={"per_epoch": 1, "total": 1})
+    session.label = "Toy"
+    session.save_dir.mkdir(parents=True)
+    return session
+
+
 def test_a_trainer_driver_starts_through_the_launcher_and_its_record_keeps_its_own_command(tmp_path, monkeypatch):
     """The record names the driver as the run's readers expect; the process itself is started through the launcher."""
     import json
@@ -123,21 +133,26 @@ def test_a_trainer_driver_starts_through_the_launcher_and_its_record_keeps_its_o
     from khaos_attribution.engines import worker_process as W
     from khaos_attribution.engines.sa3 import train as T
     started = []
-
-    def fake_popen(argv, **_kw):
-        started.append(argv)
-        raise RuntimeError("stop here")
-
-    monkeypatch.setattr(PE.subprocess, "Popen", fake_popen)
-    session = PE.ProcessSession(PE.TrainingApi(root=tmp_path, runtime="torch", python=tmp_path / "py"), {},
-                                checkpoint_root=tmp_path, tensor_dir=tmp_path, output_dir=tmp_path / "run", seed=1,
-                                steps={"per_epoch": 1, "total": 1})
-    session.save_dir.mkdir(parents=True)
+    monkeypatch.setattr(PE.subprocess, "Popen", lambda argv, **_kw: started.append(argv) or object())
+    session = _session(tmp_path)
     cmd = [str(tmp_path / "py"), str(T.TRAIN_DRIVER), "--steps", "1"]
-    gen = session._run_trainer(cmd, {"command": cmd}, cwd=tmp_path, env={}, follow=lambda: iter(()), stop_tree=lambda p: None)
-    try:
-        next(gen)
-    except (RuntimeError, StopIteration):
-        pass
+    list(session._run_trainer(cmd, {"command": cmd}, cwd=tmp_path, env={}, follow=lambda: iter(()),
+                              stop_tree=lambda p: None))
     assert started == [[cmd[0], str(W.LAUNCHER), *cmd[1:]]]
     assert json.loads((session.save_dir / "train_command.json").read_text())["command"] == cmd
+
+
+def test_a_trainer_whose_interpreter_cannot_start_is_refused_in_a_sentence_and_leaves_no_record(tmp_path):
+    """An interpreter that is there but cannot run is the session's own refusal, and no run is recorded."""
+    import pytest
+
+    from khaos_attribution.engines.sa3 import train as T
+    from khaos_attribution.engines.train import TrainingUnavailable
+    broken = tmp_path / "py"
+    broken.write_text("not a program")
+    session = _session(tmp_path)
+    cmd = [str(broken), str(T.TRAIN_DRIVER)]
+    with pytest.raises(TrainingUnavailable, match="^the Toy trainer could not start: "):
+        list(session._run_trainer(cmd, {"command": cmd}, cwd=tmp_path, env={}, follow=lambda: iter(()),
+                                  stop_tree=lambda p: None))
+    assert not (session.save_dir / "train_command.json").exists()
