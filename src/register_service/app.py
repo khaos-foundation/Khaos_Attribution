@@ -26,7 +26,7 @@ from khaos_attribution.watermark import decode_codeword
 from register_service import softbinding
 from register_service.index import Index, phases_of, sha256_of
 from register_service.store import NOT_SERVED, Store, now_utc
-from register_service.translog import EntryRefused, LogBlocked, export as export_log, export_lock, write_whole
+from register_service.translog import EntryRefused, LogBlocked, LogOff, export as export_log, export_lock, write_whole
 
 MAX_BODY = 8_000_000   # a long output's four-phase fingerprint runs to a few megabytes
 MANIFEST_MAX_BYTES = 1_000_000   # a piece's own manifest store is kilobytes
@@ -69,11 +69,29 @@ def check_dev_key_exposure(cfg: dict, host: str) -> None:
                          "REGISTER_DEV_KEY_PUBLIC=1 to serve it there knowingly, or point REGISTER_PUBLIC_URL at loopback")
 
 
-def refuse_unstarted_log(cfg: dict, store) -> None:
-    """A log that never started here starts only on the owner's word: its first entries are public for good."""
-    if store.log.size() == 0 and not (cfg["data"] / "log-started").is_file() and not cfg.get("log_enable", True):
-        raise SystemExit("this register has never started its signed public log, and starting it is the owner's decision: "
-                         "set REGISTER_LOG_ENABLE=1 in /etc/register.env to start it knowingly")
+LOG_OFF = ("this register has not started its signed public log, and starting it is the owner's decision: "
+           "REGISTER_LOG_ENABLE=1 in /etc/register.env starts it at the next start")
+
+
+def log_started(cfg: dict) -> bool:
+    """Whether this register's log ever started: the marker outside the database, or entries inside it, read
+    without opening the database for writing."""
+    if (cfg["data"] / "log-started").is_file():
+        return True
+    path = cfg["data"] / "register.sqlite3"
+    if not path.is_file():
+        return False
+    import sqlite3  # noqa: PLC0415
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+            return db.execute("SELECT 1 FROM log_leaves LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def log_runs(cfg: dict) -> bool:
+    """The log runs once it has started here, or on the owner's word that it may start; until then it is off."""
+    return log_started(cfg) or bool(cfg.get("log_enable", True))
 
 
 def dev_marker(cfg: dict) -> Path:
@@ -232,24 +250,30 @@ CLAIM_LIMITS = {"/api/claims": 600, "/api/claims/check": 600}
 
 def create_app(cfg: dict | None = None) -> FastAPI:
     cfg = cfg or settings()
+    # Read before the store is opened: opening it never counts as a start.
+    log_on = log_runs(cfg)
     store = Store(cfg["data"] / "register.sqlite3")
     index = Index(cfg["data"] / "index.sqlite3")
     key = load_register_key(cfg)
     store.remember_register_key(key.key_id, key.public_pem())
-    log_key, log_dev = load_log_key(cfg), log_key_settings(cfg)[1]
+    log_key, log_dev = (load_log_key(cfg), log_key_settings(cfg)[1]) if log_on else (None, False)
     store.log.signer = log_key
     mirror = cfg["data"] / "mirror"
     (mirror / "models").mkdir(parents=True, exist_ok=True)
     started, once = cfg["data"] / "log-started", cfg["data"] / "log-open-unwitnessed"
-    refuse_unstarted_log(cfg, store)
-    store.log_open(log_places(cfg)[3], unwitnessed=once.is_file(), started=started.is_file())
-    if not store.log.blocked:
-        # Outside the database on purpose: a database that lost its log cannot also forget that one was started.
-        if store.log.size():
-            started.touch()
-        once.unlink(missing_ok=True)
-    if store.log.blocked:
-        log.error("the log is blocked: %s", store.log.blocked)
+    if not log_on:
+        # Records, withdrawals and every other door go on; the log's first start admits and strikes them all.
+        store.log.off = LOG_OFF
+        log.warning("the signed log is off: %s", LOG_OFF)
+    else:
+        store.log_open(log_places(cfg)[3], unwitnessed=once.is_file(), started=started.is_file())
+        if not store.log.blocked:
+            # Outside the database on purpose: a database that lost its log cannot also forget that one was started.
+            if store.log.size():
+                started.touch()
+            once.unlink(missing_ok=True)
+        if store.log.blocked:
+            log.error("the log is blocked: %s", store.log.blocked)
     # No schema served either: the public doors are documented in deploy/README.md, not enumerated to callers.
     app = FastAPI(title="Guild Register", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.index, app.state.key, app.state.cfg = store, index, key, cfg
@@ -314,6 +338,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 write_ledger(store, mirror / "ledger.jsonl")
 
     def log_mirror_quietly() -> None:
+        if store.log.off:
+            return
         try:
             export_all(cfg, store.log, log_key, log_dev)
         except Exception as exc:  # noqa: BLE001
@@ -844,6 +870,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     async def log_blocked(request: Request, exc: LogBlocked):
         return JSONResponse({"detail": f"the register is not taking changes: {exc}"}, status_code=503)
 
+    @app.exception_handler(LogOff)
+    async def log_off(request: Request, exc: LogOff):
+        return JSONResponse({"detail": f"the log takes no entry: {exc}"}, status_code=503)
+
     @app.post("/log/append")
     async def log_append(request: Request):
         """A warden's entry, signed by the warden's enrolled machine: a strike, an admit or a withhold, naming the sitting."""
@@ -919,6 +949,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.api_route("/log/key", methods=["GET", "HEAD"])
     def log_key_route(request: Request):
+        if log_key is None:
+            raise HTTPException(404, LOG_OFF)
         return cached(request, log_key_doc(log_key, log_dev), 300)
 
     @app.api_route("/log/anchors", methods=["GET", "HEAD"])
@@ -946,6 +978,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.api_route("/verify-entry", methods=["GET", "HEAD"], response_class=HTMLResponse)
     def verify_entry_page():
         from register_service import pages as P  # noqa: PLC0415
+        if log_key is None:
+            return HTMLResponse(P.page("Verify an entry · Guild Register", P.hero("Guild Register", "No log yet.",
+                                       "This register has not started its signed append-only log.", []),
+                                       dev=bool(cfg["dev_key"]), path="/verify-entry", base=cfg["public_url"]), status_code=404)
         return P.page("Verify an entry · Guild Register", P.verify_entry_body(T.committed_key(), log_key_doc(log_key, log_dev)),
                       dev=bool(cfg["dev_key"]), path="/verify-entry", base=cfg["public_url"],
                       description="Check that an entry is in the Guild Register's signed append-only log, in your browser, "
@@ -954,7 +990,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.get("/health")
     def health():
         return JSONResponse({"ok": True, "ledger_ok": store.ledger_status()["ok"], "models": store.count(), "outputs": index.count(),
-                             "log_blocked": store.log.blocked,
+                             "log_blocked": store.log.blocked, "log": "off" if store.log.off else "on",
                              "development": bool(cfg["dev_key"])})
 
     softbinding.add_routes(app, index, cfg["public_url"])

@@ -50,6 +50,14 @@ def main(argv=None) -> int:
         print(json.dumps(bill_of_materials(), indent=1, sort_keys=True))
         return 0
     cfg = settings()
+    if a.cmd.startswith("log-"):
+        from register_service.app import LOG_OFF, log_runs  # noqa: PLC0415
+        if not log_runs(cfg):
+            # The daily jobs find nothing to do on a register whose log is off; the operator's commands say why.
+            if a.cmd in ("log-stamp", "log-upgrade"):
+                print(f"nothing to {a.cmd[4:]}: {LOG_OFF}")
+                return 0
+            raise SystemExit(LOG_OFF)
     if a.cmd == "make-key":
         from pathlib import Path  # noqa: PLC0415
         from khaos_attribution.registry import SigningKey  # noqa: PLC0415
@@ -126,8 +134,12 @@ def main(argv=None) -> int:
         for place in ("mirror", "mirror-public"):
             export_anchors(store.log, cfg["data"] / place)
     elif a.cmd == "check":
-        from register_service.app import log_places  # noqa: PLC0415
+        from register_service.app import LOG_OFF, log_places, log_runs  # noqa: PLC0415
         ok = store.ledger_ok()
+        if not log_runs(cfg):
+            print(f"ledger {'unbroken' if ok else 'BROKEN'}: {len(store.ledger())} entries, {store.count()} models")
+            print(f"log off: {LOG_OFF}")
+            return 0 if ok else 1
         pub = cfg["log_key_file"].with_suffix(".pub")
         problems = store.log.problems(pub.read_text(encoding="ascii") if pub.is_file() else None)
         if pub.is_file():
@@ -155,9 +167,7 @@ def ledger_whole(cfg: dict, store: Store) -> None:
 
 def open_log(cfg: dict, store: Store, appending: bool = False):
     """The log key loaded and the database checked against the published log; an append is refused when it is behind."""
-    from register_service.app import load_log_key, log_places, refuse_unstarted_log  # noqa: PLC0415
-    if appending:
-        refuse_unstarted_log(cfg, store)
+    from register_service.app import load_log_key, log_places  # noqa: PLC0415
     key = load_log_key(cfg)
     store.log.signer = key
     with store._tx():

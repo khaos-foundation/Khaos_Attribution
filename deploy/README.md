@@ -1,15 +1,15 @@
 # The Guild Register on its own server
 
-One small Ubuntu 24.04 server, SQLite, a few files. `register-server.sh` does the whole setup as root and can be run again after a change of tag. It is always the script of the tag it deploys: it checks out `REGISTER_TAG` (required) under `/srv/register`, compares its own folder with that checkout's `deploy/`, and refuses to go on when they differ.
+One small Ubuntu 24.04 server, SQLite, a few files. `register-server.sh` does the whole setup as root and can be run again after a change of tag. It is always the script of the tag it deploys, run from root's own clone: it checks out `REGISTER_TAG` (required) under `/srv/register`, compares its own folder with that checkout's `deploy/`, and refuses to go on when they differ or when it is run from `/srv/register` itself.
 
 ```
 ssh root@<server>
 git clone https://github.com/khaos-foundation/Khaos_Attribution.git /root/Khaos_Attribution
 git -C /root/Khaos_Attribution checkout --detach vX.Y.Z
-REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=vX.Y.Z REGISTER_LOG_ENABLE=1 bash /root/Khaos_Attribution/deploy/register-server.sh
+REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=vX.Y.Z bash /root/Khaos_Attribution/deploy/register-server.sh
 ```
 
-`REGISTER_LOG_ENABLE=1` is the owner's word that a register whose signed log never started may start it: the first start appends the log's first entries, which are public for good. Without it the script stops before installing anything, and the service itself refuses to start a log that never started (the setting is kept in `/etc/register.env` once given).
+**The signed log stays off until the owner turns it on.** A register whose log never started (no `data/log-started`, no entry) runs with it off: models are registered, withdrawn, served and verified as before, the log's doors answer 404 and a warden's entry 503, and nothing of the log is exported or pushed. Adding `REGISTER_LOG_ENABLE=1` to that command (the setting is then kept in `/etc/register.env`) starts it at the restart: its first entries admit every model registered so far and strike every one withdrawn, and are public for good. Once started it never goes off again. To undo an update, run the previous tag's own script the same way.
 
 What it leaves behind:
 
@@ -26,7 +26,7 @@ Accounts and invites are made on the server with `register-cli account <name>` a
 
 ## Updating
 
-First check out the new tag in root's clone, then run that tag's own script: `git -C /root/Khaos_Attribution fetch --tags && git -C /root/Khaos_Attribution checkout --detach <tag>`, then `REGISTER_DOMAIN=<domain> REGISTER_TAG=<tag> bash /root/Khaos_Attribution/deploy/register-server.sh`. A script from an older clone does not know the new release's steps; the new one refuses to run from a folder that is not the tag's own. On a register whose signed log never started, the update starts it at the restart, so it stops unless `REGISTER_LOG_ENABLE=1` is given: the owner's decision.
+First check out the new tag in root's clone, then run that tag's own script: `git -C /root/Khaos_Attribution fetch --tags && git -C /root/Khaos_Attribution checkout --detach <tag>`, then `REGISTER_DOMAIN=<domain> REGISTER_TAG=<tag> bash /root/Khaos_Attribution/deploy/register-server.sh`. A script from an older clone does not know the new release's steps; the new one refuses to run from a folder that is not the tag's own. On a register whose signed log never started, the update keeps it off unless `REGISTER_LOG_ENABLE=1` is given: the owner's decision.
 
 Never update by checking out a tag under `/srv/register` and restarting by hand. The script also brings `/etc/register.env` up to what the new release needs: from 0.37.0 a development key serves behind Caddy only with `REGISTER_DEV_KEY_PUBLIC=1` beside `REGISTER_DEV_KEY=1`, and a settings file without that line makes the service refuse to start.
 

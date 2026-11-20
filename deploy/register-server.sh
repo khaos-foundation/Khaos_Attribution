@@ -3,8 +3,8 @@
 # updates on a timer, a firewall open on 22, 80 and 443, logs kept 30 days, a service user with no shell, the register under
 # systemd on loopback port 8912, Caddy in front of it with HTTPS, a nightly backup to a storage box.
 #   REGISTER_DOMAIN=register.khaos.dev REGISTER_TAG=vX.Y.Z bash <a clone checked out at vX.Y.Z>/deploy/register-server.sh
-# It refuses to go on when it is not that tag's own script. A register whose signed log never started starts it on this
-# run's restart, and that needs REGISTER_LOG_ENABLE=1, the owner's decision.
+# It refuses to go on when it is not that tag's own script, run from root's clone. A register whose signed log never
+# started keeps it off, serving every other door, until REGISTER_LOG_ENABLE=1 is given: the owner's decision.
 # Until the Guardians' key exists the register signs with a development key and says so on every page;
 # the ceremony replaces /srv/register/data/register-key.pem and clears REGISTER_DEV_KEY in /etc/register.env.
 # The signed append-only log has its own key and its own ceremony (register-log-key), and two timers anchor its root.
@@ -21,7 +21,17 @@ DATA="$HOME_DIR/data"
 ENV_FILE=/etc/register.env
 PORT=8912
 HERE="$(dirname -- "$(readlink -f -- "$0")")"
-# uv is fetched at this version and checked against Astral's published SHA-256 before it runs.
+ROOT_CLONE_STEPS="  git clone $REPO /root/Khaos_Attribution   (once)
+  git -C /root/Khaos_Attribution fetch --tags && git -C /root/Khaos_Attribution checkout --detach $TAG
+  REGISTER_DOMAIN=$DOMAIN REGISTER_TAG=$TAG bash /root/Khaos_Attribution/deploy/register-server.sh"
+# The register's own checkout is checked out anew below, under this very script: it is never the one that runs.
+if [ "$HERE" = "$(readlink -f -- "$CHECKOUT/deploy" 2>/dev/null || echo "$CHECKOUT/deploy")" ]; then
+  echo "Run the setup from root's own clone of the tag, never from $CHECKOUT. Nothing was changed. As root:"
+  echo "$ROOT_CLONE_STEPS"
+  exit 1
+fi
+# uv is fetched at this version and checked against Astral's published SHA-256 before it runs: the values are the
+# release's own uv-<arch>-unknown-linux-gnu.tar.gz.sha256 files at https://github.com/astral-sh/uv/releases/tag/0.11.32
 UV_VERSION=0.11.32
 UV_SHA256_X86_64=aab924fd522efd06f1c5f3b93a243864fc453132c94b2dc49f1371b528a4b967
 UV_SHA256_AARCH64=4d4fa08d95b06642e5800df6a22bd71455f23f988269e18da2847971d8c0bf31
@@ -92,11 +102,14 @@ echo "== this script is the tag's own"
 bash "$HERE/register-same-tag.sh" "$HERE" "$CHECKOUT/deploy"
 
 echo "== the signed log"
-# A register whose log never started appends its first entries on the next start: an owner's decision, said explicitly.
-if [ ! -f "$DATA/log-started" ] && [ "${REGISTER_LOG_ENABLE:-}" != 1 ] && ! grep -qs '^REGISTER_LOG_ENABLE=1' "$ENV_FILE"; then
-  echo "This register has never started its signed public log, and the code at $TAG starts it when the service restarts."
-  echo "Nothing was installed. To start the log knowingly, run again with REGISTER_LOG_ENABLE=1."
-  exit 1
+# Started once its marker or a first entry exists, as the service reads it; until then off unless the owner says so.
+LOG_ENTRIES="$(sqlite3 -readonly "$DATA/register.sqlite3" "SELECT COUNT(*) FROM log_leaves" 2>/dev/null || echo 0)"
+if [ -f "$DATA/log-started" ] || [ "${LOG_ENTRIES:-0}" -gt 0 ]; then
+  echo "the signed log has started here; it goes on"
+elif [ "${REGISTER_LOG_ENABLE:-}" = 1 ] || grep -qs '^REGISTER_LOG_ENABLE=1' "$ENV_FILE"; then
+  echo "the signed log starts at this run's restart: REGISTER_LOG_ENABLE=1"
+else
+  echo "the signed log stays off; every other door is served. REGISTER_LOG_ENABLE=1 starts it, the owner's decision"
 fi
 
 echo "== the venv from the lock"
@@ -321,6 +334,8 @@ $DOMAIN {
 	}
 }
 CADDY
+# A site file Caddy would not load stops the run here, before any service is restarted on it.
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
 systemctl daemon-reload
 systemctl enable register.service register-backup.timer register-mirror.timer register-log-stamp.timer register-log-upgrade.timer

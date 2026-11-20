@@ -52,6 +52,10 @@ class LogBlocked(RuntimeError):
     """The database is behind or apart from the log it already published: appending would fork it."""
 
 
+class LogOff(RuntimeError):
+    """This register has not started its signed log: the owner's decision, not made yet."""
+
+
 def _names(value) -> list | None:
     if value is None:
         return None
@@ -72,7 +76,7 @@ class TransLog:
     """The log over one Store's connection and lock; `signer` is the log key, set by the service before any append."""
 
     def __init__(self, store):
-        self.store, self.signer, self.blocked = store, None, None
+        self.store, self.signer, self.blocked, self.off = store, None, None, None
         store.db.executescript(SCHEMA)
         self._mark_waiting_admits()
 
@@ -331,6 +335,8 @@ class TransLog:
 
     def append_locked(self, entry: dict) -> dict:
         """One leaf, its completed subtrees and a new signed head. The caller holds the Store's write transaction."""
+        if self.off:
+            raise LogOff(self.off)
         if self.blocked:
             raise LogBlocked(self.blocked)
         if self.signer is None:

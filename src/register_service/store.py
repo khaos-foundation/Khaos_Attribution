@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from khaos_attribution.registry import FIRST_SERIAL, canonical_bytes, sha256_hex
-from register_service.translog import LogBlocked, TransLog
+from register_service.translog import LogBlocked, LogOff, TransLog
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL);
@@ -205,6 +205,9 @@ class Store:
                  json.dumps(counter, sort_keys=True), counter["countersigned_at_utc"], _payload_of(signed)))
             self._ledger("publish", serial, signed["record_sha256"], machine_key_id,
                          {"artist_id": signed["record"]["artist_id"], "public_view": signed["record"]["public_view"]})
+            if self.log.off:
+                # The log's first start admits every record then, this one with them.
+                return serial, counter, False
             # A record this database does not know may be one the recovery lost, its strike among the lost entries:
             # its admit waits on every loss still open until the wardens answer, never on its own word.
             pending = self.log.open_lost_global()
@@ -313,6 +316,9 @@ class Store:
             self.db.execute("UPDATE records SET state = 'withdrawn', withdrawn_at = ?, withdraw_reason = ? WHERE serial = ?",
                             (at, reason[:400], serial))
             self._ledger("withdraw", serial, row["record_sha256"], key_id, {"reason": reason[:400]})
+            if self.log.off:
+                # The log's first start strikes it with the reason the record keeps.
+                return {"serial": serial, "state": "withdrawn", "withdrawn_at": at}
             if self.log.admit_leaf_of(row["record_sha256"]) is None:
                 raise RuntimeError(f"record {serial} has no admit entry in the log")
             standing = [k for k, v in self.log.admit_states(row["record_sha256"]).items() if v != "struck"]
@@ -423,6 +429,8 @@ class Store:
         A strike that leaves no admit standing makes the record struck, and an admit of a struck record undoes it:
         the answer then names the model and its new state."""
         kind = entry.get("kind")
+        if self.log.off:
+            raise LogOff(self.log.off)
         with self._tx():
             moved = None
             if kind == "admit":
@@ -467,6 +475,8 @@ class Store:
 
     def log_withhold(self, leaf_hex: str, reason: str) -> dict:
         """The operator's withhold: the body leaves public view, the withholding is itself an entry."""
+        if self.log.off:
+            raise LogOff(self.log.off)
         with self._tx():
             return self.log.withhold_locked(leaf_hex, reason)
 
