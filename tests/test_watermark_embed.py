@@ -21,19 +21,26 @@ class _Generator:
 
 
 class _Detector:
-    """Reads the id clean from ``needs`` strong, with one bit wrong from ``needs_one``, and with two wrong below."""
+    """Reads the id clean from ``needs`` strong, with one bit wrong from ``needs_one``, and with two wrong below; every
+    frame reads as marked, and each bit's logit says the bit."""
+
+    normalizer = None
 
     def __init__(self, needs: float, needs_one: float = 0.0):
         self.needs, self.needs_one = needs, needs_one
 
-    def detect_watermark(self, x, sample_rate=None):
+    def detector(self, x):
         strength = float(x.abs().max()) / 1e-3
         bits = [(WATERMARK_ID >> (15 - i)) & 1 for i in range(16)]
         if strength + 1e-6 < self.needs:
             bits[3] ^= 1
             if strength + 1e-6 < self.needs_one:
                 bits[9] ^= 1
-        return torch.tensor(0.99), torch.tensor([bits], dtype=torch.float32)
+        out = torch.zeros(1, 18, x.shape[-1])
+        out[:, 1, :] = 5.0
+        for i, bit in enumerate(bits):
+            out[:, 2 + i, :] = 1.0 if bit else -1.0
+        return out
 
 
 def _install(monkeypatch, needs, needs_one=None):
