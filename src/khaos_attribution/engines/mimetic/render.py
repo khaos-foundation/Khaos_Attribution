@@ -1,4 +1,4 @@
-"""mimetic-a0's render slot. Its code needs its own environment (stable-audio-tools at Mick's pin and its torch),
+"""mimetic-a0's render slot. Its code needs its own environment (stable-audio-tools at the engine's pin and its torch),
 so the renderer never imports it: one worker per render in the engine's environment, the request as JSON."""
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ LABEL = "mimetic-a0"
 
 
 def find_root(repo_dir=None) -> Path:
-    """Mick's checkout: the caller's, else MIMETIC_PATH, else a sibling of the working directory."""
+    """The engine's checkout: the caller's, else MIMETIC_PATH, else a sibling of the working directory."""
     if repo_dir:
         return Path(repo_dir).resolve()
     env = os.environ.get(ROOT_ENV, "").strip()
@@ -108,7 +108,9 @@ class Renderer:
             self.apply_adapter(adapter_path, req.adapter_scale, req.variant)
         if req.lyrics and not req.instrumental:
             raise RenderFailed("mimetic-a0 cannot sing: a sung request must not reach this engine")
-        out = Path(out_path or Path.cwd() / "mimetic_render.wav").resolve()
+        if out_path is None:
+            raise RenderFailed("a mimetic-a0 render needs the path to write its audio to; none was given")
+        out = Path(out_path).resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
         request = self.worker_request(req, out)
         if should_stop is not None and should_stop():

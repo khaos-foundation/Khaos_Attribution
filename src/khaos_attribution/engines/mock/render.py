@@ -75,7 +75,9 @@ class Renderer:
         notes = [220.0 * 2 ** (rng.randrange(0, 24) / 12) for _ in range(4)]
         sr = DESCRIPTOR.sample_rate
         n = int(seconds * sr)
-        out = Path(out_path or Path.cwd() / f"mock_{seed}.wav")
+        if out_path is None:
+            raise RenderFailed("a mock render needs the path to write its audio to; none was given")
+        out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         frames = bytearray()
         for step in range(STEPS):

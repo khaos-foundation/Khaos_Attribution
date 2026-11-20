@@ -1,5 +1,5 @@
 """mimetic-a0 as the third engine, behind fakes: its descriptor marks it experimental and states its limits, its
-provision slot installs Mick's lock without his CUDA 12.6 torch, its measure refuses a device never measured, and its
+provision slot installs the engine's lock without its CUDA 12.6 torch, its measure refuses a device never measured, and its
 trainer's bookkeeping maps Khaos's epochs onto steps."""
 import subprocess
 import sys
@@ -200,3 +200,27 @@ def test_an_index_matrix_is_a_file_of_the_calls_own_and_never_left_behind(tmp_pa
     with pytest.raises(GradientUnavailable, match="killed"):
         M.index_rows(handle, files, projection=make_projection(12, 4, 1), timesteps=[0.5], noise_seed=1)
     assert not list(clips.glob(".khaos_index_rows*"))
+
+
+def test_mimetic_refuses_per_timestep_normalisation_as_it_refuses_every_other_option(tmp_path):
+    """The option it cannot build is refused as GradientUnavailable, the refusal the index builder reads."""
+    from khaos_attribution.gradient import GradientUnavailable, make_projection
+    handle = M.Handle(root=tmp_path, python=sys.executable, adapter=tmp_path / "a.safetensors")
+    with pytest.raises(GradientUnavailable, match="per-timestep normalisation"):
+        M.index_rows(handle, [], projection=make_projection(8, 4, 1), timesteps=[0.5], noise_seed=1, timestep_norm=True)
+
+
+@pytest.mark.parametrize("engine", ["mock", "mimetic-a0"])
+def test_a_render_with_no_output_path_is_refused_never_written_where_the_process_stands(engine, tmp_path, monkeypatch):
+    """A render given nowhere to write is refused; nothing lands in the working directory."""
+    from khaos_attribution.engines import engine as get_engine
+    from khaos_attribution.engines.render import RenderFailed, RenderRequest
+    monkeypatch.chdir(tmp_path)
+    render = get_engine(engine).render
+    if engine == "mimetic-a0":
+        monkeypatch.setattr(render, "python_for", lambda root: sys.executable)
+        (tmp_path / "mimetic-a0").mkdir()
+    renderer = render.Renderer(repo_dir=tmp_path / "mimetic-a0", device="cpu")
+    with pytest.raises(RenderFailed, match="path to write"):
+        renderer.generate(RenderRequest(prompt="p", duration_seconds=5, seed=1), None, None)
+    assert list(tmp_path.glob("*.wav")) == []
