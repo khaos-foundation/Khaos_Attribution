@@ -111,13 +111,12 @@ in any stored record. Schema ranges stay 0–65535 with the validity rule
   into their model cards at migration time, so /verify answers for every
   model already in use.
 - **A card without a watermark_id** (pre-backfill, or synced from a
-  machine that has not migrated) — review finding 6: the Workshop refuses
-  to *complete a new training run* without allocating (fail loud); at
-  *generation* time the existing degrade path holds — generate, warn
-  loudly, record `watermark_id: null` in the sidecar — because refusing
-  to serve music over a missing serving aid punishes the listener for an
-  operator's sync backlog. The Engine Room's coverage view (§4) makes the
-  backlog visible instead of silent.
+  machine that has not migrated) — the Workshop refuses to *complete a new
+  training run* without one (fail loud). At *generation* time the degrade
+  path decided here (generate, warn, record `watermark_id: null`) is
+  superseded: every output is marked or there is no output, so both rooms
+  refuse the render and store nothing. The Engine Room's coverage view
+  (§4) shows which served cards still lack one.
 
 ### 3a. The 2026-08-22 reset (amendment)
 
@@ -268,9 +267,9 @@ Measured double-embed corruption cancels the re-embed plan. Instead:
 | 5 | Provenance index + fingerprint worker + content matching in /verify + tombstones on delete + Engine Room read-only coverage check | **done** (mixes fingerprinted; stems queue when exported — §10) |
 
 Implementation notes: /verify also stands WITHOUT the watermarker —
-content matching answers alone; the index lives at
-`outputs/provenance_index.sqlite3`, one background fingerprint worker,
-WAL mode.
+content matching answers alone; the index lives beside the outputs
+folder, never inside it (`<outputs>/../.provenance_cache/provenance_index.sqlite3`),
+one background fingerprint worker, WAL mode.
 
 The old /verify resolves per-output IDs and returns the **first matching
 sidecar** — under shared run IDs that is live misattribution, which is

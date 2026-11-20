@@ -1,21 +1,23 @@
 # The Khaos provenance system — how it works today
 
-Current-state reference (2026-08-20). The *decisions and their reasons*
-live in `watermarking-v2.md`; this page describes the running system.
-Contract version: khaos-attribution **0.17.0** (the live version is pyproject's).
+Current-state reference. The *decisions and their reasons* live in
+`watermarking-v2.md`; this page describes the running system at the
+contract version in `pyproject.toml`.
 
 ## In one paragraph
 
 Every piece of audio a Khaos model generates carries an inaudible
-AudioSeal watermark identifying **the model that made it** — the training
-run, and through it the artist, their consent record, and the rights of
-the training catalogue. Anyone holding a file can upload it to the
-Listening Space's **/verify** page and get that answer. A second,
-content-based layer (landmark fingerprints) identifies the **exact
-output** — including audio whose watermark was stripped or degraded, and
-outputs that have since been deleted. The whole thing is backed by plain
-files that sync between machines; the only database is a disposable local
-index rebuilt from them.
+AudioSeal watermark naming **the bucket of its model**: a number derived
+from the machine and the training run, which many models share, so the
+mark narrows a check to a few models and never names one alone. The Guild
+Register's serial names the model, and through it the artist, their
+consent record and the rights of the training catalogue. Each file also
+carries signed Content Credentials, its second mark. A content-based layer
+(landmark fingerprints) identifies the **exact output**, including audio
+whose watermark was stripped or degraded and outputs since deleted. A
+piece that cannot be marked is refused: nothing is stored. Anyone holding a
+file can ask a Listening Space's **/verify** page, the Register, or the
+`khaos-verify` command.
 
 ## The watermark
 
@@ -24,10 +26,11 @@ index rebuilt from them.
 - **Payload**: an extended-Hamming (16,11) SECDED codeword — 2048 usable
   IDs, single-bit errors corrected, double-bit errors refused rather than
   misread. The codeword **is** the `watermark_id` in every record.
-- **What one ID means**: a **training run** (adapter version). All
-  outputs of a run share its ID — Platform outputs, Workshop auditions,
-  variations, repaints, extends. Exported stems re-embed their source
-  output's codeword. A retrain is a new model and a new ID.
+- **What one ID means**: a **bucket** of training runs. All outputs of a
+  run carry its bucket's codeword — Space pieces, Workshop takes,
+  variations, repaints, extends; exported stems re-embed their source
+  output's codeword. A retrain is a new model, usually in another bucket.
+  A codeword is never a register number.
 
 ### What survives, and the rule that follows
 
@@ -43,30 +46,31 @@ superimpose into garbage. Stems re-embedding the *same* codeword is
 fine. Removal by an adversary is out of scope: this is provenance, not
 DRM.
 
-## How IDs are allocated
+## How a run's codeword is chosen
 
-- **At training completion**, the Workshop allocates the run's codeword
-  and stamps it into `model_card.json` (`watermark_id`). Failure to
-  allocate fails the run loudly — no silent unmarked adapters. Stub/
-  synthetic runs never spend an ID.
-- The 2048-payload space is split into **per-machine bands** so three
-  machines allocate without coordination: reserved 0–31 (calibration),
-  laptop 32–703, studio 704–1375, threadripper 1376–2047. Band comes
-  from the machine profile; `KHAOS_WM_BAND` overrides.
-- **23 legacy IDs** (the retired per-output scheme) are frozen in the
-  contract's `legacy_watermark_ids.json` and permanently excluded — no
-  ID is ever owned by both an old output and a model. Old outputs keep
-  their marks and resolve via this list forever.
+- **Derived, never allocated.** At training completion the Workshop
+  derives the run's bucket from its machine key and run id
+  (`watermark.derive_payload`: a hash into the payloads 32–2047; 0–31 are
+  reserved for calibration) and stamps the codeword into
+  `model_card.json` (`watermark_id`; the manifest says
+  `watermark_source: derived`). Nothing is coordinated between machines
+  and nothing can run out.
+- **The Register's serial names the model.** Publishing a model gives it
+  a serial (from 65536), countersigned by the Register; the seal's ring
+  reads that serial, never the codeword.
+- **Earlier schemes.** Per-output IDs and per-machine bands came before;
+  the 2026-08-22 reset freed every per-output ID (`watermark_resets.json`),
+  and the frozen list `legacy_watermark_ids.json` is empty. A card
+  stamped from a band still reads, as its own number.
 - The card travels with the adapter, so every machine learns a model's
-  ID by reading the card. **Sync rule**: all machines take the contract
-  pin bump *before* stamped cards are synced to them.
+  codeword by reading the card.
 
 ## Life of an output
 
 1. Training completes → run gets `watermark_id` in its model card.
-2. Generation (either app) reads the card and embeds that codeword.
-   A card without an ID generates anyway — **loudly** warned, sidecar
-   records `watermark_id: null` (remedy below).
+2. Generation (either room) reads the card and embeds that codeword,
+   then signs the file's Content Credentials. A card without an ID is
+   **refused**: nothing is rendered or stored (the remedy is below).
 3. The provenance sidecar records the ID; the Platform's index refreshes
    and queues the audio for fingerprinting (one background worker).
 4. Deletion writes a **tombstone** first —
@@ -78,8 +82,8 @@ DRM.
 
 | situation | answer |
 |---|---|
-| watermark decodes to a served model | **artist-led**: "Made with the *Artist* adapter — consent on file · N catalogue tracks · run + date", plus the exact-output match when content confirms one |
-| ID is one of the 23 frozen legacy IDs | the original per-output answer (Platform record, or "Workshop test render") |
+| watermark decodes to a bucket this machine serves | the models of that bucket here, **artist-led** once a content match names the exact output: "Made with the *Artist* adapter — consent on file · N catalogue tracks · run + date" |
+| ID freed by the 2026-08-22 reset | "freed by the reset", never whatever model the ID is issued to later |
 | valid ID, no card on this machine | "watermark confirmed; this machine doesn't have the model's card yet — sync adapters" |
 | excerpt (payload mismatches the matched output) | the full artist-led answer via content, flagged "the embedded ID didn't survive this copy — identity confirmed by content match" |
 | no watermark, content matches | "No watermark detected, but this audio matches output X (N aligned landmarks)" — always a match with numbers, never a definitive claim |
@@ -140,46 +144,25 @@ missing/unreadable, fingerprint lag, or the healthy census.
 
 ## Operator how-tos
 
-- **Adapter warns "no watermark_id"** →
+- **A model is refused for "no watermark ID"** →
   `PYTHONPATH=src .venv/bin/python scripts/backfill_model_watermarks.py`
   in the Workshop (dry-run; add `--apply`), then sync the card.
-- **Band exhausted at training completion** → the run fails with the
-  message; bands hold 672 runs per machine, so investigate before
-  expanding anything.
 - **Survival testing** →
   `Khaos_Attribution/scripts/watermark_survival.py <wav>…` (uses the
-  reserved band; never run it against production IDs).
-- **Env knobs**: `KHAOS_WM_BAND` (allocation band override),
-  `KHAOS_WORKSHOP_ARTISTS` (path the Platform index scans for auditions;
-  empty string disables — tests use this to stay hermetic).
-
-## Current gaps (tracked)
-
-- The Wwise-conversion leg of the survival test waits for the Wwise MCP
-  (Vorbis, Wwise's music codec, already passes).
-- Stem exports aren't fed to the fingerprint queue yet (the index schema
-  is ready; mixes are covered).
-- The Studio's Workshop run card for `chris_green_theleap` is unstamped
-  until the backfill runs there (its Platform card is stamped).
+  reserved payloads; never run it against production IDs).
+- **Env knob**: `KHAOS_WORKSHOP_ARTISTS` (path the Space's index scans
+  for auditions; empty string disables — tests use this to stay hermetic).
 
 ## Pointer map
 
 | thing | where |
 |---|---|
-| contract (codec, allocation, fingerprints, schemas) | `Khaos_Attribution/src/khaos_attribution/{watermark,fingerprint,validation}.py` |
+| contract (codec, derivation, fingerprints, schemas, verifier) | `Khaos_Attribution/src/khaos_attribution/{watermark,fingerprint,validation,verify}.py` |
 | design decisions | `Khaos_Attribution/docs/watermarking-v2.md` |
 | index DDL + rebuild rules | `Khaos_Attribution/docs/provenance-index.md` |
-| allocation + backfill | Workshop `src/training/training.py`, `scripts/backfill_model_watermarks.py` |
+| derivation + backfill | Workshop `src/common/register.py`, `src/training/training.py`, `scripts/backfill_model_watermarks.py` |
 | embedding at generation | Platform `server.py` runner; Workshop `scripts/infer.py` |
 | /verify | Platform `routers/system.py` + `static/shell.js` |
 | index + worker + tombstones | Platform `provenance_index.py`, `routers/outputs.py` |
 | Engine Room coverage check | `khaos_diag/collectors/shared.py`, `checks.py` |
-
-## Amendment — the 2026-08-22 reset
-
-The "23 legacy IDs … permanently excluded" above was true until
-2026-08-22, when the operator deleted every output ever made and reset the
-ID space (`watermarking-v2.md` §3a). The frozen list is empty now; the
-history of what was freed lives in `watermark_resets.json`, and `/verify`
-answers "freed by the reset" for those IDs instead of the per-output
-answer described here.
+| the Guild Register (serials, the index of released pieces, the signed log) | `Khaos_Attribution/src/register_service/`, `docs/registry-service.md` |
