@@ -8,7 +8,7 @@ from khaos_attribution.engines import provision as P
 def test_the_statement_is_the_descriptors_and_names_the_gated_weights():
     s = P.statement("stable-audio-3")
     assert "Stability AI Community License" in s and "open base repository" in s and "is gated" not in s, "no account is needed"
-    assert P.statement("mock").startswith("mock-engine 1.0 is under the MIT.")
+    assert P.statement("mock").startswith("mock-engine 1.0 is under the Khaos Free Use Licence.")
 
 
 def test_acceptance_is_recorded_once_and_check_refuses_without_it(tmp_path, capsys):
@@ -18,7 +18,7 @@ def test_acceptance_is_recorded_once_and_check_refuses_without_it(tmp_path, caps
     out = capsys.readouterr().out
     assert "accepted by --accept-licence" in out and "needs no provisioning" in out
     rec = json.loads(P.marker_path(tmp_path, "mock").read_text())
-    assert rec["engine"] == "mock" and rec["licence"] == "MIT" and P.accepted(tmp_path, "mock")
+    assert rec["engine"] == "mock" and rec["licence"] == "Khaos Free Use Licence" and P.accepted(tmp_path, "mock")
     assert P.main(["mock", "--check", "--marker-dir", str(tmp_path)]) == 0
     assert "accepted earlier" in capsys.readouterr().out
 

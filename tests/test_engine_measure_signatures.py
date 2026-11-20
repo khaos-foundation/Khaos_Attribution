@@ -4,16 +4,20 @@ import inspect
 
 import pytest
 
+from khaos_attribution.engines import KNOWN_ENGINES
 
-@pytest.mark.parametrize("engine", ["acestep", "sa3", "mimetic"])
-def test_index_rows_takes_every_keyword_the_index_builder_passes(engine):
-    params = inspect.signature(importlib.import_module(f"khaos_attribution.engines.{engine}.measure").index_rows).parameters
+PACKAGES = sorted(KNOWN_ENGINES.values())
+
+
+@pytest.mark.parametrize("package", PACKAGES)
+def test_index_rows_takes_every_keyword_the_index_builder_passes(package):
+    params = inspect.signature(importlib.import_module(f"{package}.measure").index_rows).parameters
     for name in ("projection", "timesteps", "noise_seed", "target", "timestep_norm", "param_filter", "latent_transform",
                  "latent_pool", "noise_draws", "noise_shared", "param_groups", "groups_out", "on_row"):
-        assert name in params, f"{engine}.index_rows has no {name}"
+        assert name in params, f"{package}.index_rows has no {name}"
 
 
-@pytest.mark.parametrize("engine", ["acestep", "sa3", "mimetic"])
-def test_output_feature_takes_the_block_sketch_keyword(engine):
-    params = inspect.signature(importlib.import_module(f"khaos_attribution.engines.{engine}.measure").output_feature).parameters
-    assert "groups_out" in params, f"{engine}.output_feature has no groups_out"
+@pytest.mark.parametrize("package", PACKAGES)
+def test_output_feature_takes_the_block_sketch_keyword(package):
+    params = inspect.signature(importlib.import_module(f"{package}.measure").output_feature).parameters
+    assert "groups_out" in params, f"{package}.output_feature has no groups_out"
