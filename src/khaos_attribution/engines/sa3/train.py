@@ -5,13 +5,11 @@ Khaos counts in epochs; Stability's trainers count in steps, and the session con
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import os
 import re
 import shutil
-import struct
 import subprocess
 import time
 from dataclasses import dataclass
@@ -219,12 +217,12 @@ def pre_encode(api: TrainingApi, clips_dir: Path, checkpoint_root: Path) -> dict
     """Stability's MLX pre-encoder over the clips: ``.npy`` latents and ``.json`` sidecars under ``latents/``."""
     mlx = api.root / MLX_SUBDIR
     out = clips_dir / LATENTS_DIRNAME
-    cmd = [str(api.python), str(mlx / "scripts" / "pre_encode_mlx.py"), "-i", str(clips_dir), "-o", str(out),
-           "--codec", "same-l"]
-    done = subprocess.run(cmd, cwd=str(mlx), capture_output=True, text=True, env=_env(api))
-    if done.returncode != 0:
-        raise TrainingUnavailable("pre-encoding for the MLX trainer failed: "
-                                  + "\n".join(done.stderr.strip().splitlines()[-6:]))
+    # No limit: a catalogue's encode has no measured bound, and the room's stop reaches the tree.
+    code, _stdout, stderr = W.call(api.python, mlx / "scripts" / "pre_encode_mlx.py",
+                                   ["-i", clips_dir, "-o", out, "--codec", "same-l"], cwd=mlx, env=_env(api),
+                                   label="Stable Audio 3 pre-encoder", timeout=None)
+    if code != 0:
+        raise TrainingUnavailable("pre-encoding for the MLX trainer failed: " + "\n".join(stderr.strip().splitlines()[-6:]))
     return {"dir": str(out), "n": len(list(out.glob("*.npy")))}
 
 
@@ -353,30 +351,12 @@ def trainer_command(api: TrainingApi, cfg: dict, *, tensor_dir: Path, save_dir: 
 
 def losses_from_metrics_csv(save_dir: Path) -> list:
     """(step, loss) rows the driver's callback wrote so far (khaos_losses.csv: step 1-based, loss)."""
-    rows = []
-    path = save_dir / LOSSES_CSV
-    try:
-        with path.open(newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                if row.get("loss") not in (None, ""):
-                    rows.append((int(float(row.get("step") or 0)), float(row["loss"])))
-    except (OSError, ValueError):
-        return rows
-    return rows
+    return PT.CsvLossTail(Path(save_dir) / LOSSES_CSV)()
 
 
 def losses_from_telemetry(path: Path) -> list:
     """(step, loss) from the MLX trainer's loss_by_timestep.bin (struct "Iff": step, t_mean, loss_mean)."""
-    out = []
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return out
-    size = struct.calcsize("Iff")
-    for i in range(0, len(data) - size + 1, size):
-        step, _t, loss = struct.unpack_from("Iff", data, i)
-        out.append((int(step), float(loss)))
-    return out
+    return PT.RecordLossTail(path)()
 
 
 def checkpoint_step(path: Path) -> int | None:
@@ -410,6 +390,7 @@ class Session:
         self.epoch_done = 0
         self.checkpoint_by_epoch: dict = {}
         self._sizes: dict = {}
+        self._loss_tail = None
         self.module = None
         self.training_config = None
         self.process: subprocess.Popen | None = None
@@ -431,9 +412,10 @@ class Session:
                                          "offset": self.steps["per_epoch"] * self.start_epoch})
 
     def _losses(self) -> list:
-        if self.api.runtime == "mlx":
-            return losses_from_telemetry(self.save_dir / TELEMETRY)
-        return losses_from_metrics_csv(self.save_dir)
+        if self._loss_tail is None:
+            self._loss_tail = (PT.RecordLossTail(self.save_dir / TELEMETRY) if self.api.runtime == "mlx"
+                               else PT.CsvLossTail(self.save_dir / LOSSES_CSV))
+        return self._loss_tail()
 
     def _set_aside_earlier_run(self) -> None:
         """A resumed run's logs and checkpoints move out of the way, or the old rows would replay as new epochs."""
@@ -469,11 +451,11 @@ class Session:
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / DESCRIPTOR.adapter["filenames"][0]
         if source.suffix == ".ckpt":
-            done = subprocess.run([str(self.api.python), str(CONVERT_WORKER), str(source), str(target)],
-                                  cwd=str(self.api.root), capture_output=True, text=True, env=_env(self.api))
-            if done.returncode != 0 or not target.is_file():
+            code, _stdout, stderr = W.call(self.api.python, CONVERT_WORKER, [source, target], cwd=self.api.root,
+                                           env=_env(self.api), label="Stable Audio 3 converter", timeout=None)
+            if code != 0 or not target.is_file():
                 raise TrainingUnavailable("converting the checkpoint to safetensors failed: "
-                                          + "\n".join(done.stderr.strip().splitlines()[-4:]))
+                                          + "\n".join(stderr.strip().splitlines()[-4:]))
         else:
             shutil.copy2(source, target)
         self.latest_adapter = target
@@ -490,6 +472,7 @@ class Session:
         if self.resume_from is not None:
             self._set_aside_earlier_run()
         self._sizes = {}
+        self._loss_tail = None
         offset = self.start_epoch
         cmd = self.command()
         record = {"command": cmd, "steps": self.run_steps(), "window_seconds": self.window_seconds}
@@ -598,16 +581,12 @@ def heldout_summary(api: TrainingApi, clips_dir: Path | str, adapter: Path | str
                "latents_dir": str(clips_dir / LATENTS_DIRNAME), "adapter": str(adapter) if adapter else None,
                "timesteps": list(timesteps), "seed": int(seed), "high_noise_t": HIGH_NOISE_T,
                "checkpoint_root": str(root.resolve()), "base_npz": str((root / BASE_NPZ).absolute())}
-    done = subprocess.run([str(api.python), str(HELDOUT_WORKER)], input=json.dumps(request), cwd=str(api.root),
-                          capture_output=True, text=True, env=_env(api))
-    last = (done.stdout or "").strip().splitlines()[-1:] or [""]
+    # No limit: a held-out pass over a run's clips has no measured bound, and the room's stop reaches the tree.
     try:
-        reply = json.loads(last[0])
-    except ValueError:
-        reply = None
-    if done.returncode != 0 or not isinstance(reply, dict) or reply.get("error"):
-        why = (reply or {}).get("error") if isinstance(reply, dict) else "\n".join((done.stderr or "").splitlines()[-6:])
-        raise RuntimeError(f"the Stable Audio 3 held-out worker failed: {why}")
+        reply = W.run(api.python, HELDOUT_WORKER, request, cwd=api.root, env=_env(api), label="Stable Audio 3 held-out",
+                      timeout=None, required="per_sample")
+    except W.WorkerFailed as exc:
+        raise RuntimeError(f"the Stable Audio 3 held-out worker failed: {exc.why}") from exc
     return summarise(reply["per_sample"], list(timesteps))
 
 

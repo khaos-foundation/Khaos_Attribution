@@ -66,6 +66,73 @@ def steps_for(cfg: dict, n_pairs: int) -> dict:
             "epochs": epochs}
 
 
+class CsvLossTail:
+    """(step, loss) rows of a trainer's ``step,loss`` log, read from where the last read stopped, so a poll costs
+    what was appended; a half-written last line waits, and a log written again from the start is read again."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.offset = 0
+        self.rows: list = []
+        self._columns: list | None = None
+
+    def __call__(self) -> list:
+        import csv  # noqa: PLC0415
+        try:
+            size = self.path.stat().st_size
+            if size < self.offset:
+                self.offset, self.rows, self._columns = 0, [], None
+            with self.path.open("rb") as fh:
+                fh.seek(self.offset)
+                new = fh.read()
+        except OSError:
+            return self.rows
+        for raw in new.splitlines(keepends=True):
+            if not raw.endswith(b"\n"):
+                break
+            values = next(csv.reader([raw.decode("utf-8", errors="replace")]), [])
+            if self._columns is None:
+                self._columns = values
+            elif values:
+                row = dict(zip(self._columns, values))
+                if row.get("loss") not in (None, ""):
+                    try:
+                        parsed = (int(float(row.get("step") or 0)), float(row["loss"]))
+                    except ValueError:
+                        break   # read again at the next poll, as a whole read would stop here
+                    self.rows.append(parsed)
+            self.offset += len(raw)
+        return self.rows
+
+
+class RecordLossTail:
+    """(step, loss) from a binary log of fixed records (struct ``Iff``: step, t, loss), read by whole records from
+    where the last read stopped."""
+
+    def __init__(self, path: Path, fmt: str = "Iff") -> None:
+        import struct  # noqa: PLC0415
+        self.path, self.fmt, self.size = Path(path), fmt, struct.calcsize(fmt)
+        self.offset = 0
+        self.rows: list = []
+
+    def __call__(self) -> list:
+        import struct  # noqa: PLC0415
+        try:
+            if self.path.stat().st_size < self.offset:
+                self.offset, self.rows = 0, []
+            with self.path.open("rb") as fh:
+                fh.seek(self.offset)
+                new = fh.read()
+        except OSError:
+            return self.rows
+        whole = len(new) - len(new) % self.size
+        for i in range(0, whole, self.size):
+            step, _t, loss = struct.unpack_from(self.fmt, new, i)
+            self.rows.append((int(step), float(loss)))
+        self.offset += whole
+        return self.rows
+
+
 def checkpoint_step(path: Path) -> int | None:
     """The step a checkpoint's name carries (``…step=1234…``), or None."""
     m = re.search(r"step=(\d+)", Path(path).name)

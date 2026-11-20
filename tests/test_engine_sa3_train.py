@@ -650,3 +650,60 @@ def test_the_mac_driver_widens_one_clips_conditioning_to_the_batch():
     dit(Arr((1, 256, 10)), None, None, None, local_add_cond=Arr((1, 10, 257)))
     dit(Arr((4, 256, 10)), None, None, None)
     assert seen == [(4, 10, 257), (1, 10, 257), None]
+
+
+def test_a_heldout_worker_that_fails_without_an_error_is_named_by_its_stderr(tmp_path, monkeypatch):
+    """A non-zero exit whose reply carries no error says what the worker wrote, never 'None'."""
+    worker = tmp_path / "heldout.py"
+    worker.write_text("import json, sys\nsys.stdin.read()\nsys.stderr.write('CUDA out of memory\\n')\n"
+                      "print(json.dumps({'per_sample': {}}))\nsys.exit(1)\n")
+    monkeypatch.setattr(T, "HELDOUT_WORKER", worker)
+    api = T.TrainingApi(root=tmp_path, runtime="torch", python=sys.executable)
+    with pytest.raises(RuntimeError, match="the Stable Audio 3 held-out worker failed: CUDA out of memory"):
+        T.heldout_summary(api, tmp_path, None, seed=1, timesteps=[0.5], checkpoint_root=None)
+    worker.write_text("import json, sys\nsys.stdin.read()\nprint(json.dumps({'error': 'ValueError: no clips'}))\nsys.exit(1)\n")
+    with pytest.raises(RuntimeError, match="the Stable Audio 3 held-out worker failed: ValueError: no clips"):
+        T.heldout_summary(api, tmp_path, None, seed=1, timesteps=[0.5], checkpoint_root=None)
+
+
+LEAVES_A_CHILD_AND_FAILS = ("import subprocess, sys\nchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+                            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                            "open(%r, 'w').write(str(child.pid))\nsys.stderr.write('could not convert\\n')\nsys.exit(2)\n")
+
+
+def _gone(pid: int, within: float = 8.0) -> bool:
+    import os
+    import time
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a process tree is told apart with POSIX signals")
+def test_the_converter_and_the_pre_encoder_leave_nothing_running_when_they_fail(api, tmp_path, monkeypatch):
+    """Both run through the shared worker loop: a failure is said with the child's words, and what it started is stopped."""
+    import os
+    child = tmp_path / "child"
+    T.CONVERT_WORKER.write_text(LEAVES_A_CHILD_AND_FAILS % str(child))
+    session = T.Session(api, RECIPE, checkpoint_root=tmp_path, tensor_dir=tmp_path, output_dir=tmp_path / "run", seed=1)
+    try:
+        with pytest.raises(TrainingUnavailable, match="converting the checkpoint to safetensors failed: could not convert"):
+            session._lay_out(4, tmp_path / "epoch=0-step=4.ckpt", 0.5)
+        assert _gone(int(child.read_text()))
+        child.unlink()
+        mlx = api.root / "optimized" / "mlx" / "scripts"
+        (mlx / "pre_encode_mlx.py").write_text(LEAVES_A_CHILD_AND_FAILS % str(child))
+        with pytest.raises(TrainingUnavailable, match="pre-encoding for the MLX trainer failed: could not convert"):
+            T.pre_encode(api, tmp_path, tmp_path)
+        assert _gone(int(child.read_text()))
+    finally:
+        if child.exists() and child.read_text():
+            try:
+                os.kill(int(child.read_text()), 9)
+            except OSError:
+                pass

@@ -41,3 +41,34 @@ def test_clips_come_to_two_channels_without_a_resampler_when_the_rate_matches():
     assert PT.resample_stereo(mono, 48000, 48000, engine_name="x", unavailable=Unavailable).shape == (8, 2)
     wide = np.zeros((8, 4), dtype=np.float32)
     assert PT.resample_stereo(wide, 48000, 48000, engine_name="x", unavailable=Unavailable).shape == (8, 2)
+
+
+def test_a_loss_log_is_read_from_where_the_last_read_stopped_and_gives_what_a_whole_read_gives(tmp_path):
+    """Each poll reads only what the trainer appended; a half-written last line waits for its end."""
+    path = tmp_path / "khaos_losses.csv"
+    tail = PT.CsvLossTail(path)
+    assert tail() == []
+    path.write_text("step,loss\n1,0.5\n2,")
+    assert tail() == [(1, 0.5)] and tail.offset == len("step,loss\n1,0.5\n")
+    with path.open("a") as fh:
+        fh.write("\n3,0.25\n4,0.2")
+    assert tail() == [(1, 0.5), (3, 0.25)]
+    with path.open("a") as fh:
+        fh.write("5\n")
+    assert tail() == [(1, 0.5), (3, 0.25), (4, 0.25)] == PT.CsvLossTail(path)()
+    read = tail.offset
+    tail()
+    assert tail.offset == read, "nothing new, nothing read"
+    path.write_text("step,loss\n1,0.9\n")
+    assert tail() == [(1, 0.9)], "a log written again from the start is read again from the start"
+
+
+def test_a_binary_loss_log_is_read_by_whole_records(tmp_path):
+    import struct
+    path = tmp_path / "loss_by_timestep.bin"
+    tail = PT.RecordLossTail(path)
+    path.write_bytes(struct.pack("Iff", 1, 0.5, 0.75) + struct.pack("Iff", 2, 0.4, 0.5)[:5])
+    assert tail() == [(1, 0.75)]
+    with path.open("ab") as fh:
+        fh.write(struct.pack("Iff", 2, 0.4, 0.5)[5:])
+    assert tail() == [(1, 0.75), (2, 0.5)] == PT.RecordLossTail(path)()
