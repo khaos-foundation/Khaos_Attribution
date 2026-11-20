@@ -68,7 +68,8 @@ GITDIR=$(git rev-parse --git-common-dir) || exit 2
 LOCK="$GITDIR/khaos-gate.lock"
 GREEN="$GITDIR/khaos-gate.green"
 # Per worktree: each checkout remembers its own last quick run, and the test files a quick run had to skip.
-QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
+WORKTREE_GITDIR=$(git rev-parse --absolute-git-dir) || exit 2
+QUICK="$WORKTREE_GITDIR/khaos-gate.quick"
 OWED="$QUICK.owed"
 # The pins this branch turned red ("<holder> <test id>"), and those a run had to skip ("<holder> <why>"), one pair of
 # files per branch: each later stop on it names them, and only a run of them settles them.
@@ -133,11 +134,11 @@ take_lock() {
     local pid
     pid=$(cat "$LOCK/pid" 2> /dev/null)
     if [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null; then return 1; fi
-    rm -rf "$LOCK"
+    rm -rf "${LOCK:?}"
     mkdir "$LOCK" 2> /dev/null || return 1
   fi
   echo $$ > "$LOCK/pid"
-  trap 'rm -rf "$LOCK"' EXIT
+  trap 'rm -rf "${LOCK:?}"' EXIT
 }
 
 # The test files a quick run had to skip, those that still exist.
@@ -195,14 +196,14 @@ run_owed() {
   rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; then
     echo "PASS owed ($(( $(date +%s) - start ))s): $(grep -E '[0-9]+ passed' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')"
-    rm -f "$OWED"
+    rm -f "${OWED:?}"
     rc=0
   else
     echo "FAIL owed ($(( $(date +%s) - start ))s, exit $rc)"
     tail -60 "$log"
     rc=1
   fi
-  rm -f "$log"
+  rm -f "${log:?}"
   return "$rc"
 }
 
@@ -253,12 +254,12 @@ record_set() {
   shift 2
   { grep -v "^$holder " "$file" 2> /dev/null; for item in "$@"; do printf '%s %s\n' "$holder" "$item"; done; } > "$file.tmp"
   mv "$file.tmp" "$file"
-  [ -s "$file" ] || rm -f "$file"
+  [ -s "$file" ] || rm -f "${file:?}"
   # The branch a record belongs to, so the records of a branch that is gone can be found and cleared.
   if [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ]; then
     printf '%s\n' "$PINS_BRANCH" > "$PINS_RED.branch"
   else
-    rm -f "$PINS_RED.branch"
+    rm -f "${PINS_RED:?}.branch"
   fi
 }
 
@@ -273,12 +274,13 @@ pins_prune() {
   # Records of a branch that is gone, or of a detached HEAD left more than three days ago, go with it.
   for named in "$QUICK".pins.*.branch; do
     [ -f "$named" ] && [ "$named" != "$PINS_RED.branch" ] || continue
+    case "$named" in "${QUICK:?}".pins.*.branch) ;; *) continue ;; esac
     branch=$(cat "$named")
     case "$branch" in
       "HEAD "*) [ -n "$(find "$named" -mtime +3 2> /dev/null)" ] || continue ;;
       *) git show-ref --verify -q "refs/heads/$branch" && continue ;;
     esac
-    rm -f "${named%.branch}" "${named%.branch}.owed" "$named"
+    rm -f "${named:?}" "${named%.branch}" "${named%.branch}.owed"
   done
   [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ] || return 0
   holders=$(pin_holders | while IFS= read -r holder; do basename "$holder"; done)
@@ -324,10 +326,10 @@ red_before() {
   mkdir "$tmp/$me"
   # Where a link is made as a copy (Git Bash on Windows), the copy would hold a venv and every sibling: not made.
   if ! ln -s "$tmp/$me" "$tmp/link-probe" 2> /dev/null || [ ! -L "$tmp/link-probe" ]; then
-    rm -rf "$tmp"
+    rm -rf "${tmp:?}"
     return 1
   fi
-  rm -f "$tmp/link-probe"
+  rm -f "${tmp:?}/link-probe"
   if with_timeout "$secs" bash -c 'git archive --format=tar "$1" | tar -x -C "$2"' _ "$base" "$tmp/$me"; then
     # The copy holds what git tracks; a pin may also read the venv beside it, which no change to the files moves.
     [ -e .venv ] && ln -s "$PWD/.venv" "$tmp/$me/.venv"
@@ -344,7 +346,7 @@ red_before() {
   else
     rc=2
   fi
-  rm -rf "$tmp"
+  rm -rf "${tmp:?}"
   case "$rc" in
     0|5) return 0 ;;
     1) printf '%s\n' "$out" | red_ids ;;
@@ -381,7 +383,7 @@ run_gates() {
       tail -60 "$log"
       failed=1
     fi
-    rm -f "$log"
+    rm -f "${log:?}"
   done
   [ "$failed" -eq 1 ] && return 1
   [ "$skipped" -eq 1 ] && return 3
@@ -444,7 +446,7 @@ case "$MODE" in
     red=0
     [ "$rc" -eq 1 ] && red=1
     hook_answer "$red" "$out" "$input"
-    rm -f "$out"
+    rm -f "${out:?}"
     exit 0 ;;
   quick)
     # The test files a quick run had to skip are owed: every later run counts them until they have run green.
@@ -521,7 +523,7 @@ case "$MODE" in
         rc=0 ;;
       *) echo "FAIL quick (${took}s, exit $rc): $(printf '%s' "$tests" | tr '\n' ' ')"; tail -60 "$log"; rc=1 ;;
     esac
-    rm -f "$log"
+    rm -f "${log:?}"
     [ "$rc" -eq 0 ] && pins_then_finish 0
     finish "$rc" ;;
   changed)
@@ -553,7 +555,7 @@ case "$MODE" in
     fi
     # What the quick check skipped is run itself, unless the suite gate covered it: another gate may not hold it.
     if [ "$rc" -eq 0 ] && [ -n "$owed" ]; then
-      case " $gates " in *" $SUITE_GATE "*) rm -f "$OWED" ;; *) run_owed; rc=$? ;; esac
+      case " $gates " in *" $SUITE_GATE "*) rm -f "${OWED:?}" ;; *) run_owed; rc=$? ;; esac
     fi
     # The pins siblings hold on this repository read them too, so a green run of them is never remembered.
     if [ -n "$pins" ]; then
@@ -671,6 +673,6 @@ case "$MODE" in
     take_lock || { echo "another gate run holds this repository's lock"; exit 3; }
     run_gates "${NAMES[@]}"
     rc=$?
-    [ "$rc" -eq 0 ] && case " ${NAMES[*]} " in *" $SUITE_GATE "*) rm -f "$OWED" ;; esac
+    [ "$rc" -eq 0 ] && case " ${NAMES[*]} " in *" $SUITE_GATE "*) rm -f "${OWED:?}" ;; esac
     exit "$rc" ;;
 esac
