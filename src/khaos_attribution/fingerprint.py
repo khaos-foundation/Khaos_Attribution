@@ -116,11 +116,6 @@ def best_phase_profile(phases: list, candidate_fps: list) -> tuple:
     return max((match_profile(q, candidate_fps) for q in phases), key=lambda t: t[0]) if phases else (0, 0, 0)
 
 
-def best_phase_stats(phases: list, candidate_fps: list) -> tuple:
-    """(votes, distinct) for a candidate against the query's best phase."""
-    return best_phase_profile(phases, candidate_fps)[:2]
-
-
 def dominant(votes: int, runner_up: int, ratio: float = 2.0) -> bool:
     """The closed-set rule the module states: the best candidate at least `ratio` times the runner-up."""
     return votes >= ratio * max(runner_up, 1)

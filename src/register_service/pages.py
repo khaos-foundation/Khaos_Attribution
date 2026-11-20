@@ -9,6 +9,8 @@ import html
 import re
 from importlib import resources
 
+from khaos_attribution.translog import PUBLIC_MIRROR_PAGE
+
 STAR_SVG = resources.files("khaos_attribution.seal").joinpath("star.svg").read_text(encoding="utf-8")
 
 CSS = """
@@ -65,16 +67,14 @@ a.stage-tr:hover { background: var(--field); }
 .stage-title.artist-name { font-size: clamp(48px, 9vw, 120px); line-height: .86; letter-spacing: -.05em; padding-bottom: .08em; }
 .stage-kv-label { font-size: var(--fs-note); color: var(--muted); }
 .mono { font-size: var(--fs-note); color: var(--muted); overflow-wrap: anywhere; }   /* ids in the text face, tabular */
-.stage-chip { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--field);
-  font-size: var(--fs-note); font-weight: var(--fw-medium); color: var(--muted); white-space: nowrap; }
-.stage-chip.good { color: var(--text); }
-.stage-chip.failed { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, var(--panel)); }
 /* Stamps, as in the rooms: a status is struck, not printed. Square, a double rule in its own colour, no fill, a degree
    off true; the text keeps its own case. */
-.stage-chip { border: 3px double currentColor; border-radius: 0; background: none; font-weight: var(--fw-black);
-  letter-spacing: .02em; transform: rotate(-1deg); }
+.stage-chip { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; font-size: var(--fs-note);
+  color: var(--muted); white-space: nowrap; border: 3px double currentColor; border-radius: 0; background: none;
+  font-weight: var(--fw-black); letter-spacing: .02em; transform: rotate(-1deg); }
 .stage-chip:nth-child(even) { transform: rotate(1deg); }
-.stage-chip.failed { background: none; }
+.stage-chip.good { color: var(--text); }
+.stage-chip.failed { color: var(--danger); }
 .empty { padding: 24px; background: var(--panel); border-radius: var(--radius); color: var(--muted); font-size: var(--fs-ui); }
 .foot { margin-top: 48px; padding: 18px 20px; background: var(--panel); border-radius: var(--radius); color: var(--muted);
   font-size: var(--fs-note); display: flex; gap: 18px; flex-wrap: wrap; }
@@ -139,7 +139,7 @@ def page(title: str, body: str, *, dev: bool, description: str = DESCRIPTION, pa
             f'{dev_line}{body}'
             f'<div class="foot"><a href="/verify-entry">Verify an entry</a><a href="/log/sth">The log\'s signed head</a>'
             f'<a href="/api/ledger">The ledger</a><a href="/api/public-key">The register\'s public key</a>'
-            f'<a href="https://github.com/guild-register/ledger">The public mirror</a><span>Kept by the Khaos Foundation Limited</span></div>'
+            f'<a href="{PUBLIC_MIRROR_PAGE}">The public mirror</a><span>Kept by the Khaos Foundation Limited</span></div>'
             f'</main></body></html>')
 
 

@@ -10,6 +10,7 @@ import bisect
 import json
 import os
 import secrets
+import shutil
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -37,7 +38,7 @@ CREATE TABLE IF NOT EXISTS log_exports (place TEXT PRIMARY KEY, format INTEGER N
 PAGE_MAX = 1000
 # The layout of the static export: a proof names the first head under the current key that holds its leaf and a
 # consistency file runs from one head to the next, so neither changes as the log grows.
-EXPORT_FORMAT = 2
+EXPORT_FORMAT = 3
 EXPORT_LOCK_TIMEOUT = 30.0   # seconds; a later export catches up with whatever this one skipped
 UNAVAILABLE = "unavailable: recovered without its body"
 TEXT_MAX = 400
@@ -78,7 +79,24 @@ class TransLog:
     def __init__(self, store):
         self.store, self.signer, self.blocked, self.off = store, None, None, None
         store.db.executescript(SCHEMA)
+        self._one_head_per_size()
         self._mark_waiting_admits()
+
+    def _one_head_per_size(self) -> None:
+        """A file whose log_heads predates its UNIQUE tree_size gets that rule as an index; a second head of a size is
+        moved to log_heads_superseded, never dropped."""
+        for ix in self.db.execute("PRAGMA index_list(log_heads)").fetchall():
+            if ix["unique"] and [c["name"] for c in self.db.execute(f'PRAGMA index_info("{ix["name"]}")')] == ["tree_size"]:
+                return
+        with self.store._tx() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS log_heads_superseded AS SELECT * FROM log_heads WHERE 0")
+            moved = db.execute("INSERT INTO log_heads_superseded SELECT * FROM log_heads h"
+                               " WHERE id > (SELECT MIN(id) FROM log_heads WHERE tree_size = h.tree_size)").rowcount
+            db.execute("DELETE FROM log_heads WHERE id IN (SELECT id FROM log_heads_superseded)")
+            db.execute("CREATE UNIQUE INDEX log_heads_one_per_size ON log_heads (tree_size)")
+        if moved:
+            import logging  # noqa: PLC0415
+            logging.getLogger("register_service").warning("%d second head(s) of a size moved to log_heads_superseded", moved)
 
     def _mark_waiting_admits(self) -> None:
         """``waits`` on an admit: 1 when its body names lost leaves it waits on (pending_lost), else 0. A column so the
@@ -106,7 +124,8 @@ class TransLog:
     # ---- reading ----
 
     def size(self) -> int:
-        return int(self.db.execute("SELECT COUNT(*) AS n FROM log_leaves").fetchone()["n"])
+        # Leaves are numbered from 0 with no gap (problems() checks it), so the newest index says the size.
+        return int(self.db.execute("SELECT COALESCE(MAX(idx) + 1, 0) AS n FROM log_leaves").fetchone()["n"])
 
     def _perfect(self, level: int, index: int) -> bytes:
         row = self.db.execute("SELECT hash FROM log_nodes WHERE level = ? AND idx = ?", (level, index)).fetchone()
@@ -120,28 +139,16 @@ class TransLog:
     def _key_id(self) -> str:
         return self.signer.key_id if self.signer is not None else ""
 
-    _PREFER = "ORDER BY key_id = ? DESC, timestamp DESC, id DESC"
-
     def head(self, size: int | None = None) -> dict | None:
-        """The head of this size (the largest when None): the current key's newest where there are several."""
+        """The head of this size, or the largest; a size has one head (UNIQUE)."""
         if size is None:
-            row = self.db.execute(f"SELECT * FROM log_heads WHERE tree_size = (SELECT MAX(tree_size) FROM log_heads) {self._PREFER}"
-                                  " LIMIT 1", (self._key_id(),)).fetchone()
+            row = self.db.execute("SELECT * FROM log_heads ORDER BY tree_size DESC LIMIT 1").fetchone()
         else:
-            row = self.db.execute(f"SELECT * FROM log_heads WHERE tree_size = ? {self._PREFER} LIMIT 1",
-                                  (int(size), self._key_id())).fetchone()
+            row = self.db.execute("SELECT * FROM log_heads WHERE tree_size = ?", (int(size),)).fetchone()
         return head_doc(row) if row else None
 
     def heads(self) -> list:
-        """One head per size, chosen as head() chooses."""
-        out = {}
-        for r in self.db.execute(f"SELECT * FROM log_heads {self._PREFER.replace('ORDER BY', 'ORDER BY tree_size,')}",
-                                 (self._key_id(),)):
-            out.setdefault(r["tree_size"], head_doc(r))
-        return [out[k] for k in sorted(out)]
-
-    def all_heads(self) -> list:
-        return [head_doc(r) for r in self.db.execute("SELECT * FROM log_heads ORDER BY tree_size, timestamp, id")]
+        return [head_doc(r) for r in self.db.execute("SELECT * FROM log_heads ORDER BY tree_size")]
 
     def leaf(self, leaf_hex: str) -> dict | None:
         row = self.db.execute("SELECT * FROM log_leaves WHERE leaf_hash = ?", (leaf_hex,)).fetchone()
@@ -151,10 +158,6 @@ class TransLog:
         """The entry's exact bytes, or None when withheld."""
         row = self.db.execute("SELECT body, withheld_at FROM log_bodies WHERE leaf_hash = ?", (leaf_hex,)).fetchone()
         return None if row is None or row["withheld_at"] else bytes(row["body"])
-
-    def withheld(self) -> dict:
-        return {r["leaf_hash"]: r["withhold_reason"] for r in self.db.execute(
-            "SELECT leaf_hash, withhold_reason FROM log_bodies WHERE withheld_at IS NOT NULL")}
 
     def inclusion(self, leaf_hex: str, size: int | None = None) -> dict:
         leaf = self.leaf(leaf_hex)
@@ -325,13 +328,17 @@ class TransLog:
                          entry.get("withholds") or entry.get("revokes") or entry.get("answers"),
                          (1 if entry.get("pending_lost") else 0) if entry["kind"] == "admit" else None))
         self.db.execute("INSERT INTO log_bodies (leaf_hash, body) VALUES (?, ?)", (leaf.hex(), body))
+        self._insert_nodes(index, leaf)
+        return index, leaf.hex()
+
+    def _insert_nodes(self, index: int, leaf: bytes) -> None:
+        """The leaf's node and every perfect subtree it completes."""
         level, i, h = 0, index, leaf
         self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
         while i % 2 == 1:
             h = T.node_hash(self._perfect(level, i - 1), h)
             level, i = level + 1, i // 2
             self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (?, ?, ?)", (level, i, h))
-        return index, leaf.hex()
 
     def append_locked(self, entry: dict) -> dict:
         """One leaf, its completed subtrees and a new signed head. The caller holds the Store's write transaction."""
@@ -339,7 +346,11 @@ class TransLog:
             raise LogOff(self.off)
         if self.blocked:
             raise LogBlocked(self.blocked)
-        if entry.get("kind") != "genesis" and self.size() == 0:
+        have = self.db.execute("SELECT COUNT(*) AS c, COALESCE(MAX(idx) + 1, 0) AS n FROM log_leaves").fetchone()
+        if have["c"] != have["n"]:
+            # A head signed past a missing leaf would publish a tree no one can rebuild.
+            raise LogBlocked(f"{have['n'] - have['c']} of the log's {have['n']} leaves are missing; nothing is appended")
+        if entry.get("kind") != "genesis" and have["n"] == 0:
             # Only the service's own start begins a log, with the genesis that admits every record before it.
             raise LogOff("a log begins with its genesis, which only the service appends when it starts the log")
         if self.signer is None:
@@ -360,12 +371,7 @@ class TransLog:
         self.db.execute("INSERT INTO log_leaves (idx, leaf_hash, kind) VALUES (?, ?, 'unavailable')", (index, leaf_hex))
         self.db.execute("INSERT INTO log_bodies (leaf_hash, body, withheld_at, withhold_reason) VALUES (?, ?, ?, ?)",
                         (leaf_hex, b"", T.now_rfc3339(), UNAVAILABLE))
-        level, i, h = 0, index, leaf
-        self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (0, ?, ?)", (index, leaf))
-        while i % 2 == 1:
-            h = T.node_hash(self._perfect(level, i - 1), h)
-            level, i = level + 1, i // 2
-            self.db.execute("INSERT INTO log_nodes (level, idx, hash) VALUES (?, ?, ?)", (level, i, h))
+        self._insert_nodes(index, leaf)
 
     def insert_head_locked(self, head: dict) -> None:
         self.db.execute("INSERT OR IGNORE INTO log_heads (tree_size, root_sha256, timestamp, key_id, signature) VALUES (?, ?, ?, ?, ?)",
@@ -532,7 +538,7 @@ class TransLog:
             out.append("the stored nodes are not the nodes of the leaves")
         tree = T.Tree(len(leaves), lambda level, index: nodes[(level, index)])
         current = T.key_id_of_pem(public_pem) if public_pem else None
-        for head in self.all_heads():
+        for head in self.heads():
             if head["tree_size"] > len(leaves) or tree.root(head["tree_size"]).hex() != head["root_sha256"]:
                 out.append(f"the head of size {head['tree_size']} is not the root of the leaves")
             if public_pem and head["key_id"] == current:
@@ -769,7 +775,6 @@ def snapshot(log: TransLog, nodes: bool = True) -> dict:
         held = {(r["level"], r["idx"]): bytes(r["hash"]) for r in db.execute("SELECT level, idx, hash FROM log_nodes")} if nodes else None
         heads = log.heads()
         first_current = db.execute("SELECT MIN(tree_size) AS m FROM log_heads WHERE key_id = ?", (log._key_id(),)).fetchone()["m"]
-        struck = log.struck()
         anchors = log.anchors()
     finally:
         db.execute("COMMIT")
@@ -777,9 +782,8 @@ def snapshot(log: TransLog, nodes: bool = True) -> dict:
     return {"leaves": leaves, "kinds": [r["kind"] for r in rows], "refers": [r["refers"] for r in rows],
             "bodies": [None if r["withheld_at"] else bytes(r["body"]) for r in rows],
             "raw": [bytes(r["body"]) for r in rows],
-            "withheld": sorted(r["leaf_hash"] for r in rows if r["withheld_at"]),
             "tree": T.Tree(len(leaves), (lambda level, index: held[(level, index)]) if nodes else log._perfect),
-            "heads": heads, "first_current": first_current, "struck": struck, "anchors": anchors,
+            "heads": heads, "first_current": first_current, "anchors": anchors,
             "current_sizes": [h["tree_size"] for h in heads if h["key_id"] == log._key_id()]}
 
 
@@ -881,19 +885,12 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
     shown = [None if pending is not None and i >= pending and snap["kinds"][i] not in ("withhold", "heartbeat", "withdraw") else b
              for i, b in enumerate(snap["bodies"])]
     was = 0 if done is None else done["tree_size"]
-    # A body's place can change behind the newest leaf only where the delay's edge moved, or by a withhold.
-    edge = 0 if done is None else min(was, pending if pending is not None else n,
-                                      done["pending_from"] if done["pending_from"] is not None else was)
 
     def bodies(kept: dict, edge_said: int | None) -> bytes:
         return _json({"tree_size": n, "pending_from": edge_said,
                       "bodies": [(kept.get(i) or b).decode("utf-8") if (b is not None or i in kept) else None
                                  for i, b in enumerate(shown)]})
     write_whole(root / "key.json", _json(key_doc))
-    for i in range(edge, n):
-        path = root / "entries" / f"{leaves[i]}.json"
-        if shown[i] is not None and not path.is_file():
-            write_whole(path, shown[i])
     current = snap["current_sizes"]
     for i in range(was, n):
         at = bisect.bisect_left(current, i + 1)
@@ -918,16 +915,13 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
     # From here the new head is the one read, and it proves every withhold: what it hides can go.
     if kept or waiting:
         write_whole(root / "bodies.json", bodies({}, pending))
-    for leaf_hex in snap["withheld"] if done is not None else ():
-        _remove(root / "entries" / f"{leaf_hex}.json")
-    for i in range(edge, n):
-        if shown[i] is None:
-            _remove(root / "entries" / f"{leaves[i]}.json")
-    hidden = {leaves[i] for i in range(n) if shown[i] is None and snap["bodies"][i] is not None}
     if done is None:
-        _remove(root / "records.json")
-    write_whole(root / "struck.json", _json({k: v for k, v in snap["struck"].items() if v["leaf_hash"] not in hidden}))
-    write_whole(root / "withheld.json", _json(snap["withheld"]))
+        # A verifier reads hashes.json and bodies.json; files an earlier layout wrote beside them go.
+        for name in ("records.json", "struck.json", "withheld.json"):
+            _remove(root / name)
+        if (root / "entries").exists():
+            # A removal that fails raises: the export is not recorded, so the next one is whole and tries again.
+            shutil.rmtree(root / "entries")
     return latest
 
 

@@ -57,29 +57,6 @@
     if (!same(r, root)) throw new Error("the inclusion proof does not lead to the head's root");
   }
 
-  async function verifyConsistency(first, second, firstRoot, secondRoot, proof) {
-    if (first === second) {
-      if (proof.length || !same(firstRoot, secondRoot)) throw new Error("two heads of one size disagree");
-      return;
-    }
-    const path = proof.slice();
-    if ((first & (first - 1)) === 0) path.unshift(firstRoot);
-    let fn = first - 1, sn = second - 1;
-    while (fn & 1) { fn >>= 1; sn >>= 1; }
-    let fr = path[0], sr = path[0];
-    for (const c of path.slice(1)) {
-      if (sn === 0) throw new Error("the consistency proof is longer than the tree");
-      if (fn & 1 || fn === sn) {
-        fr = await nodeHash(c, fr); sr = await nodeHash(c, sr);
-        if (!(fn & 1)) while (!(fn & 1) && fn !== 0) { fn >>= 1; sn >>= 1; }
-      } else {
-        sr = await nodeHash(sr, c);
-      }
-      fn >>= 1; sn >>= 1;
-    }
-    if (sn !== 0 || !same(fr, firstRoot) || !same(sr, secondRoot)) throw new Error("the heads are not consistent: the log was rewritten");
-  }
-
   async function get(name) {
     const r = await fetch(base + name, { cache: "no-cache" });
     if (r.status === 404) return null;

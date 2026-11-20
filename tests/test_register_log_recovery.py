@@ -50,7 +50,7 @@ def test_a_quiet_logs_strike_reaches_the_public_mirror_after_the_delay(register)
     signed, leaf = _struck_last(register)
     _age_every_head(store, 30)
     refresh_head(app.state.cfg, store)
-    sizes = [h["tree_size"] for h in store.log.all_heads()]
+    sizes = [h["tree_size"] for h in store.log.heads()]
     assert len(sizes) == len(set(sizes)), "every size has exactly one head"
     beat = store.log.entries(store.log.size() - 1, store.log.size())[0]["entry"]
     assert beat["kind"] == "heartbeat" and set(beat) == {"version", "kind", "time", "salt"}
@@ -98,7 +98,7 @@ def test_a_key_switch_appends_a_heartbeat_rather_than_a_second_head_of_one_size(
     (app.state.cfg["data"] / "log-key.dev").unlink()
     guild = R.SigningKey.load_or_create(app.state.cfg["data"] / "log-key.pem")
     st = create_app({**app.state.cfg, "log_dev_key": False}).state.store
-    sizes = [h["tree_size"] for h in st.log.all_heads()]
+    sizes = [h["tree_size"] for h in st.log.heads()]
     assert len(sizes) == len(set(sizes)) and st.log.head()["key_id"] == guild.key_id
     assert st.log.entries(st.log.size() - 1, st.log.size())[0]["entry"]["kind"] == "heartbeat"
 

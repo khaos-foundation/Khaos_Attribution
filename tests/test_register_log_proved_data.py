@@ -99,6 +99,15 @@ def _export(app):
 
 # ---- strikes come from proved entries, never from an editable hint ----
 
+def _public_strike(app, leaf: str, kind: str) -> bool:
+    """The exported log withholds the struck entry's body and still serves, as a body of its own, the entry naming it."""
+    log = _mirror(app) / "log"
+    bodies = json.loads((log / "bodies.json").read_text())["bodies"]
+    leaves = json.loads((log / "hashes.json").read_text())["leaves"]
+    named = [json.loads(b) for b in bodies if b]
+    return bodies[leaves.index(leaf)] is None and any(e.get("kind") == kind and e.get("revokes") == leaf for e in named)
+
+
 def test_a_strike_is_found_from_proved_entries_even_when_the_admit_is_withheld_or_the_hint_is_edited(register, tmp_path):
     app, store, http = register
     _, _, s1, _, _, _ = _two(register)
@@ -109,7 +118,7 @@ def test_a_strike_is_found_from_proved_entries_even_when_the_admit_is_withheld_o
     warden.log_append({"kind": "withhold", "withholds": leaf, "reason": "privacy", "sitting": "S1"})
     out = _prove(leaf, _mirror(app), pem)
     assert out["struck"] and out["struck"]["reason"] == "consent withdrawn"
-    assert leaf in json.loads((_mirror(app) / "log" / "struck.json").read_text()), "the hint is never filtered by withholding"
+    assert _public_strike(app, leaf, "revoke"), "the strike is never filtered by withholding the body it strikes"
     lie = _copy(app, tmp_path)
     (lie / "log" / "struck.json").write_text("{}")
     assert _prove(leaf, lie, pem)["struck"]["reason"] == "consent withdrawn"
@@ -124,6 +133,11 @@ def test_a_withheld_revoke_still_strikes_with_its_reason_withheld(register):
     warden.log_append({"kind": "withhold", "withholds": revoke["leaf_hash"], "reason": "privacy", "sitting": "S1"})
     out = _prove(s1["record_sha256"], _mirror(app), store.log.signer.public_pem())
     assert out["struck"] and out["struck"]["reason"] is None and out["struck"]["reason_withheld"]
+    bodies = json.loads((_mirror(app) / "log" / "bodies.json").read_text())["bodies"]
+    leaves = json.loads((_mirror(app) / "log" / "hashes.json").read_text())["leaves"]
+    assert bodies[leaves.index(revoke["leaf_hash"])] is None
+    assert any(json.loads(b).get("kind") == "withhold" and json.loads(b).get("revokes") == leaf for b in bodies if b), \
+        "a withheld strike still names, in public, the entry it struck"
 
 
 # ---- a database behind its own published log refuses to append ----
@@ -345,16 +359,20 @@ def test_new_bodies_wait_out_the_grace_period_before_the_public_mirror_and_a_wit
     leaf = store.log.admit_leaf_of(s1["record_sha256"])
     pem = store.log.signer.public_pem()
     assert (public / "log" / "sth" / "latest.json").is_file()
-    assert not (public / "log" / "entries" / f"{leaf}.json").exists(), "a new body waits"
+
+    def public_body(leaf_hex):
+        hashes = json.loads((public / "log" / "hashes.json").read_text())["leaves"]
+        return json.loads((public / "log" / "bodies.json").read_text())["bodies"][hashes.index(leaf_hex)]
+    assert public_body(leaf) is None, "a new body waits"
     out = _prove(leaf, public, pem)
     assert out["entry"] is None and out["pending"] and any("not yet public" in w for w in out["warnings"]) and out["held_back_after"] == 1
     store.log_withhold(leaf, "a private name")
     from register_service.app import log_key_doc
     from register_service.translog import export
     export(store.log, _mirror(app), log_key_doc(store.log.signer, True), public=public, delay_days=0)
-    assert not (public / "log" / "entries" / f"{leaf}.json").exists(), "withheld inside the grace period, never public"
+    assert public_body(leaf) is None, "withheld inside the grace period, never public"
     genesis = json.loads((public / "log" / "hashes.json").read_text())["leaves"][0]
-    assert (public / "log" / "entries" / f"{genesis}.json").exists(), "after the grace period the body is public"
+    assert public_body(genesis) is not None, "after the grace period the body is public"
     lie = tmp_path / "lie"
     shutil.copytree(public, lie)
     doc = json.loads((lie / "log" / "bodies.json").read_text())

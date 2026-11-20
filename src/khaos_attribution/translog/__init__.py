@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from importlib import resources
 
 LOG_ID = "guild-register"
+# The public mirror's repository, read raw by verifiers and witnesses, and linked from the register's pages.
+PUBLIC_MIRROR_PAGE = "https://github.com/guild-register/ledger"
+PUBLIC_MIRROR_RAW = "https://raw.githubusercontent.com/guild-register/ledger/main"
 HEAD_VERSION = "guild.register.log.head/1"
 ENTRY_VERSION = "guild.register.log.entry/1"
 ENTRY_KINDS = ("genesis", "admit", "revoke", "withhold", "heartbeat", "confirm", "withdraw")
