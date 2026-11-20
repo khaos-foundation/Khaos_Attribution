@@ -406,17 +406,20 @@ RAISES = ("import json, sys, traceback\nsys.stdin.read()\n"
           "    print(json.dumps({'error': f'{type(exc).__name__}: {exc}'}))\n    sys.exit(1)\n")
 
 
-def test_a_failing_workers_traceback_reaches_the_callers_log_and_the_sentence_stays_short(tmp_path, caplog):
-    """The reply's one line is what a caller shows; the file and line it failed at go to the log."""
+def test_a_failing_workers_traceback_reaches_the_debug_log_and_only_its_last_line_the_error_log(tmp_path, caplog):
+    """The reply's one line is what a caller shows; the file and line it failed at go to the log at DEBUG, since a
+    traceback can hold a request's words, and only the last line at ERROR."""
     script = tmp_path / "raises.py"
     script.write_text(RAISES)
     for ask in (W.run, W.stream):
         caplog.clear()
-        with caplog.at_level("ERROR", logger=W.log.name), pytest.raises(W.WorkerFailed) as failed:
+        with caplog.at_level("DEBUG", logger=W.log.name), pytest.raises(W.WorkerFailed) as failed:
             ask(Path(sys.executable), script, {}, cwd=tmp_path, env=dict(os.environ), label="test")
         assert "Traceback" not in str(failed.value) and "ZeroDivisionError" in str(failed.value), ask.__name__
-        logged = "\n".join(r.getMessage() for r in caplog.records)
-        assert "Traceback" in logged and "1 / 0" in logged and "the test worker" in logged, ask.__name__
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        debug = "\n".join(r.getMessage() for r in caplog.records if r.levelname == "DEBUG")
+        assert errors == ["the test worker failed: ZeroDivisionError: division by zero"], (ask.__name__, errors)
+        assert "Traceback" in debug and "1 / 0" in debug, ask.__name__
 
 
 def test_a_failure_carries_its_bare_reason_for_a_caller_that_words_it_itself(tmp_path):

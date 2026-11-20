@@ -66,26 +66,52 @@ def steps_for(cfg: dict, n_pairs: int) -> dict:
             "epochs": epochs}
 
 
-class CsvLossTail:
-    """(step, loss) rows of a trainer's ``step,loss`` log, read from where the last read stopped, so a poll costs
-    what was appended; a half-written last line waits, and a log written again from the start is read again."""
+class _LogTail:
+    """A log a trainer appends to, read from where the last read stopped, so a poll costs what was appended. A log
+    written again from the start (shorter than what was read, another file, or other first bytes) is read again."""
+    HEAD_BYTES = 64
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.offset = 0
         self.rows: list = []
+        self._identity: tuple | None = None
+
+    def _reset(self) -> None:
+        self.offset, self.rows = 0, []
+
+    def _new(self) -> bytes | None:
+        import os  # noqa: PLC0415
+        try:
+            with self.path.open("rb") as fh:
+                st = os.fstat(fh.fileno())
+                head = fh.read(self.HEAD_BYTES)
+                if self._identity is not None:
+                    inode, seen = self._identity
+                    if inode != st.st_ino or st.st_size < self.offset or head[:len(seen)] != seen:
+                        self._reset()
+                self._identity = (st.st_ino, head)
+                fh.seek(self.offset)
+                return fh.read()
+        except OSError:
+            return None
+
+
+class CsvLossTail(_LogTail):
+    """(step, loss) rows of a trainer's ``step,loss`` log; a half-written last line waits for its end."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
         self._columns: list | None = None
+
+    def _reset(self) -> None:
+        super()._reset()
+        self._columns = None
 
     def __call__(self) -> list:
         import csv  # noqa: PLC0415
-        try:
-            size = self.path.stat().st_size
-            if size < self.offset:
-                self.offset, self.rows, self._columns = 0, [], None
-            with self.path.open("rb") as fh:
-                fh.seek(self.offset)
-                new = fh.read()
-        except OSError:
+        new = self._new()
+        if new is None:
             return self.rows
         for raw in new.splitlines(keepends=True):
             if not raw.endswith(b"\n"):
@@ -105,25 +131,18 @@ class CsvLossTail:
         return self.rows
 
 
-class RecordLossTail:
-    """(step, loss) from a binary log of fixed records (struct ``Iff``: step, t, loss), read by whole records from
-    where the last read stopped."""
+class RecordLossTail(_LogTail):
+    """(step, loss) from a binary log of fixed records (struct ``Iff``: step, t, loss), read by whole records."""
 
     def __init__(self, path: Path, fmt: str = "Iff") -> None:
         import struct  # noqa: PLC0415
-        self.path, self.fmt, self.size = Path(path), fmt, struct.calcsize(fmt)
-        self.offset = 0
-        self.rows: list = []
+        super().__init__(path)
+        self.fmt, self.size = fmt, struct.calcsize(fmt)
 
     def __call__(self) -> list:
         import struct  # noqa: PLC0415
-        try:
-            if self.path.stat().st_size < self.offset:
-                self.offset, self.rows = 0, []
-            with self.path.open("rb") as fh:
-                fh.seek(self.offset)
-                new = fh.read()
-        except OSError:
+        new = self._new()
+        if new is None:
             return self.rows
         whole = len(new) - len(new) % self.size
         for i in range(0, whole, self.size):

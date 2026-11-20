@@ -109,10 +109,12 @@ def run(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, labe
 
 
 def _log_failure(label: str, stderr: str | None) -> None:
-    """What a failed worker wrote to stderr (its traceback) goes to the log; the error a caller shows stays one line."""
-    tail = "\n".join((stderr or "").strip().splitlines()[-40:])
-    if tail:
-        log.error("the %s worker failed; its stderr ends:\n%s", label, tail)
+    """A failed worker's last stderr line at ERROR and its traceback at DEBUG: a traceback can hold a request's
+    words (a prompt, lyrics), which a server's kept logs must not."""
+    lines = (stderr or "").strip().splitlines()
+    if lines:
+        log.error("the %s worker failed: %s", label, lines[-1])
+        log.debug("the %s worker's stderr ends:\n%s", label, "\n".join(lines[-40:]))
 
 
 def call(python: Path, script: Path, args, *, cwd: Path, env: dict, label: str, should_stop=None,

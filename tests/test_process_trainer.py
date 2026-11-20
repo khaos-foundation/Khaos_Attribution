@@ -61,6 +61,11 @@ def test_a_loss_log_is_read_from_where_the_last_read_stopped_and_gives_what_a_wh
     assert tail.offset == read, "nothing new, nothing read"
     path.write_text("step,loss\n1,0.9\n")
     assert tail() == [(1, 0.9)], "a log written again from the start is read again from the start"
+    path.write_text("step,loss\n1,0.7\n" + "".join(f"{s},0.1\n" for s in range(2, 40)))
+    assert tail()[:2] == [(1, 0.7), (2, 0.1)] and len(tail()) == 39, "a longer rewrite is told by its first bytes"
+    path.unlink()
+    path.write_text("step,loss\n1,0.7\n" + "".join(f"{s},0.2\n" for s in range(2, 60)))
+    assert tail()[1] == (2, 0.2) and len(tail()) == 59, "another file at the same path is read from its start"
 
 
 def test_a_binary_loss_log_is_read_by_whole_records(tmp_path):
