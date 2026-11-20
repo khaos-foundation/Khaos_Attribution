@@ -129,3 +129,85 @@ def test_no_lookup_scans_the_landmarks(tmp_path):
     assert plans
     for plan in plans:
         assert "SCAN f" not in plan and "SCAN landmarks" not in plan and "SCAN claim_landmarks" not in plan, plan
+
+
+def _version_one_file(path, null_id=False):
+    """A small index in the layout before version 2, one landmark row orphaned, optionally a piece with no id."""
+    db = sqlite3.connect(path)
+    db.executescript(V1)
+    db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks)"
+               " VALUES ('gen-a', 65536, 32, 'a', 'then', 'k', 'space', 3)")
+    db.executemany("INSERT INTO fingerprints VALUES (?, ?, ?)", [(7, "gen-a", 100), (7, "gen-a", 100), (8, "gen-a", 200), (9, "gone", 0)])
+    if null_id:
+        db.execute("INSERT INTO outputs (generation_id, serial, payload, artist_id, released_at, released_by, kind, landmarks)"
+                   " VALUES (NULL, 65537, 32, 'a', 'then', 'k', 'space', 0)")
+    db.execute("PRAGMA user_version = 1")
+    db.commit()
+    db.close()
+
+
+class _Interrupting:
+    """The index's connection, but the statement named raises: a crash at that point of the start."""
+
+    def __init__(self, real, statement, error):
+        self.real, self.statement, self.error = real, statement, error
+
+    def execute(self, sql, *args):
+        if sql.strip().upper() == self.statement:
+            raise self.error
+        return self.real.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), sqlite3.OperationalError("disk full")])
+def test_a_start_stopped_after_the_move_commits_leaves_a_version_two_file(tmp_path, monkeypatch, error):
+    """The stamp is inside the move: a crash before the compaction leaves the new shape stamped 2, never 1."""
+    from register_service.store import file_version
+    path = tmp_path / "i.sqlite3"
+    _version_one_file(path)
+    real = Index.db
+    monkeypatch.setattr(Index, "db", property(lambda self: _Interrupting(real.fget(self), "VACUUM", error)))
+    if isinstance(error, KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            Index(path)
+    else:
+        Index(path)
+    monkeypatch.undo()
+    assert file_version(path) == INDEX_VERSION
+    again = Index(path)
+    assert sorted(again._candidates([[(7, 100), (8, 200)]], None)["gen-a"]) == [(7, 100), (7, 100), (8, 200)]
+
+
+def test_a_move_says_what_it_left_behind_and_refuses_a_piece_with_no_id(tmp_path, caplog):
+    from register_service.store import file_version
+    _version_one_file(tmp_path / "ok.sqlite3")
+    with caplog.at_level("WARNING", logger="register_service"):
+        Index(tmp_path / "ok.sqlite3")
+    assert "1 landmark rows name no released piece" in caplog.text and "moved to version 2" in caplog.text
+    _version_one_file(tmp_path / "bad.sqlite3", null_id=True)
+    with pytest.raises(sqlite3.IntegrityError):
+        Index(tmp_path / "bad.sqlite3")
+    assert "refused, nothing changed" in caplog.text
+    assert file_version(tmp_path / "bad.sqlite3") == 1
+    tables = {r[0] for r in sqlite3.connect(tmp_path / "bad.sqlite3").execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"fingerprints", "outputs"} <= tables and "landmarks" not in tables
+
+
+def test_a_file_from_before_any_version_moves_over_too(tmp_path):
+    """Version 0: no withdrawn, removed or hash columns, and no claim tables."""
+    path = tmp_path / "i.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE outputs (generation_id TEXT PRIMARY KEY, serial INTEGER NOT NULL, payload INTEGER NOT NULL,"
+               " artist_id TEXT NOT NULL, released_at TEXT NOT NULL, released_by TEXT NOT NULL, kind TEXT NOT NULL, landmarks INTEGER NOT NULL)")
+    db.execute("CREATE TABLE fingerprints (hash INTEGER NOT NULL, generation_id TEXT NOT NULL, offset_ms INTEGER NOT NULL)")
+    db.execute("INSERT INTO outputs VALUES ('old', 65536, 32, 'a', 'then', 'k', 'space', 1)")
+    db.execute("INSERT INTO fingerprints VALUES (5, 'old', 0)")
+    db.commit()
+    db.close()
+    index = Index(path)
+    assert index.output("old")["withdrawn"] == 0 and index.verify([[(5, 0)]], None)["grade"] in ("output", "none")
+    assert index._candidates([[(5, 0)]], None) == {"old": [(5, 0)]}
+    assert index.claims_of(65536) == {"claimed": 0, "shared": 0}
+    assert index.db.execute("PRAGMA user_version").fetchone()[0] == INDEX_VERSION

@@ -6,6 +6,7 @@ landmark hashes, never audio.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import sqlite3
 import threading
@@ -66,7 +67,7 @@ class Index:
         if "oid" not in {r["name"] for r in self.db.execute("PRAGMA table_info(outputs)")} and self._tables() & {"outputs", "fingerprints"}:
             self._to_landmarks()
         self.db.executescript(SCHEMA)
-        if version < INDEX_VERSION:
+        if int(self.db.execute("PRAGMA user_version").fetchone()[0]) < INDEX_VERSION:
             self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
 
     def _tables(self) -> set:
@@ -74,8 +75,9 @@ class Index:
 
     def _to_landmarks(self) -> None:
         """An index from before version 2, moved in one transaction: its pieces numbered, each landmark keyed by its
-        hash with its repeats counted, its claims likewise; then the old tables go and the file is compacted."""
-        db = self.db
+        hash with its repeats counted, its claims likewise, and the version stamped in the same transaction; then the old
+        tables are gone and the file is compacted."""
+        db, log = self.db, logging.getLogger("register_service")
         db.execute("BEGIN IMMEDIATE")
         try:
             tables = self._tables()
@@ -89,6 +91,10 @@ class Index:
                     db.execute(statement)
             db.execute(f"INSERT INTO outputs ({_OUTPUT_COLUMNS}) SELECT {_OUTPUT_COLUMNS} FROM outputs_v1 ORDER BY rowid")
             if "fingerprints" in tables:
+                orphans = db.execute("SELECT COUNT(*) FROM fingerprints f LEFT JOIN outputs o ON o.generation_id = f.generation_id"
+                                     " WHERE o.oid IS NULL").fetchone()[0]
+                if orphans:
+                    log.warning("index move: %d landmark rows name no released piece and are not carried over", orphans)
                 db.execute("INSERT INTO landmarks (hash, oid, offset_ms, n) SELECT f.hash, o.oid, f.offset_ms, COUNT(*)"
                            " FROM fingerprints f JOIN outputs o ON o.generation_id = f.generation_id GROUP BY f.hash, o.oid, f.offset_ms")
                 db.execute("DROP TABLE fingerprints")
@@ -97,12 +103,20 @@ class Index:
                            " FROM claim_fingerprints GROUP BY hash, claim_id, offset_ms")
                 db.execute("DROP TABLE claim_fingerprints")
             db.execute("DROP TABLE outputs_v1")
+            # Stamped inside the move: a file is version 2 exactly when it has version 2's shape.
+            db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
             db.execute("COMMIT")
-        except BaseException:
+        except BaseException as exc:
             db.execute("ROLLBACK")
+            log.error("index move to version %d refused, nothing changed: %s", INDEX_VERSION, exc)
             raise
-        db.execute("VACUUM")
-        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        log.warning("index moved to version %d", INDEX_VERSION)
+        try:
+            db.execute("VACUUM")
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            # The move is committed; a file left at its old size is no reason not to start.
+            log.warning("index moved but not compacted: %s", exc)
 
     @property
     def db(self) -> sqlite3.Connection:

@@ -340,6 +340,15 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
 systemctl enable register.service register-backup.timer register-mirror.timer register-log-stamp.timer register-log-upgrade.timer
 systemctl start register-backup.timer register-mirror.timer register-log-stamp.timer register-log-upgrade.timer
+# The restart moves an index from before version 2 to the new layout; the copy kept here as it was is what a rollback
+# to an earlier tag restores (an earlier register would read the moved file as empty).
+INDEX_DB="$DATA/index.sqlite3"
+if [ -f "$INDEX_DB" ] && [ "$(sqlite3 -readonly "$INDEX_DB" 'PRAGMA user_version' 2>/dev/null || echo 0)" -lt 2 ]; then
+  KEPT="$INDEX_DB.before-v2-$(date -u +%Y%m%dT%H%M%SZ)"
+  sqlite3 "$INDEX_DB" ".backup '$KEPT'"
+  chown "$USER_NAME:$USER_NAME" "$KEPT"
+  echo "index: its copy before the move to version 2 is $KEPT; a rollback to an earlier tag restores it"
+fi
 # A re-run serves the tag it just put in place: a running service is restarted, not left on the old code.
 systemctl restart register.service
 systemctl restart caddy

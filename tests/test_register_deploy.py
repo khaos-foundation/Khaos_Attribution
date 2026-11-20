@@ -228,3 +228,13 @@ def test_only_the_service_begins_a_log_whatever_the_setting_says(tmp_path, monke
     shutil.rmtree(cfg["data"] / "mirror" / "log")
     on = create_app(_off(tmp_path, log_enable=True, log_dev_key=True)).state.store
     assert on.log.entries(0, 1)[0]["entry"]["kind"] == "genesis"
+
+
+def test_an_update_keeps_the_index_as_it_was_before_moving_it_to_version_two():
+    """A rollback restores that copy: an earlier register reads a moved index as empty."""
+    text = _text()
+    keep = text.index("before-v2-")
+    assert "PRAGMA user_version' 2>/dev/null || echo 0)\" -lt 2" in text and ".backup '$KEPT'" in text
+    assert keep < text.index("systemctl restart register.service")
+    readme = (Path(__file__).resolve().parents[1] / "deploy" / "README.md").read_text()
+    assert "index.sqlite3.before-v2-" in readme and "reads the moved file as empty" in readme
