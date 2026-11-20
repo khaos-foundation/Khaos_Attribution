@@ -42,7 +42,8 @@ VERDICTS = {
     "none": "No Khaos mark found. That is not proof a person made it: marks can be removed or never added.",
 }
 # The verdict in five words. DETECTED means a Khaos mark was found, never that Khaos is proven to have made the audio.
-# A mark is Khaos-shaped only when its word decodes to a derived bucket; any other AudioSeal mark is 'foreign'.
+# A mark is Khaos-shaped when its word decodes to a derived bucket or is an ID Khaos issued before buckets;
+# any other AudioSeal mark is 'foreign'.
 STATUSES = ("DETECTED", "NOT_DETECTED", "INCONCLUSIVE", "NOT_SUPPORTED", "ERROR")
 
 
@@ -118,8 +119,9 @@ def read_credentials(path: Path | str) -> dict:
 
 
 def _watermark(audio, sample_rate: int) -> dict:
-    """`audioseal`: the detector heard a mark; `detected`: and its word decodes to a Khaos bucket."""
-    from khaos_attribution.watermark import DERIVED_PAYLOADS, Watermarker, decode_codeword  # noqa: PLC0415
+    """`audioseal`: the detector heard a mark; `detected`: and its word decodes to a Khaos bucket, or is an ID
+    Khaos embedded before buckets."""
+    from khaos_attribution.watermark import DERIVED_PAYLOADS, Watermarker, decode_codeword, issued_codewords  # noqa: PLC0415
     if not Watermarker.available():
         return {"checked": False, "reason": "the watermark detector (audioseal) is not installed"}
     if not len(audio):
@@ -127,7 +129,7 @@ def _watermark(audio, sample_rate: int) -> dict:
     probability, codeword, corrected = Watermarker.detect_array(audio, sample_rate)
     heard = probability >= WATERMARK_THRESHOLD
     decoded = decode_codeword(codeword) if heard and codeword is not None else None
-    khaos = decoded is not None and decoded[0] in DERIVED_PAYLOADS
+    khaos = decoded is not None and (decoded[0] in DERIVED_PAYLOADS or decoded[1] in issued_codewords())
     return {"checked": True, "detected": khaos, "audioseal": heard, "confidence": round(float(probability), 3),
             "watermark_id": codeword if khaos else None, "corrected": bool(corrected) if khaos else False,
             "payload": decoded[0] if khaos else None}
