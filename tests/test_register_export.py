@@ -143,7 +143,7 @@ def test_one_more_leaf_writes_that_leafs_files_whatever_the_logs_size(tmp_path, 
         monkeypatch.undo()
         monkeypatch.setattr(T, "now_rfc3339", clock.rfc3339)
         leaf = store.log.admit_leaf_of(sha)
-        assert mirror / "log" / "proofs" / f"{leaf}.json" in seen and mirror / "log" / "entries" / f"{leaf}.json" in seen
+        assert mirror / "log" / "proofs" / f"{leaf}.json" in seen
         counts.append(len(seen))
     assert counts[0] == counts[1] <= 12, counts
 

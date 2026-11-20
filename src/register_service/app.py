@@ -55,7 +55,7 @@ def settings() -> dict:
             "public_url": os.environ.get("REGISTER_PUBLIC_URL", f"http://127.0.0.1:{DEFAULT_PORT}").rstrip("/")}
 
 
-PUBLIC_MIRROR_RAW = "https://raw.githubusercontent.com/guild-register/ledger/main"   # the public mirror the footer links
+PUBLIC_MIRROR_RAW = T.PUBLIC_MIRROR_RAW
 
 
 def check_dev_key_exposure(cfg: dict, host: str) -> None:
@@ -94,10 +94,6 @@ def log_started(cfg: dict) -> bool:
 def log_runs(cfg: dict) -> bool:
     """The service runs its log once it has started here, or on the owner's word that it may start; else it is off."""
     return log_started(cfg) or bool(cfg.get("log_enable", False))
-
-
-def dev_marker(cfg: dict) -> Path:
-    return cfg["key_file"].with_suffix(".dev")
 
 
 def _load_key(key_file: Path, dev: bool, what: str, setting: str) -> R.SigningKey:
@@ -959,7 +955,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         head = store.log.head(size)
         if head is None:
             raise HTTPException(404, "no head of that size")
-        # The newest size is signed again daily and after a key change; only older sizes never change.
+        # Only older sizes never change: the newest is the one the next entry (a daily heartbeat at least) passes.
         return cached(request, head, 10 if size >= store.log.size() else 31536000)
 
     @app.api_route("/log/proof/{leaf_hash}", methods=["GET", "HEAD"])

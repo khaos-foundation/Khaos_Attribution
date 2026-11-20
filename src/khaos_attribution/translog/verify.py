@@ -1,6 +1,7 @@
 """khaos-log-verify: prove an entry is in the Guild Register's log from a mirror alone, with the committed key.
     khaos-log-verify <entry.json | record.json | leaf hash | record hash> [--mirror URL-or-folder] [--key log-key.pub]
-It also checks the newest head is consistent with the last head this machine saw. The register itself is never asked.
+It also checks the newest head is consistent with the last head this machine saw. It reads static files only: the
+register's own mirror first, then the public copy; the register's API is never asked.
 Exit codes: 0 proved; 1 the proof failed (the log or mirror is not what it claims); 2 not found or bad input;
 3 no key or no mirror could be read; 4 proved, but a strike after it could be hidden (entries not yet public, or lost
 in a recovery); 5 proved, but the newest head is over 48 hours old and this copy may be frozen.
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from khaos_attribution import translog as T
 
-DEFAULT_MIRRORS = ("https://register.khaos.dev/mirror", "https://raw.githubusercontent.com/guild-register/ledger/main")
+DEFAULT_MIRRORS = ("https://register.khaos.dev/mirror", T.PUBLIC_MIRROR_RAW)
 STATE_FILE = Path.home() / ".khaos" / "log-verify-state.json"
 PROVED, FAILED, NOT_FOUND, UNREADABLE, HELD_BACK, FROZEN = 0, 1, 2, 3, 4, 5
 HELD_BACK_NOTE = "proved, but newer entries are not yet public; a strike among them would not show"
@@ -47,7 +48,10 @@ class Mirror:
             path = Path(self.where) / "log" / name
             if not path.is_file():
                 raise NotFound(name)
-            return json.loads(path.read_text(encoding="utf-8"))
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                raise Unreadable(f"{path}: {e}") from None
         import urllib.error  # noqa: PLC0415
         import urllib.request  # noqa: PLC0415
         try:
@@ -58,25 +62,6 @@ class Mirror:
                 raise NotFound(name) from None
             raise Unreadable(f"{self.where}: {e.code}") from None
         except (OSError, ValueError) as e:
-            raise Unreadable(f"{self.where}: {e}") from None
-
-    def raw(self, name: str) -> bytes:
-        """A file's exact bytes: an entry body is hashed as it is stored, never re-encoded."""
-        if self.local:
-            path = Path(self.where) / "log" / name
-            if not path.is_file():
-                raise NotFound(name)
-            return path.read_bytes()
-        import urllib.error  # noqa: PLC0415
-        import urllib.request  # noqa: PLC0415
-        try:
-            with urllib.request.urlopen(f"{self.where}/log/{name}", timeout=self.timeout) as r:
-                return r.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise NotFound(name) from None
-            raise Unreadable(f"{self.where}: {e.code}") from None
-        except OSError as e:
             raise Unreadable(f"{self.where}: {e}") from None
 
 

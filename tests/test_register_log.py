@@ -276,7 +276,7 @@ def test_the_verify_page_runs_the_browser_verifier_from_its_own_file(register):
     assert '<script src="/log/verify.js" defer></script>' in page and "<script>" not in page
     assert "No log key is committed" in page or "Pinned log key" in page
     js = http.get("/log/verify.js")
-    assert js.status_code == 200 and "Ed25519" in js.text and "verifyConsistency" in js.text
+    assert js.status_code == 200 and "Ed25519" in js.text and "verifyInclusion" in js.text
 
 
 def test_a_new_log_key_signs_a_heartbeat_over_the_whole_tree_and_proves_every_earlier_entry(register, tmp_path):
@@ -284,7 +284,7 @@ def test_a_new_log_key_signs_a_heartbeat_over_the_whole_tree_and_proves_every_ea
     app, store, http = register
     _, _, signed, _ = _publish(register)
     size = store.log.size()
-    dev_head, before = store.log.head(), len(store.log.all_heads())
+    dev_head, before = store.log.head(), len(store.log.heads())
     (app.state.cfg["data"] / "log-key.pem").unlink()
     (app.state.cfg["data"] / "log-key.dev").unlink()
     guild = R.SigningKey.load_or_create(app.state.cfg["data"] / "log-key.pem")
@@ -292,7 +292,7 @@ def test_a_new_log_key_signs_a_heartbeat_over_the_whole_tree_and_proves_every_ea
     head = restarted.log.head()
     assert head["key_id"] == guild.key_id and head["tree_size"] == size + 1
     assert restarted.log.tree().root(size).hex() == dev_head["root_sha256"]
-    assert len(restarted.log.all_heads()) == before + 1 and restarted.log.head(1)["key_id"] == dev_head["key_id"]
+    assert len(restarted.log.heads()) == before + 1 and restarted.log.head(1)["key_id"] == dev_head["key_id"]
     assert restarted.log.problems(guild.public_pem()) == []
     (tmp_path / "guild.pub").write_text(guild.public_pem(), encoding="ascii")
     assert V.main([signed["record_sha256"], "--mirror", str(_mirror(app)), "--key", str(tmp_path / "guild.pub"),
