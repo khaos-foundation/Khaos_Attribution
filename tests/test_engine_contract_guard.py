@@ -1,5 +1,7 @@
 """An engine environment holding another contract than this room's is refused in a sentence where its process
-would start, once per interpreter for the life of the process; the running interpreter is never checked."""
+would start; a refusal is read again at every start, a pass is kept until the environment's contract is installed
+again, and the running interpreter is never checked."""
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +28,7 @@ def fingerprints(monkeypatch):
         return seen.get(None if python is None else str(python))
 
     monkeypatch.setattr(CG, "_fingerprint", fake)
-    monkeypatch.setattr(CG, "_CHECKED", {})
+    monkeypatch.setattr(CG, "_PASSED", {})
     return seen, calls
 
 
@@ -41,10 +43,39 @@ def test_a_stale_environment_is_refused_with_the_sentence_and_a_current_one_is_c
     assert CG.refusal(current, engine="mimetic-a0", engine_id="mimetic-a0") is None
     n = len(calls)
     assert CG.refusal(current, engine="mimetic-a0", engine_id="mimetic-a0") is None
+    assert len(calls) == n, "a pass is remembered for that interpreter"
     assert CG.refusal(stale, engine="Stable Audio 3", engine_id="stable-audio-3") == why
-    assert len(calls) == n, "a second call reads the answer remembered for that interpreter"
+    assert len(calls) > n, "a refusal is read again"
     with pytest.raises(TrainingUnavailable, match="run the installer with --engines stable-audio-3"):
         CG.require(stale, engine="Stable Audio 3", engine_id="stable-audio-3", error=TrainingUnavailable)
+
+
+def test_a_repaired_environment_is_accepted_without_restarting_the_room(tmp_path, fingerprints):
+    seen, _calls = fingerprints
+    python = tmp_path / "engine" / "python"
+    seen[str(python)] = "0.41.0 fedcba98"
+    assert CG.refusal(python, engine="x", engine_id="x")
+    seen[str(python)] = OURS
+    assert CG.refusal(python, engine="x", engine_id="x") is None
+
+
+def test_an_environment_whose_contract_is_installed_again_is_checked_again(tmp_path, fingerprints):
+    """A pass holds while the environment's khaos_attribution dist-info is unchanged; a refresh in place reads anew."""
+    seen, calls = fingerprints
+    venv = tmp_path / "venv"
+    python = venv / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    dist = venv / "lib" / "python3.11" / "site-packages" / "khaos_attribution-0.57.0.dist-info"
+    dist.mkdir(parents=True)
+    os.utime(dist, ns=(1_000_000_000, 1_000_000_000))
+    seen[str(python)] = OURS
+    assert CG.refusal(python, engine="x", engine_id="x") is None
+    n = len(calls)
+    assert CG.refusal(python, engine="x", engine_id="x") is None and len(calls) == n
+    os.utime(dist, ns=(2_000_000_000, 2_000_000_000))
+    seen[str(python)] = "0.41.0 fedcba98"
+    assert "holds contract 0.41.0" in CG.refusal(python, engine="x", engine_id="x")
 
 
 def test_other_code_at_the_same_version_and_no_contract_at_all_are_said_so(tmp_path, fingerprints):
