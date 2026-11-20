@@ -14,7 +14,7 @@ ALLOWED_MISSING = ("torch", "torchaudio", "librosa", "huggingface_hub", "hugging
 # Every other reason, word for word: a tool or a file a machine may lack, and the tests of another platform.
 ALLOWED_REASONS = ("torchaudio aligner not installed", "ffmpeg unavailable", "FFmpeg is not installed", "no ffmpeg",
                    "the base model's config is not in this machine's cache", "no ACE-Step checkout beside this one",
-                   POSIX_ONLY, LINUX_ONLY)
+                   "no Python 3.11 on this machine to load the contract under", POSIX_ONLY, LINUX_ONLY)
 # gate.sh torch needs these all; only the register's own package may be missing, as the pytest gate runs its test.
 TORCH_RUN_NEEDS = ("torch", "torchaudio", "librosa", "huggingface_hub", "huggingface_hub.constants", "soundfile")
 if os.environ.get("KHAOS_TORCH_RUN") == "1":
