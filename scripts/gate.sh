@@ -72,7 +72,9 @@ QUICK="$(git rev-parse --absolute-git-dir)/khaos-gate.quick"
 OWED="$QUICK.owed"
 # The pins this branch turned red ("<holder> <test id>"), and those a run had to skip ("<holder> <why>"), one pair of
 # files per branch: each later stop on it names them, and only a run of them settles them.
-PINS_RED="$QUICK.pins.$( { git symbolic-ref --short -q HEAD || git rev-parse --short HEAD; } | tr -d '\n' | tr -c 'A-Za-z0-9._-' '_')"
+# A branch is named by its readable name and a hash of it, so a/b and a_b keep apart; a detached HEAD by its commit.
+PINS_BRANCH=$(git symbolic-ref --short -q HEAD) || PINS_BRANCH="HEAD $(git rev-parse --short HEAD 2> /dev/null)"
+PINS_RED="$QUICK.pins.$(printf '%s' "$PINS_BRANCH" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_').$(printf '%s' "$PINS_BRANCH" | git hash-object --stdin | cut -c1-8)"
 PINS_OWED="$PINS_RED.owed"
 # The gate that runs every test file: only a green run of it, or of --changed, settles what is owed.
 SUITE_GATE=pytest
@@ -252,6 +254,12 @@ record_set() {
   { grep -v "^$holder " "$file" 2> /dev/null; for item in "$@"; do printf '%s %s\n' "$holder" "$item"; done; } > "$file.tmp"
   mv "$file.tmp" "$file"
   [ -s "$file" ] || rm -f "$file"
+  # The branch a record belongs to, so the records of a branch that is gone can be found and cleared.
+  if [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ]; then
+    printf '%s\n' "$PINS_BRANCH" > "$PINS_RED.branch"
+  else
+    rm -f "$PINS_RED.branch"
+  fi
 }
 
 # The record $1's entries for the holder $2, one per line.
@@ -261,7 +269,17 @@ record_get() {
 
 # Clears the records of a holder no longer beside this checkout, or holding no pin on it, saying so once.
 pins_prune() {
-  local holders holder
+  local holders holder named branch
+  # Records of a branch that is gone, or of a detached HEAD left more than three days ago, go with it.
+  for named in "$QUICK".pins.*.branch; do
+    [ -f "$named" ] && [ "$named" != "$PINS_RED.branch" ] || continue
+    branch=$(cat "$named")
+    case "$branch" in
+      "HEAD "*) [ -n "$(find "$named" -mtime +3 2> /dev/null)" ] || continue ;;
+      *) git show-ref --verify -q "refs/heads/$branch" && continue ;;
+    esac
+    rm -f "${named%.branch}" "${named%.branch}.owed" "$named"
+  done
   [ -s "$PINS_RED" ] || [ -s "$PINS_OWED" ] || return 0
   holders=$(pin_holders | while IFS= read -r holder; do basename "$holder"; done)
   for holder in $(cut -d' ' -f1 "$PINS_RED" "$PINS_OWED" 2> /dev/null | sort -u); do
@@ -353,6 +371,7 @@ run_gates() {
       summary=$(grep -E '([0-9]+ passed|^Results:)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
       echo "PASS $g ($(( $(date +%s) - start ))s)${summary:+: $summary}"
       grep -E '^[[:space:]]*SKIP:' "$log" | head -8 | sed -E 's/^[[:space:]]*SKIP: */  skipped inside: /'
+      [ "$g" = pins ] && grep -E '^SKIP pins ' "$log" | head -8 | sed 's/^/  /'
     elif [ "$g" = pins ] && [ "$rc" -eq 3 ]; then
       echo "SKIP pins ($(( $(date +%s) - start ))s): a pin held on this repository did not run, or was red before this change"
       grep -E '^SKIP pins ' "$log" | head -8 | sed 's/^/  /'
