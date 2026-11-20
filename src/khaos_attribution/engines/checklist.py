@@ -17,8 +17,12 @@ SLOTS = ("train", "render", "measure")
 RENDER_NAMES = ("Renderer", "RenderRequest", "RenderResult", "RenderCancelled", "RenderFailed")
 RENDERER_METHODS = ("load", "resolve_variant", "apply_adapter", "generate")
 TRAIN_NAMES = ("TrainingUnavailable", "training_api", "adapter_kwargs", "preprocess_pairs", "open_module",
-               "adapter_file_in", "open_session", "pair_files")
-MEASURE_NAMES = ("memory_plan", "scorer_need_gb", "enable_checkpointing", "flush_accelerator")
+               "adapter_file_in", "open_session", "pair_files", "Session")
+# What a room does with the session open_session gives it.
+SESSION_METHODS = ("install_hooks", "train", "heldout_evaluator", "save_final")
+# The memory plan and the features the rooms take: an index, an output's feature, its losses, the adapter's size.
+MEASURE_NAMES = ("memory_plan", "scorer_need_gb", "enable_checkpointing", "flush_accelerator", "index_rows",
+                 "output_feature", "paired_loss", "output_loss", "parameter_count")
 LIVE_SECONDS = 5.0
 
 
@@ -94,12 +98,19 @@ def check(engine_id: str, workdir: Path | str | None = None, *, live: bool = Fal
     if renderer_cls is not None:
         missing = [m for m in RENDERER_METHODS if not callable(getattr(renderer_cls, m, None))]
         out.add("render.Renderer.methods", not missing, f"missing {missing}" if missing else ", ".join(RENDERER_METHODS))
+    session_cls = getattr(slots["train"], "Session", None)
+    if session_cls is not None:
+        missing = [m for m in SESSION_METHODS if not callable(getattr(session_cls, m, None))]
+        out.add("train.Session.methods", not missing, f"missing {missing}" if missing else ", ".join(SESSION_METHODS))
     out.add("render.words", getattr(slots["render"], "RenderRequest", None) is RenderRequest
             and getattr(slots["render"], "RenderResult", None) is RenderResult,
             "the slot speaks the socket's RenderRequest and RenderResult")
-    measures = any("measure" in v for v in d.platforms.values())
+    measured_on = [platform for platform, offered in d.platforms.items() if "measure" in offered]
+    measures = bool(measured_on)
+    # A plan is asked where the descriptor says the engine measures; an engine that measures nowhere is asked on cpu.
+    probe = "cpu" if not measured_on or "cpu" in measured_on else measured_on[0]
     try:
-        plan = slots["measure"].memory_plan("cpu", 30.0, total_gb=1e6, env={})
+        plan = slots["measure"].memory_plan(probe, 30.0, total_gb=1e6, env={})
         if measures:
             ok = isinstance(plan, dict) and plan.get("fits") == "resident" and "refusal" in plan
         else:
