@@ -341,3 +341,96 @@ def test_the_mlx_driver_renders_on_the_base_checkpoint_with_euler_and_keeps_the_
                paste_back=(np.full((1, 2, 4), 9.0, np.float32), np.array([[[1, 0, 0, 1]]], np.float32)))
     assert np.allclose(x[0, 0], [9, -2, -2, 9]), "two Euler steps of dt -0.5 at v 2, then the kept frames pasted back"
     assert steps == [(1, 2), (2, 2)] and seen == [0, 1]
+
+
+def test_another_take_whose_worker_wrote_nothing_is_refused(engine, source, tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "run_worker", lambda *a, **kw: {"seed": 1, "sample_rate": 44100})
+    with pytest.raises(RenderFailed, match="wrote no audio"):
+        engine.generate(RenderRequest(prompt="p", duration_seconds=30, mode="retake", source_audio=source,
+                                      retake_seed=4), None, tmp_path / "take.wav")
+
+
+def test_the_mlx_script_writes_beside_the_output_and_only_a_finished_render_takes_its_name(monkeypatch, tmp_path):
+    out = tmp_path / "o.wav"
+    base = {"prompt": "p", "seconds": 5.0, "seed": 1, "steps": 8, "cfg_scale": 1.0, "out": str(out), "model": "medium"}
+
+    def dies(cmd, cwd):
+        written = cmd[cmd.index("--out") + 1]
+        assert written != str(out), "the script never writes at the final name"
+        open(written, "wb").write(b"half")
+        return type("D", (), {"returncode": 1, "stderr": "killed"})()
+    monkeypatch.setattr(WK, "_run_forwarding_stop", dies)
+    assert "error" in WK.render_mlx(dict(base))
+    assert not out.exists() and not list(tmp_path.glob("*.part*"))
+
+    def works(cmd, cwd):
+        written = cmd[cmd.index("--out") + 1]
+        sf.write(written, np.zeros((441, 2), np.float32), SR, subtype="PCM_16")
+        return type("D", (), {"returncode": 0, "stderr": ""})()
+    monkeypatch.setattr(WK, "_run_forwarding_stop", works)
+    assert WK.render_mlx(dict(base))["sample_rate"] == SR and out.is_file() and not list(tmp_path.glob("*.part*"))
+
+
+def test_a_part_left_by_a_killed_render_is_never_taken_for_the_next_ones_audio(monkeypatch, tmp_path):
+    out = tmp_path / "o.wav"
+    WK.part_path(out).write_bytes(b"left by a render killed past its grace")
+    seen = []
+
+    def writes_nothing(cmd, cwd):
+        seen.append(WK.part_path(out).exists())
+        return type("D", (), {"returncode": 0, "stderr": ""})()
+    monkeypatch.setattr(WK, "_run_forwarding_stop", writes_nothing)
+    reply = WK.render_mlx({"prompt": "p", "seconds": 5.0, "seed": 1, "steps": 8, "cfg_scale": 1.0, "out": str(out),
+                           "model": "medium"})
+    assert seen == [False], "the stale part is gone before the script starts"
+    assert "wrote no audio" in reply["error"] and not out.exists()
+
+
+FAKE_STABILITY = {
+    "mlx/__init__.py": "",
+    "mlx/core.py": "",
+    "models/__init__.py": "",
+    "models/defs/__init__.py": "",
+    "models/defs/sa3_pipeline.py":
+        "def sample_flow_pingpong(model_fn, x, sigmas, seed=0, paste_back=None, on_step=None, before_step=None):\n"
+        "    for i in range(3):\n        if on_step is not None:\n            on_step(i + 1, 3)\n    return x\n",
+    "scripts/sa3_mlx.py":
+        "if __name__ == '__main__':\n    import models.defs.sa3_pipeline as P\n"
+        "    P.sample_flow_pingpong(None, 0, None, on_step=lambda i, n: print(f'own {i}/{n}', flush=True))\n",
+}
+
+
+def test_the_mlx_driver_puts_its_step_reports_round_the_scripts_sampler(tmp_path):
+    """main() wraps the pipeline's sampler before the script runs, so every render's steps reach the worker."""
+    import subprocess
+    for rel, text in FAKE_STABILITY.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    done = subprocess.run([sys.executable, M.__file__, str(tmp_path / "scripts" / "sa3_mlx.py"), "--prompt", "p"],
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    rows = [json.loads(line[len("khaos-row "):]) for line in done.stdout.splitlines() if line.startswith("khaos-row ")]
+    assert rows == [{"step": 1, "of": 3}, {"step": 2, "of": 3}, {"step": 3, "of": 3}]
+    assert "own 3/3" in done.stdout, "the script's own progress hook still runs"
+
+
+def test_the_mlx_driver_reports_each_step_and_keeps_the_scripts_own_progress():
+    seen, script = [], []
+    sampler = M.reporting_sampler(lambda model_fn, x, sigmas, seed=0, paste_back=None, on_step=None, before_step=None:
+                                  [on_step(i + 1, 3) for i in range(3)] and x, emit=seen.append)
+    assert sampler(None, "x", None, on_step=lambda i, n: script.append(i)) == "x"
+    assert seen == [{"step": 1, "of": 3}, {"step": 2, "of": 3}, {"step": 3, "of": 3}] and script == [1, 2, 3]
+
+
+def test_the_mlx_worker_passes_the_drivers_rows_on_as_they_come(tmp_path, capsys):
+    """Rows reach the worker's stdout as they come, the rest is kept, and the stop handler is put back after."""
+    import signal
+    driver = tmp_path / "driver.py"
+    driver.write_text("import json, sys\nfor i in range(2):\n    print('khaos-row ' + json.dumps({'step': i + 1, 'of': 2}), flush=True)\n"
+                      "print('the script talks')\nsys.stderr.write('a warning\\n')\n")
+    before = signal.getsignal(signal.SIGTERM)
+    done = WK._run_forwarding_stop([sys.executable, str(driver)], cwd=str(tmp_path))
+    out = capsys.readouterr().out
+    assert done.returncode == 0 and "a warning" in done.stderr and "the script talks" in done.stdout
+    assert out.count("khaos-row ") == 2 and "the script talks" not in out
+    assert signal.getsignal(signal.SIGTERM) is before

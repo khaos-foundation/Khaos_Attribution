@@ -99,6 +99,27 @@ def masked_sampler(sample, regions: list, sigma_max: float, state: dict, mx, np,
     return sampler
 
 
+ROW_PREFIX = "khaos-row "
+
+
+def _print_row(row: dict) -> None:
+    import json  # noqa: PLC0415
+    sys.stdout.write(ROW_PREFIX + json.dumps(row) + "\n")
+    sys.stdout.flush()
+
+
+def reporting_sampler(sample, emit=_print_row):
+    """The script's sampler with each step also reported as a row the worker passes on; the script's own progress
+    hook still runs."""
+    def sampler(model_fn, x, sigmas, seed=0, paste_back=None, on_step=None, before_step=None):
+        def step(i, total):
+            emit({"step": int(i), "of": int(total)})
+            if on_step is not None:
+                on_step(i, total)
+        return sample(model_fn, x, sigmas, seed=seed, paste_back=paste_back, on_step=step, before_step=before_step)
+    return sampler
+
+
 def masked_call(call, state: dict, mx):
     """The DiT's call with the one-range conditioning the script built replaced by the every-part one."""
     def wrapped(self, x, t, cross_attn_cond_raw, global_cond_raw, local_add_cond=None):
@@ -134,6 +155,7 @@ def main() -> int:
                                                        np, script_module.SAMPLE_RATE, script_module.SAMPLES_PER_LATENT)
         dit_cls = importlib.import_module(script_module.DIT_CHOICES[dit]["loader"]).DiT
         dit_cls.__call__ = masked_call(dit_cls.__call__, state, mx)
+    pipeline.sample_flow_pingpong = reporting_sampler(pipeline.sample_flow_pingpong)
     sys.argv = [str(script), *args]
     runpy.run_path(str(script), run_name="__main__")
     return 0

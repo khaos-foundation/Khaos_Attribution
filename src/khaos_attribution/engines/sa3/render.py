@@ -22,6 +22,7 @@ from khaos_attribution.engines.worker_process import stop_tree  # noqa: F401 —
 from khaos_attribution.engines.render import RenderCancelled, RenderFailed, RenderRequest, RenderResult
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3 import rework as RW
+from khaos_attribution.engines.sa3.worker import part_path
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +139,9 @@ class Renderer:
             self.apply_adapter(adapter_path, req.adapter_scale, req.variant)
         if req.lyrics and not req.instrumental:
             raise RenderFailed("Stable Audio 3 cannot sing: a sung request must not reach this engine")
-        out = Path(out_path or Path.cwd() / "sa3_render.wav").resolve()
+        if out_path is None:
+            raise RenderFailed("a Stable Audio 3 render needs the path to write its audio to; none was given")
+        out = Path(out_path).resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
         if should_stop is not None and should_stop():
             raise RenderCancelled()
@@ -160,9 +163,18 @@ class Renderer:
             shutil.rmtree(work, ignore_errors=True)
 
     def _render(self, request: dict, on_progress, should_stop, done: int, total: int) -> dict:
+        """One worker pass as part ``done`` of ``total``, its sampling steps reported as they are taken."""
+        def step(row: dict) -> None:
+            if on_progress is not None and isinstance(row.get("step"), int) and row.get("of"):
+                on_progress(done + min(row["step"] / row["of"], 1.0), total)
         if on_progress is not None:
             on_progress(done, total)
-        reply = run_worker(self.root, self.runtime, request, should_stop=should_stop)
+        try:
+            reply = run_worker(self.root, self.runtime, request, should_stop=should_stop, on_step=step)
+        except (RenderCancelled, RenderFailed):
+            # A worker stopped past its grace is killed before it can tidy up, so its unfinished audio goes here.
+            part_path(request["out"]).unlink(missing_ok=True)
+            raise
         if on_progress is not None:
             on_progress(done + 1, total)
         return reply
@@ -225,6 +237,8 @@ class Renderer:
                                       source_audio=str(self._readable(Path(req.source_audio).resolve(), work)),
                                       noise_level=level)
         reply = self._render(request, on_progress, should_stop, 0, 1)
+        if not out.is_file():
+            raise RenderFailed(f"the Stable Audio 3 worker wrote no audio at {out}")
         request["seconds"] = n / sr
         facts = {"seed": seed, "mode": mode, "noise_level": level, "source_duration": n / sr,
                  **({"retake_variance": req.retake_variance} if mode == "retake" else {"cover_strength": req.cover_strength})}
@@ -327,14 +341,15 @@ REWORKS = {"retake": Renderer._whole, "audio2audio": Renderer._whole, "repaint":
            "extend": Renderer._extend}
 
 
-def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, timeout=W.DEFAULT) -> dict:
-    """One worker process through the contract's shared loop; a stop request kills it and nothing is kept."""
+def run_worker(root: Path, runtime: str, request: dict, *, should_stop=None, timeout=W.DEFAULT, on_step=None) -> dict:
+    """One worker process through the contract's shared loop, its step rows handed to ``on_step`` as they come; a
+    stop request kills it and nothing is kept."""
     from khaos_attribution.engines import contract_guard  # noqa: PLC0415
     python = python_for(root, runtime)
     contract_guard.require(python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=RenderFailed)
     try:
-        return W.run(python, WORKER, request, cwd=root, env=W.engine_env(root), label="Stable Audio 3",
-                     should_stop=should_stop, timeout=timeout, required="seed")
+        return W.stream(python, WORKER, request, cwd=root, env=W.engine_env(root), label="Stable Audio 3",
+                        on_row=on_step, should_stop=should_stop, timeout=timeout, required=("seed",))
     except W.WorkerCancelled:
         raise RenderCancelled() from None
     except W.WorkerFailed as exc:
