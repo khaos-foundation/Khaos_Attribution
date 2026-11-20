@@ -20,6 +20,10 @@ from tests.test_register_export import _Died, _key_doc, _publish, _store, clock 
 from tests.test_register_log import run_page_verifier  # noqa: E402
 
 
+# Every removal in this file, the code's and the test's own, stays inside the test's folder.
+pytestmark = pytest.mark.usefixtures("confined")
+
+
 @pytest.fixture(autouse=True)
 def four(monkeypatch):
     monkeypatch.setattr(T, "TILE", 4)
@@ -341,7 +345,8 @@ def _victim(tmp_path) -> Path:
     return victim
 
 
-@pytest.mark.parametrize("hostile", ["victim", "../../victim", "/", 8, "4/../../.."])
+# Every hostile width names a place inside the test's own folder: a regression may only ever touch that.
+@pytest.mark.parametrize("hostile", ["victim", "../../victim", 8, "4/../.."])
 def test_a_mirror_never_names_a_path_the_cache_touches(tmp_path, clock, hostile):
     """A tail that turns hostile mid-read is unreadable, and only the cache's own tiles of the width first read go."""
     store = _store(tmp_path)
@@ -361,7 +366,7 @@ def test_a_mirror_never_names_a_path_the_cache_touches(tmp_path, clock, hostile)
     assert sorted(p.name for p in (cache / key_id).iterdir()) in ([], ["4"])
 
 
-@pytest.mark.parametrize("key_id", ["../../victim", "/tmp", "ABCDEF0123456789", "0123", ""])
+@pytest.mark.parametrize("key_id", ["../../victim", "../victim/keep", "ABCDEF0123456789", "0123", ""])
 def test_a_key_id_that_is_not_one_is_refused_before_any_path_is_made(tmp_path, key_id):
     with pytest.raises(ValueError):
         V.CachedMirror(V.Mirror(str(tmp_path)), tmp_path / "cache", key_id)
@@ -424,3 +429,41 @@ def test_moving_from_the_old_layout_with_a_withhold_verifies_at_every_stop(tmp_p
     index = store.log.leaf(leaf)["idx"]
     for where in (mirror, public):
         assert LF.bodies(where / "log")[index] is None and not (where / "log" / "bodies.json").exists()
+
+
+def test_mirrors_that_all_fail_end_unreadable_in_bounded_time_and_memory(tmp_path, clock):
+    """Each mirror is asked once; when every one lacks a tile or holds a bad one, the command ends, quickly and small."""
+    import faulthandler
+    import resource
+    import time
+    store = _store(tmp_path)
+    mirror, public = tmp_path / "mirror", tmp_path / "mirror-public"
+    shas = [_publish(store, f"model-{i}") for i in range(9)]
+    _export(store, clock, mirror, public)
+    broken = []
+    for n, harm in enumerate(("lack", "bad", "lack")):
+        where = tmp_path / f"broken-{n}"
+        shutil.copytree(mirror, where)
+        if harm == "lack":
+            (where / "log" / "hashes" / "1.json").unlink()
+        else:
+            (where / "log" / "hashes" / "0.json").write_text(json.dumps({"tile": 7, "leaves": []}))
+        broken.append(where)
+    pem_file = tmp_path / "log.pub"
+    pem_file.write_text(store.log.signer.public_pem())
+    asked = []
+    real = V.Mirror.get
+    faulthandler.dump_traceback_later(60, exit=True)
+    started, before = time.monotonic(), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(V.Mirror, "get", lambda self, name: (asked.append((self.where, name)), real(self, name))[1])
+            args = [store.log.admit_leaf_of(shas[0])] + [x for w in broken for x in ("--mirror", str(w))]
+            assert V.main(args + ["--key", str(pem_file), "--state", "none"]) == V.UNREADABLE
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+    assert time.monotonic() - started < 30
+    import sys
+    gigabyte = 1 << 30 if sys.platform == "darwin" else 1 << 20   # ru_maxrss is bytes on macOS, kilobytes on Linux
+    assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before < gigabyte
+    assert len(asked) < 40 and len({w for w, _ in asked}) == 3

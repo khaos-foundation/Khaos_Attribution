@@ -20,7 +20,7 @@ from khaos_attribution.translog import verify as V  # noqa: E402
 from register_service.store import Store, now_utc  # noqa: E402
 from tests import log_files as LF  # noqa: E402
 
-pytestmark = pytest.mark.usefixtures("tile_widths")
+pytestmark = pytest.mark.usefixtures("tile_widths", "confined")
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 

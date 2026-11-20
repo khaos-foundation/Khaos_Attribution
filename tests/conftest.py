@@ -2,6 +2,8 @@
 A test that does not run to a verdict, skipped or expected to fail, fails the run unless its reason is named here."""
 import os
 import re
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -74,3 +76,30 @@ def pytest_terminal_summary(terminalreporter):
 def pytest_sessionfinish(session, exitstatus):
     if _unexpected and exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture
+def confined(tmp_path, monkeypatch):
+    """No removal reaches outside this test's own folder, whatever the code under test asks: such a request fails
+    the test and removes nothing. A hostile-path test must hold even against code that does not yet resist it."""
+    import os
+    root, rmtree, unlink = tmp_path.resolve(), shutil.rmtree, os.unlink
+
+    def inside(path) -> bool:
+        try:
+            return Path(os.path.abspath(path)).resolve().is_relative_to(root)
+        except (OSError, ValueError):
+            return False
+
+    def guarded_rmtree(path, *a, **k):
+        if not inside(path):
+            raise AssertionError(f"a removal outside the test's folder was asked for: {path}")
+        return rmtree(path, *a, **k)
+
+    def guarded_unlink(path, *a, **k):
+        if k.get("dir_fd") is None and not inside(path):
+            raise AssertionError(f"a removal outside the test's folder was asked for: {path}")
+        return unlink(path, *a, **k)
+    monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
+    monkeypatch.setattr(os, "unlink", guarded_unlink)
+    return root
