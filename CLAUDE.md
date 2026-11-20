@@ -10,7 +10,6 @@ It also holds the Guild Register's service (`src/register_service/`, its deploy 
 
 - The live Register is changed only by the owner's deploy. Code and scripts here are changed freely; nothing here runs against the live server.
 - Its ledger and its signed log are permanent and public: a row or an entry is never edited or removed. A withhold hides a body from view, never a leaf; a strike is a new entry.
-- Whatever the register writes into the ledger or the public mirror stays in public git history for good: personal words go only where a withhold reaches them.
 
 ## Comments and docstrings (house rule)
 
