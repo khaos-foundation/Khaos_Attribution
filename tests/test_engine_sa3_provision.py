@@ -12,39 +12,8 @@ from khaos_attribution.engines import environment as EN
 from khaos_attribution.engines.sa3 import provision as P
 
 
-@pytest.fixture(autouse=True)
-def confined(tmp_path, monkeypatch):
-    """Removal, move and replace raise for any path outside tmp_path, so these tests cannot reach the machine even
-    against broken provisioning code; an rmtree's own relative steps (dir_fd) are inside the path it was given."""
-    import os
-    import shutil
-    root = os.path.realpath(tmp_path)
-
-    def inside(p) -> bool:
-        real = os.path.realpath(os.fspath(p))
-        return real == root or real.startswith(root + os.sep)
-
-    def guard(fn, n):
-        def wrapped(*a, **k):
-            if k.get("dir_fd") is None and k.get("src_dir_fd") is None:
-                for p in a[:n]:
-                    if not inside(p):
-                        raise PermissionError(f"confined: {fn.__name__} outside tmp_path: {p}")
-            return fn(*a, **k)
-        return wrapped
-
-    monkeypatch.setattr(shutil, "rmtree", guard(shutil.rmtree, 1))
-    monkeypatch.setattr(shutil, "move", guard(shutil.move, 2))
-    for name, n in (("unlink", 1), ("remove", 1), ("rmdir", 1), ("rename", 2), ("replace", 2)):
-        monkeypatch.setattr(os, name, guard(getattr(os, name), n))
-
-
-def test_the_confinement_refuses_a_path_outside_tmp_path(tmp_path):
-    import shutil
-    with pytest.raises(PermissionError, match="confined"):
-        shutil.rmtree(tmp_path.parent / "not-this-tests")
-    (tmp_path / "x").mkdir()
-    shutil.rmtree(tmp_path / "x")
+# Provisioning moves and removes checkouts: nothing here may reach outside the test's folder.
+pytestmark = pytest.mark.usefixtures("confined")
 
 
 def _patch(monkeypatch, name, fake):
