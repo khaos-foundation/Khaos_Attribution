@@ -134,7 +134,7 @@ was made.
 | `timestamp` | When the output was generated, in ISO 8601 date-time form, e.g. `2026-08-10T12:00:00Z`. |
 | `base_model` | The name and version of the underlying base model the adapter was applied to. |
 | `base_model_licence` | The licence the base model is distributed under, so downstream users know what terms apply. |
-| `watermark_id` | *(optional)* A whole number between 0 and 65535 embedded in the audio watermark (AudioSeal): the codeword of the model's bucket, derived from its machine key and run id and written in its model card. Many models share a bucket, so the mark narrows a check to a few models and never names one; the Guild Register's serial names the model. An output that cannot be marked is refused and nothing is stored. |
+| `watermark_id` | *(optional)* A whole number between 0 and 65535 embedded in the audio watermark (AudioSeal): the codeword of the model's bucket, derived from its machine key and run id and written in its model card. Many models share a bucket, so the mark narrows a check to a few models and never names one; the Guild Register's serial names the model. `null` when the serving machine could not mark the output. |
 | `generation_mode` | *(optional, since v0.2.0)* How the output was produced: `text2music` for a fresh generation (the default when omitted), or `retake`, `repaint`, `extend`, `audio2audio` for outputs derived from an earlier one. |
 | `source_generation_id` | *(optional, since v0.2.0)* When the output was derived from an earlier generation, the generation ID of that source output, so lineage can be traced through the registry. `null` (or omitted) for fresh generations. |
 

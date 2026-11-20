@@ -8,8 +8,8 @@ It also holds the Guild Register's service (`src/register_service/`, its deploy 
 
 ## The Register (house rule)
 
-- The live Register is changed only by the owner's deploy. Code and scripts here are changed freely; nothing here runs against the live server.
-- Its ledger and its signed log are permanent and public: a row or an entry is never edited or removed. A withhold hides a body from view, never a leaf; a strike is a new entry.
+- The service's code and configuration on the live server change only by the owner's deploy.
+- Its ledger and its signed log are permanent and public: a row or an entry is never edited or removed. A withhold hides a body from view, never a leaf; a strike is a new `revoke` entry, and an account's withdrawal a new `revoke` or, for a model already struck, a new `withdraw`.
 
 ## Comments and docstrings (house rule)
 

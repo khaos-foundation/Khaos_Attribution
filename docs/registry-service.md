@@ -27,9 +27,10 @@ key id is the first 16 hex characters of the sha256 of its raw public key. The i
 Each door takes only the roles in its row; any other enrolled machine gets 403. Every signed call carries the
 machine's signature over the canonical JSON body (sorted keys, no spaces) in `X-Machine-Key-Id` and
 `X-Machine-Signature`; the register knows the machine and checks the signature over the raw bytes before it parses
-the body. A withdrawal, a served report, a release or its removal, a claim and a log entry also carry a nonce: the
-same body again gets its first answer back, another body under a used nonce is refused as a replay. An enrolment, a
-record (the same record again gets the same serial) and a claim check take none.
+the body. An enrolment names its key in its body, so a body of at most 16 kB is parsed first and its signature
+checked against the key it names. A withdrawal, a served report, a release or its removal, a claim and a log entry
+also carry a nonce: the same body again gets its first answer back, another body under a used nonce is refused as a
+replay. An enrolment, a record (the same record again gets the same serial) and a claim check take none.
 
 ## Routes
 
