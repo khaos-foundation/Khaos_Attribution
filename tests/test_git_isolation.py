@@ -6,8 +6,6 @@ import pytest
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="no git")
-def test_git_reads_none_of_this_machines_settings():
-    out = subprocess.run(["git", "config", "--global", "--list"], capture_output=True, text=True)
-    assert out.stdout == ""
-    out = subprocess.run(["git", "config", "--system", "--list"], capture_output=True, text=True)
-    assert out.stdout == ""
+def test_git_reads_none_of_this_machines_settings(tmp_path):
+    out = subprocess.run(["git", "config", "--list", "--show-origin"], cwd=tmp_path, capture_output=True, text=True)
+    assert out.returncode == 0 and out.stdout == "", out.stdout + out.stderr

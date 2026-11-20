@@ -26,7 +26,7 @@ def test_the_version_is_the_literal_and_the_literal_is_pyprojects():
 
 
 def test_the_lock_records_the_version_pyproject_names():
-    """uv.lock is relocked with every version, so a dependency added beside it is installed where the lock is used."""
+    """uv.lock is relocked with every version; CI's `uv sync --locked` refuses any other disagreement with pyproject."""
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
     entry = re.search(r'^\[\[package\]\]\nname = "khaos-attribution"\nversion = "([^"]+)"', lock, re.M)
     assert entry and entry.group(1) == _pyproject_version(), "run `uv lock` after setting the version"

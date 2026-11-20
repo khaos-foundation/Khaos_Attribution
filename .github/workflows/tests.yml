@@ -19,8 +19,9 @@ jobs:
         with:
           version: "0.11.32"
           python-version: "3.12"
-      # A fresh runner venv from the lock as committed; tests/test_version.py holds the lock to pyproject's version.
+      # A fresh runner venv from the lock, which must agree with pyproject.toml: a change of dependencies without a
+      # relock fails here (--locked), so a release's relock moves only the package's own version.
       # Every extra the register, the log, the registry and the credentials tests import; torch stays out, and the
       # suite itself fails on a skip it does not expect (tests/conftest.py).
-      - run: uv sync --frozen --extra test --extra service --extra registry --extra credentials
+      - run: uv sync --locked --extra test --extra service --extra registry --extra credentials
       - run: .venv/bin/python -m pytest -q -rs
