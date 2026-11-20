@@ -46,9 +46,10 @@ CODE_REMOVE = re.compile(r"rmtree|removedirs|os\.(?:remove|unlink|rmdir)|\.(?:un
 CODE_PATH = re.compile(r"(?<![A-Za-z0-9_])(?<!api/)(?<!operator/)(?:data|artists|outputs)" + SLASH)
 CODE_REMOVE_NAMED = re.compile(r"(?:rmtree|removedirs|remove|unlink|rmdir|rmSync|unlinkSync|rmdirSync)\(\s*[rfb]?[\"']"
                                r"[^\"']*(?<![A-Za-z0-9_])(?:data|artists|outputs)[\"']")
-# A protected folder joined as a path from its bare quoted name: Path(r) / "data", os.path.join(r, "data").
-CODE_JOINED = re.compile(r"(?:/\s*|\b(?:Path|PurePath)\s*\(\s*|\b(?:join|joinpath)\s*\((?:[^()]|\([^()]*\))*?)"
-                         r"[rfbu]?[\"'](?:data|artists|outputs)[\"']|[rfbu]?[\"'](?:data|artists|outputs)[\"']\s*/")
+# A protected folder named by its bare quoted name where code builds a path: joined with a slash (Path(r) / "data"),
+# or handed to a call as an argument (os.path.join(r, "data"), Path(r, "data")), at any depth of brackets.
+CODE_JOINED = re.compile(r"/\s*[rfbu]?[\"'](?:data|artists|outputs)[\"']|[rfbu]?[\"'](?:data|artists|outputs)[\"']\s*/"
+                         r"|[(,]\s*[rfbu]?[\"'](?:data|artists|outputs)[\"']\s*[,)]")
 CRUDE_VERB = re.compile(r"(?<![A-Za-z0-9_])(?:rm|remove|unlink|shred|truncate)|-delete|--del")
 # In the words of a command the guard does not model, a removing word is not an option (--rm) or part of a path.
 HANDED_VERB = re.compile(r"(?<![\w./-])(?:rm|remove|unlink|shred|truncate)|(?<![\w-])-delete|--del")
@@ -875,16 +876,25 @@ def verdict(call, root, repos=(), siblings_read_only=False):
     return None
 
 
+# Whichever of the verdict and the deadline comes first is the only answer given.
+ANSWER = threading.Lock()
+ANSWERED = []
+
+
 def late():
-    print("refused: the guard did not finish judging the call within %g seconds" % LIMIT_SECONDS, file=sys.stderr)
-    sys.stderr.flush()
-    os._exit(2)
+    with ANSWER:
+        if ANSWERED:
+            return
+        print("refused: the guard did not finish judging the call within %g seconds" % LIMIT_SECONDS, file=sys.stderr)
+        sys.stderr.flush()
+        os._exit(2)
 
 
 def main():
     timer = threading.Timer(LIMIT_SECONDS, late)
     timer.daemon = True
     timer.start()
+    why = "the guard stopped before it judged the call"
     try:
         try:
             call = json.load(sys.stdin)
@@ -892,11 +902,13 @@ def main():
             call = None
         repos = [arg for arg in sys.argv[2:] if not arg.startswith("--")]
         why = verdict(call, sys.argv[1], repos, "--siblings-read-only" in sys.argv[2:])
-        if why:
-            print("refused: " + why, file=sys.stderr)
-            sys.exit(2)
     finally:
+        with ANSWER:
+            ANSWERED.append(True)
         timer.cancel()
+    if why:
+        print("refused: " + why, file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
