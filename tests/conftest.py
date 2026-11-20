@@ -80,12 +80,13 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture
 def confined(tmp_path, monkeypatch):
-    """No removal or replacement reaches outside this test's own folder, whatever the code under test asks: such a
-    request fails the test and changes nothing. A hostile-path test must hold even against code that does not yet
-    resist it."""
+    """No removal, replacement, move or rename reaches outside this test's own folder, whatever the code under test
+    asks: such a request fails the test and changes nothing. A hostile-path test must hold even against code that
+    does not yet resist it."""
     import os
     root = tmp_path.resolve()
-    real = {"rmtree": shutil.rmtree, "unlink": os.unlink, "remove": os.remove, "rmdir": os.rmdir, "replace": os.replace}
+    real = {"rmtree": shutil.rmtree, "move": shutil.move, "unlink": os.unlink, "remove": os.remove, "rmdir": os.rmdir,
+            "replace": os.replace, "rename": os.rename}
 
     def inside(path) -> bool:
         """The path's folder resolved, its last part kept as it is: a link inside the folder is the folder's to remove."""
@@ -97,14 +98,16 @@ def confined(tmp_path, monkeypatch):
 
     def guard(name):
         def guarded(*paths_and_args, **k):
-            count = 2 if name == "replace" else 1
-            if k.get("dir_fd") is None and k.get("src_dir_fd") is None:
+            count = 2 if name in ("replace", "rename", "move") else 1
+            # A call relative to an open folder came from a guarded call on that folder: it passes as before.
+            if all(k.get(fd) is None for fd in ("dir_fd", "src_dir_fd", "dst_dir_fd")):
                 for path in paths_and_args[:count]:
                     if not inside(path):
                         raise AssertionError(f"{name} outside the test's folder was asked for: {path}")
             return real[name](*paths_and_args, **k)
         return guarded
-    monkeypatch.setattr(shutil, "rmtree", guard("rmtree"))
-    for name in ("unlink", "remove", "rmdir", "replace"):
+    for name in ("rmtree", "move"):
+        monkeypatch.setattr(shutil, name, guard(name))
+    for name in ("unlink", "remove", "rmdir", "replace", "rename"):
         monkeypatch.setattr(os, name, guard(name))
     return root
