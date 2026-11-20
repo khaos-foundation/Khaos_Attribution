@@ -120,3 +120,31 @@ def test_the_signed_mean_targets_are_refused_once_before_mlx_is_loaded():
     for target in ("vmean", "dmean", "vdelta"):
         with pytest.raises(RuntimeError, match="not built on the MLX worker"):
             MLX.run({"command": "feature", "timesteps": [0.5], "noise_seed": 0, "files": [], "target": target})
+
+
+class _LoraLinear(_Layer):
+    """The pinned engine's plain LoRA layer, in numpy: its base output plus the adapter's, times its scaling."""
+
+    def __init__(self, alpha, rank, rng):
+        super().__init__(alpha, rank)
+        self.W = rng.standard_normal((5, 4)).astype(np.float32)
+        self.A = rng.standard_normal((rank, 4)).astype(np.float32)
+        self.B = rng.standard_normal((5, rank)).astype(np.float32)
+
+    def base(self, x):
+        return x @ self.W.T
+
+    def __call__(self, x):
+        return self.base(x) + ((x.astype(np.float32) @ self.A.T) @ self.B.T * self.scaling).astype(np.float32)
+
+
+def test_at_strength_0_every_adapter_layer_adds_nothing_to_its_base(lora_module):
+    """What the loss without the adapter reads: each layer's output at strength 0 is its base output, exactly."""
+    rng = np.random.default_rng(3)
+    bundle = types.SimpleNamespace(layers=[_LoraLinear(16, 16, rng), _LoraLinear(32, 8, rng)])
+    x = rng.standard_normal((3, 4)).astype(np.float32)
+    units = MLX._unit_scalings(bundle)
+    MLX._set_strength(bundle, 0.0, units)
+    assert all(np.array_equal(layer(x), layer.base(x)) for layer in bundle.layers)
+    MLX._set_strength(bundle, 1.0, units)
+    assert all(not np.array_equal(layer(x), layer.base(x)) for layer in bundle.layers), "strength 1 adapts again"

@@ -194,8 +194,8 @@ def _gradient(mx, nn, bundle, paths, prepared, cond, timesteps, target: str):
 
 
 def _unit_scalings(bundle) -> dict:
-    """Each adapter layer's scaling at strength 1, by layer; refused unless the engine scales a layer by alpha / rank,
-    the rule a strength set through the scaling relies on."""
+    """Each adapter layer's scaling at strength 1, by layer, read by ``loss``, the one command that sets a strength;
+    refused unless the engine scales a layer by alpha / rank, the rule a strength set through the scaling relies on."""
     from models.defs.lora import iter_trainable_lora_layers  # noqa: PLC0415
     units = {}
     for layer in iter_trainable_lora_layers(bundle):
