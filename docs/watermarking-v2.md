@@ -220,6 +220,14 @@ Adapter run: run_20260101_120000 (1 Jan 2026)
 Exact output: matched — generation f3a1… (99.2%)
 ```
 
+### 6a. Reading the mark in windows
+
+`Watermarker.detect_array` reads a recording in windows of `DETECT_WINDOW_S` (30 s), a tail under `DETECT_MIN_TAIL_S` (5 s) joining the window before it; a recording up to 35 s is one window, read whole as before. It returns the most likely window with an uncorrected codeword among those at `LIKELY_MARKED` (0.5, Verify's bar) or above, else the most likely window of all. So the import's strong rule (0.9 and a clean codeword) holds when any window is strong, and Verify hears a recording when any window reaches 0.5.
+
+Why: AudioSeal's detector reads the whole array at once, so memory grew with length (4.7 GiB for 4 min, 9.3 GiB for 10 min on a Mac's CPU) and Verify takes up to 20 min. Its streaming mode is a different calculation (frame outputs differ by up to 3.8 after the best alignment), so the windows are read independently. A window peaks at about 1.0 GiB whatever the length.
+
+Measured before the change, on 32 five-minute tracks of real music (30 built from Apple's royalty-free loops, 2 from librosa's example clips), each read unmarked, marked with a random id, and unmarked with a 30 s marked insert: unmarked, 0 of 32 strong or heard either way, and 0 of 320 windows (the highest window read 0.41); marked, 32 of 32 strong with the right id either way (lowest window 0.96); the insert, 0 of 32 caught whole and 31 of 32 strong with the right id in windows, 32 of 32 heard. The two readings took the same time (311 s whole, 320 s in windows).
+
 ## 7. Migration (amended by §0: NO re-embedding)
 
 Measured double-embed corruption cancels the re-embed plan. Instead:
