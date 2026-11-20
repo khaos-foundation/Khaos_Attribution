@@ -17,14 +17,14 @@ def _reference(index, phases, payload):
     rows: dict = {}
     for i in range(0, len(hashes), 900):
         chunk = hashes[i:i + 900]
-        q = ("SELECT f.generation_id AS g, f.hash AS h, f.offset_ms AS o FROM fingerprints f"
-             " JOIN outputs ou ON ou.generation_id = f.generation_id WHERE ou.withdrawn = 0 AND f.hash IN (%s)" % ",".join("?" * len(chunk)))
+        q = ("SELECT ou.generation_id AS g, f.hash AS h, f.offset_ms AS o, f.n AS n FROM landmarks f"
+             " JOIN outputs ou ON ou.oid = f.oid WHERE ou.withdrawn = 0 AND f.hash IN (%s)" % ",".join("?" * len(chunk)))
         params = list(chunk)
         if payload is not None:
             q += " AND ou.payload = ?"
             params.append(payload)
-        for row in index.db.execute(q, params):
-            rows.setdefault(row["g"], []).append((row["h"], row["o"]))
+        for row in index.db.execute(q + " ORDER BY f.hash, ou.generation_id, f.offset_ms", params):
+            rows.setdefault(row["g"], []).extend([(row["h"], row["o"])] * row["n"])
     top = sorted(rows, key=lambda g: len(rows[g]), reverse=True)[:I.CANDIDATES]
     return {g: rows[g] for g in top}
 
