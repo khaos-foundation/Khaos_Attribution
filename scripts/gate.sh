@@ -8,7 +8,8 @@ NAMED_GATES="torch"
 # Python files under src/ and scripts/ that no test names yet, known: exact paths only, and the list only shrinks
 # (gate.sh --stale fails on a path that got a test or a new glob).
 NO_TEST_OK="scripts/watermark_survival.py src/khaos_attribution/engines/mimetic/convert_worker.py
-  src/khaos_attribution/engines/sa3/convert_worker.py src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
+  src/khaos_attribution/engines/sa3/convert_worker.py src/khaos_attribution/engines/sa3/forward_mlx.py
+  src/khaos_attribution/engines/sa3/forward_torch.py src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
 
 gate_cmd() {
   local py
@@ -596,7 +597,7 @@ case "$MODE" in
       n=$(printf '%s\n' "$unnamed" | wc -l | tr -d ' ')
       shown=$(printf '%s\n' "$unnamed" | head -5 | tr '\n' ' ')
       [ "$n" -gt 5 ] && shown="${shown}and $((n - 5)) more "
-      echo "SKIP quick: no test file names ${shown% }; gate.sh --changed runs the suite and fails until a test names it or NO_TEST_OK lists it"
+      echo "SKIP quick: no test file names ${shown% }; gate.sh --changed fails until a test names it"
     fi
     [ -z "$tests" ] && { remember; pins_then_finish 0; }
     count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
@@ -659,6 +660,12 @@ case "$MODE" in
       exit 0
     fi
     contract_note
+    # A file no test names fails here, before any gate runs: write a test (NO_TEST_OK is for files that cannot be
+    # tested, and it only shrinks).
+    if [ -n "$unnamed" ]; then
+      printf '%s\n' "$unnamed" | sed 's/^/FAIL changed: no test file names /; s/$/; write a test (NO_TEST_OK is for files that cannot be tested, and it only shrinks)/'
+      exit 1
+    fi
     if [ -z "$gates" ] && [ -z "$owed" ] && [ -z "$pins" ]; then
       echo "SKIP changed: no changed path maps to a gate or is named by a test; nothing to run"
       exit 0
@@ -683,10 +690,6 @@ case "$MODE" in
     # What the quick check skipped is run itself, unless the suite gate covered it: another gate may not hold it.
     if [ "$rc" -eq 0 ] && [ -n "$owed" ]; then
       case " $gates " in *" $SUITE_GATE "*) rm -f "${OWED:?}" ;; *) run_owed; rc=$? ;; esac
-    fi
-    if [ -n "$unnamed" ]; then
-      printf '%s\n' "$unnamed" | sed 's/^/FAIL changed: no test file names /; s/$/; write one, or add it to NO_TEST_OK/'
-      rc=1
     fi
     # The pins siblings hold on this repository read them too, so a green run of them is never remembered.
     if [ -n "$pins" ]; then
