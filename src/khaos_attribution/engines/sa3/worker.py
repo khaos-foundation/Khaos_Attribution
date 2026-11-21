@@ -40,17 +40,23 @@ def _fresh_part(out) -> Path:
     return part
 
 
-def render_torch(req: dict) -> dict:
-    import soundfile as sf  # noqa: PLC0415
-    import torch  # noqa: PLC0415
+def _loaded_torch(req: dict):
+    """Stability's model for the request, its adapter loaded at the request's strength."""
     from khaos_attribution.engines.sa3.loading import load_model  # noqa: PLC0415
-
-    out = Path(req["out"])
-    part = _fresh_part(out)
     model = load_model(req["model"])
     if req.get("adapter"):
         model.load_lora([str(req["adapter"])])
         model.set_lora_strength(float(req["adapter_scale"]))
+    return model
+
+
+def render_torch(req: dict, model=None) -> dict:
+    import soundfile as sf  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+
+    out = Path(req["out"])
+    part = _fresh_part(out)
+    model = model if model is not None else _loaded_torch(req)
     seed = int(req["seed"]) if req.get("seed") is not None else int(torch.randint(0, 2 ** 31 - 1, (1,)).item())
     steps = int(req["steps"])
     kwargs = {"prompt": req["prompt"], "duration": float(req["seconds"]), "steps": steps,
@@ -162,8 +168,31 @@ def _run_forwarding_stop(cmd: list, *, cwd: str):
         return subprocess.CompletedProcess(cmd, proc.returncode, "".join(kept), err.read())
 
 
+class _Resident:
+    """The one model and adapter a resident worker holds: loaded at its first request, the strength set again at
+    each; a request for another model or adapter is refused, the renderer starting another worker for it."""
+
+    def __init__(self) -> None:
+        self.key = None
+        self.model = None
+
+    def __call__(self, req: dict) -> dict:
+        if req.get("runtime") == "mlx":
+            raise RuntimeError("a resident worker renders on torch only")
+        key = (req["model"], req.get("adapter"))
+        if self.model is None:
+            self.model, self.key = _loaded_torch(req), key
+        elif key != self.key:
+            raise RuntimeError("a resident worker serves the model and adapter it started with")
+        elif req.get("adapter"):
+            self.model.set_lora_strength(float(req["adapter_scale"]))
+        return render_torch(req, self.model)
+
+
 def main() -> int:
-    from khaos_attribution.engines.worker_process import answer  # noqa: PLC0415
+    from khaos_attribution.engines.worker_process import answer, serve  # noqa: PLC0415
+    if "--serve" in sys.argv[1:]:
+        return serve(_Resident())
     return answer(lambda req: render_mlx(req) if req.get("runtime") == "mlx" else render_torch(req))
 
 

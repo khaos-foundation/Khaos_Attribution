@@ -175,7 +175,8 @@
     }
   },
   "runtime": {
-    "heldout_in_one_process": false
+    "heldout_in_one_process": false,
+    "resident_render": false
   },
   "memory": {
     "resident_gb": 0.0,

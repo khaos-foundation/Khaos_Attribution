@@ -26,6 +26,8 @@ DEFAULT_DEADLINE_S = 3600.0
 # As a timeout: DEFAULT_DEADLINE_S, read when the worker starts. None waits for ever.
 DEFAULT = object()
 ROW_PREFIX = "khaos-row "
+# The prefix a resident worker's reply line carries, so a line its engine prints is never taken for one.
+REPLY_PREFIX = "khaos-reply "
 STOP_GRACE_S = 3.0
 POLL_S = 2.0
 # How long a worker that has exited is waited on for a pipe something it started still holds.
@@ -292,6 +294,104 @@ def stream(python: Path, script: Path, request: dict, *, cwd: Path, env: dict, l
     if missing:
         raise WorkerFailed(f"the {label} worker's reply lacks {', '.join(missing)}")
     return reply
+
+
+# ── one worker, many requests ─────────────────────────────────────────────────
+
+def serve(work) -> int:
+    """A resident worker's main: one JSON request per line of stdin, each answered by one ``khaos-reply`` line,
+    until stdin closes; a failure is replied as ``answer`` replies it, and the worker stays up for the next."""
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            reply = work(json.loads(line))
+        except Exception as exc:  # noqa: BLE001 — the reply carries it
+            traceback.print_exc()
+            reply = {"error": f"{type(exc).__name__}: {exc}"}
+        sys.stdout.write(REPLY_PREFIX + json.dumps(reply) + "\n")
+        sys.stdout.flush()
+    return 0
+
+
+class Resident:
+    """One worker kept running between requests, so what it loaded stays loaded: each ``ask`` hands its rows to
+    ``on_row`` as they come and returns its reply. A stop or the deadline ends the worker, as ``stream`` does."""
+
+    def __init__(self, python: Path, script: Path, *, cwd: Path, env: dict, label: str, args=("--serve",)) -> None:
+        self.label = label
+        self._err = tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace")
+        try:
+            self.proc = _start(python, script, cwd=cwd, env=env, stderr=self._err, args=args)
+        except OSError as exc:
+            self._err.close()
+            raise WorkerFailed(f"the {label} worker could not start: {exc}") from exc
+        self._lines: queue.Queue = queue.Queue()
+        self._reader = _reader(self.proc.stdout, self._lines.put)
+        self.asked = 0
+
+    @property
+    def alive(self) -> bool:
+        return self.proc.poll() is None and not self._err.closed
+
+    def ask(self, request: dict, *, on_row=None, should_stop=None, timeout=DEFAULT, required=()) -> dict:
+        if timeout is DEFAULT:
+            timeout = DEFAULT_DEADLINE_S
+        if not self.alive:
+            raise WorkerFailed(f"the {self.label} worker is not running")
+        deadline = time.monotonic() + timeout if timeout else None
+        try:
+            self.proc.stdin.write(json.dumps(request) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            return self._failed()
+        self.asked += 1
+        while True:
+            try:
+                line = self._lines.get(timeout=POLL_S)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                return self._failed()
+            if should_stop is not None and should_stop():
+                self.close()
+                raise WorkerCancelled()
+            if deadline is not None and time.monotonic() > deadline:
+                self.close()
+                raise WorkerFailed(f"the {self.label} worker ran past its time limit")
+            if line.startswith(ROW_PREFIX) and on_row is not None:
+                try:
+                    on_row(json.loads(line[len(ROW_PREFIX):]))
+                except ValueError:
+                    pass
+            elif line.startswith(REPLY_PREFIX):
+                reply = json.loads(line[len(REPLY_PREFIX):])
+                if reply.get("error"):
+                    raise WorkerFailed(f"the {self.label} worker failed: {reply['error']}", why=str(reply["error"]))
+                missing = [k for k in required if k not in reply]
+                if missing:
+                    raise WorkerFailed(f"the {self.label} worker's reply lacks {', '.join(missing)}")
+                return reply
+
+    def _failed(self):
+        """The worker ended mid-request: how, in words, and it is cleared away."""
+        code = self.proc.poll()
+        self._err.seek(0)
+        stderr = self._err.read()
+        _log_failure(self.label, stderr)
+        self.close()
+        raise _ended(self.label, code, stderr, "")
+
+    def close(self) -> None:
+        """The worker and everything it started, stopped; nothing is left holding the device."""
+        try:
+            if self.proc.stdin is not None and not self.proc.stdin.closed:
+                self.proc.stdin.close()
+        except OSError:
+            pass
+        stop_tree(self.proc)
+        if not self._err.closed:
+            self._err.close()
 
 
 # ── stopping ──────────────────────────────────────────────────────────────────
