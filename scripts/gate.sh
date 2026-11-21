@@ -199,9 +199,13 @@ contract_note() {
   for file in src/common/contract.py src/listening_space/contract.py; do
     [ -f "$file" ] && pin=$(sed -n 's/^CONTRACT_VERSION = "\(.*\)"$/\1/p' "$file") && break
   done
-  have=$(venv_packages | sed -n 's/^khaos_attribution-\(.*\)\.dist-info$/\1/p' | head -1)
-  if [ -n "$pin" ] && [ -n "$have" ] && [ "$pin" != "$have" ]; then
-    echo "NOTE contract: the venv holds khaos_attribution $have, this checkout pins $pin; re-run the installer (never uv sync)"
+  have=$(venv_packages | sed -n 's/^khaos_attribution-\(.*\)\.dist-info$/\1/p' | tr '\n' ' ')
+  have=${have% }
+  if [ -n "$pin" ] && [ -n "$have" ] && [ "$have" != "$pin" ]; then
+    case " $have " in
+      *" $pin "*) echo "NOTE contract: the venv holds more than one khaos_attribution ($have), $file pins $pin; re-run the installer (never uv sync)" ;;
+      *) echo "NOTE contract: the venv holds khaos_attribution $have, $file pins $pin; re-run the installer (never uv sync)" ;;
+    esac
   fi
 }
 
