@@ -111,18 +111,42 @@ branch_files() {
   done
 }
 
+# A helper's name, then every helper that imports it, at any depth: a change to one reaches tests through the others.
+helper_closure() {
+  local todo="$1" seen=" " h u
+  while [ -n "$todo" ]; do
+    # shellcheck disable=SC2086
+    set -- $todo
+    h=$1
+    shift
+    todo="$*"
+    case "$seen" in *" $h "*) continue ;; esac
+    seen="$seen$h "
+    echo "$h"
+    for u in $(git grep --untracked -l -w -F -e "helpers.$h" -- 'tests/helpers/*.py' 2> /dev/null); do
+      u=${u##*/}
+      todo="$todo ${u%.py}"
+    done
+  done
+}
+
 # Changed paths on stdin; on stdout, each once, the test files for them. A changed test file itself, and the files
 # that import from it; under a changed conftest.py, every test file it reaches; for a doc, the test files that name it
 # or its folder, and the repository's test_docs_current files; for any other file, the test files that name it by its
-# file name, its module name or its dotted path under src/, also as `from <package> import (... <name> ...)`.
+# file name, its module name, a script's name given to a loader, or its dotted path under src/, also as
+# `from <package> import (... <name> ...)`; a shared helper under tests/helpers/ by its package path (helpers.<name>),
+# through every helper that imports it.
 quick_tests() {
-  local p base mod item parent name f
-  local -a pats=() parents=()
+  local p base mod item parent name f h
+  local -a pats=() parents=() calls=()
   {
     while IFS= read -r p; do
       base=${p##*/}
       case "$p" in
         ''|*/|archive/*|reports/*|docs/research/*) continue ;;
+        tests/helpers/*.py)
+          for h in $(helper_closure "${base%.py}"); do pats+=(-e "helpers.$h"); done
+          continue ;;
         conftest.py|*/conftest.py)
           git ls-files -co --exclude-standard -- "${p%conftest.py}" 2> /dev/null
           continue ;;
@@ -145,10 +169,19 @@ quick_tests() {
         *) pats+=(-e "$base") ;;
       esac
       case "$mod" in *.*) parents+=("${mod%.*} ${mod##*.}") ;; esac
+      # A script is loaded by its name as a loader's one string (_load("bench"), _script("bench")); the bare word is
+      # too common.
+      case "$p" in
+        scripts/*.py)
+          calls+=(-e "load(\"${base%.py}\")" -e "load('${base%.py}')" -e "script(\"${base%.py}\")" -e "script('${base%.py}')") ;;
+      esac
     done
     # One search for every pattern: a quick run's time goes to its tests.
     # A line that is only a comment names nothing.
     [ "${#pats[@]}" -eq 0 ] || git grep --untracked -w -F "${pats[@]}" -- 'tests/*.py' 2> /dev/null |
+      grep -v -E '^[^:]+:[[:space:]]*#' | cut -d: -f1
+    # Not as a word: the call's own name runs into its parenthesis.
+    [ "${#calls[@]}" -eq 0 ] || git grep --untracked -F "${calls[@]}" -- 'tests/*.py' 2> /dev/null |
       grep -v -E '^[^:]+:[[:space:]]*#' | cut -d: -f1
     for item in ${parents[@]+"${parents[@]}"}; do
       parent=${item% *}
