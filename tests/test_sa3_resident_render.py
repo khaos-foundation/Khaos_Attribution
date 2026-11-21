@@ -145,3 +145,41 @@ def test_the_worker_serves_one_model_and_adapter_and_answers_each_request():
             served({"model": "m", "runtime": "mlx"})
     finally:
         WK._loaded_torch, WK.render_torch = WK_loaded, WK_render
+
+
+def test_a_progress_callback_that_raises_ends_the_worker_so_no_later_render_reads_its_reply(engine, tmp_path):
+    renderer = engine(True)
+    _render(renderer, tmp_path, "a")
+    pid = renderer._resident.proc.pid
+
+    def broken(done, total=1.0):
+        if done > 0:
+            raise RuntimeError("the room's progress handler failed")
+    with pytest.raises(RuntimeError, match="progress handler"):
+        _render(renderer, tmp_path, "b", on_progress=broken)
+    assert renderer._resident is None and _gone(pid)
+    after = _render(renderer, tmp_path, "c")
+    assert after.audio_path.name == "c.wav" and after.audio_path.is_file()
+
+
+def test_an_end_asked_mid_render_waits_for_the_render_and_never_breaks_it(engine, tmp_path, monkeypatch):
+    """The Space forgets an adapter outside its engine lock: the render finishes whole, then the worker ends."""
+    import threading
+    renderer = engine(True)
+    _render(renderer, tmp_path, "warm")
+    monkeypatch.setenv("SA3_FAKE_STEP", "1.5")
+    renderer._end_resident()
+    started, outcome = threading.Event(), {}
+
+    def render():
+        try:
+            outcome["result"] = _render(renderer, tmp_path, "long", on_progress=lambda d, t=1.0: d > 0 and started.set())
+        except Exception as exc:  # noqa: BLE001
+            outcome["error"] = exc
+    thread = threading.Thread(target=render)
+    thread.start()
+    assert started.wait(30)
+    renderer.forget_adapter()
+    thread.join(30)
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"].audio_path.is_file() and renderer._resident is None

@@ -28,6 +28,8 @@ DEFAULT = object()
 ROW_PREFIX = "khaos-row "
 # The prefix a resident worker's reply line carries, so a line its engine prints is never taken for one.
 REPLY_PREFIX = "khaos-reply "
+# How much of a resident worker's stderr a failure reads back.
+STDERR_TAIL = 65536
 STOP_GRACE_S = 3.0
 POLL_S = 2.0
 # How long a worker that has exited is waited on for a pipe something it started still holds.
@@ -346,38 +348,48 @@ class Resident:
         except (BrokenPipeError, OSError, ValueError):
             return self._failed()
         self.asked += 1
-        while True:
-            try:
-                line = self._lines.get(timeout=POLL_S)
-            except queue.Empty:
-                line = ""
-            if line is None:
-                return self._failed()
-            if should_stop is not None and should_stop():
-                self.close()
-                raise WorkerCancelled()
-            if deadline is not None and time.monotonic() > deadline:
-                self.close()
-                raise WorkerFailed(f"the {self.label} worker ran past its time limit")
-            if line.startswith(ROW_PREFIX) and on_row is not None:
+        # Whatever ends the wait but the reply (a stop, the deadline, a caller's callback raising, an unreadable line)
+        # ends the worker too, so a later request never reads this one's reply.
+        try:
+            while True:
                 try:
-                    on_row(json.loads(line[len(ROW_PREFIX):]))
-                except ValueError:
-                    pass
-            elif line.startswith(REPLY_PREFIX):
-                reply = json.loads(line[len(REPLY_PREFIX):])
-                if reply.get("error"):
-                    raise WorkerFailed(f"the {self.label} worker failed: {reply['error']}", why=str(reply["error"]))
-                missing = [k for k in required if k not in reply]
-                if missing:
-                    raise WorkerFailed(f"the {self.label} worker's reply lacks {', '.join(missing)}")
-                return reply
+                    line = self._lines.get(timeout=POLL_S)
+                except queue.Empty:
+                    line = ""
+                if line is None:
+                    return self._failed()
+                if should_stop is not None and should_stop():
+                    raise WorkerCancelled()
+                if deadline is not None and time.monotonic() > deadline:
+                    raise WorkerFailed(f"the {self.label} worker ran past its time limit")
+                if line.startswith(ROW_PREFIX) and on_row is not None:
+                    try:
+                        row = json.loads(line[len(ROW_PREFIX):])
+                    except ValueError:
+                        continue
+                    on_row(row)
+                elif line.startswith(REPLY_PREFIX):
+                    reply = json.loads(line[len(REPLY_PREFIX):])
+                    break
+        except BaseException:
+            self.close()
+            raise
+        if reply.get("error"):
+            raise WorkerFailed(f"the {self.label} worker failed: {reply['error']}", why=str(reply["error"]))
+        missing = [k for k in required if k not in reply]
+        if missing:
+            raise WorkerFailed(f"the {self.label} worker's reply lacks {', '.join(missing)}")
+        return reply
 
     def _failed(self):
         """The worker ended mid-request: how, in words, and it is cleared away."""
         code = self.proc.poll()
-        self._err.seek(0)
-        stderr = self._err.read()
+        stderr = ""
+        if not self._err.closed:
+            # Only the tail is read: a worker that wrote much to stderr is not held in memory whole.
+            self._err.seek(0, os.SEEK_END)
+            self._err.seek(max(0, self._err.tell() - STDERR_TAIL))
+            stderr = self._err.read()
         _log_failure(self.label, stderr)
         self.close()
         raise _ended(self.label, code, stderr, "")
