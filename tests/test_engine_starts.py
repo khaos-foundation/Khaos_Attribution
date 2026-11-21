@@ -91,7 +91,8 @@ def _scripts():
 
 def test_every_engine_script_checks_its_launcher_before_it_imports_the_contract():
     scripts = dict((rel, path) for path, rel in _scripts())
-    assert {"sa3/worker.py", "sa3/measure_worker.py", "sa3/heldout_worker.py", "sa3/train_driver.py"} <= set(scripts)
+    assert {"sa3/worker.py", "sa3/measure_worker.py", "sa3/heldout_worker.py", "sa3/train_driver.py",
+            "sa3/tid_worker.py"} <= set(scripts)
     for rel, path in scripts.items():
         text = path.read_text(encoding="utf-8")
         assert L.STUB in text, f"{rel} does not start with the launcher's check"
