@@ -66,7 +66,8 @@ class RenderResult:
     dropped: list
 
 
-__all__ = ["RenderCancelled", "RenderFailed", "RenderRequest", "RenderResult"]
+__all__ = ["RENDERER_CALLS", "RENDERER_METHODS", "RenderCancelled", "RenderFailed", "RenderRequest", "RenderResult",
+           "Renderer"]
 
 
 @runtime_checkable

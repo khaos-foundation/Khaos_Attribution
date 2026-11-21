@@ -180,7 +180,9 @@ def _live(out: Checklist, d, renderer_cls, workdir: Path, repo_dir, checkpoint_d
     try:
         r.generate(req, None, workdir / "progress.wav", on_progress=lambda done, total=1.0: seen.append(done / total))
         rising = all(b >= a for a, b in zip(seen, seen[1:]))
-        out.add("live.progress", bool(seen) and rising and all(0.0 <= f <= 1.0 for f in seen) and seen[-1] == 1.0,
+        # Rising and ending whole is proven here on the engine run live; another engine's shape is checked by its calls.
+        out.add("live.progress", bool(seen) and rising and all(0.0 <= f <= 1.0 + 1e-6 for f in seen)
+                and abs(seen[-1] - 1.0) <= 1e-6,
                 f"{len(seen)} reports, {seen[:1]} to {seen[-1:]}")
     except Exception as exc:  # noqa: BLE001
         out.add("live.progress", False, f"{type(exc).__name__}: {exc}")

@@ -167,7 +167,7 @@ class AceStepRenderer:
     """The weights once per process, an adapter per variant, one render at a time (the caller serialises)."""
 
     def __init__(self, repo_dir, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float | None = None):
+                 base_resident: bool = False, default_adapter_scale: float | None = None, **engine_options):
         self.repo_dir = Path(repo_dir).resolve()
         self.checkpoint_dir = Path(checkpoint_dir).resolve() if checkpoint_dir else None
         self.device = device
