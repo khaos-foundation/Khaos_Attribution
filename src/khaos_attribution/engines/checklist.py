@@ -11,11 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from khaos_attribution.engines import KNOWN_ENGINES, EngineUnavailable, descriptor, engine
-from khaos_attribution.engines.render import RenderCancelled, RenderRequest, RenderResult
+from khaos_attribution.engines.render import RENDERER_CALLS, RENDERER_METHODS, RenderCancelled, RenderRequest, RenderResult
 
 SLOTS = ("train", "render", "measure")
 RENDER_NAMES = ("Renderer", "RenderRequest", "RenderResult", "RenderCancelled", "RenderFailed")
-RENDERER_METHODS = ("load", "resolve_variant", "apply_adapter", "generate")
 TRAIN_NAMES = ("TrainingUnavailable", "training_api", "adapter_kwargs", "preprocess_pairs", "open_module",
                "adapter_file_in", "open_session", "pair_files", "Session")
 # What a room does with the session open_session gives it.
@@ -98,6 +97,10 @@ def check(engine_id: str, workdir: Path | str | None = None, *, live: bool = Fal
     if renderer_cls is not None:
         missing = [m for m in RENDERER_METHODS if not callable(getattr(renderer_cls, m, None))]
         out.add("render.Renderer.methods", not missing, f"missing {missing}" if missing else ", ".join(RENDERER_METHODS))
+        if not missing:
+            refused = _refused_calls(renderer_cls)
+            out.add("render.Renderer.calls", not refused,
+                    "; ".join(refused) if refused else "takes every call the rooms make")
     session_cls = getattr(slots["train"], "Session", None)
     if session_cls is not None:
         missing = [m for m in SESSION_METHODS if not callable(getattr(session_cls, m, None))]
@@ -122,6 +125,20 @@ def check(engine_id: str, workdir: Path | str | None = None, *, live: bool = Fal
     if live and renderer_cls is not None:
         _live(out, d, renderer_cls, Path(workdir or Path.cwd()) / "checklist", repo_dir, checkpoint_dir, device)
     return out
+
+
+def _refused_calls(renderer_cls) -> list:
+    """Each call the rooms make that the renderer's signatures would refuse, in words."""
+    import inspect  # noqa: PLC0415
+    refused = []
+    for method, calls in RENDERER_CALLS.items():
+        sig = inspect.signature(getattr(renderer_cls, method))
+        for args, kwargs in calls:
+            try:
+                sig.bind("self", *args, **kwargs)
+            except TypeError as exc:
+                refused.append(f"{method}{tuple(args)} {sorted(kwargs)}: {exc}")
+    return refused
 
 
 def _names(out: Checklist, slot: str, module, names: tuple) -> None:
@@ -159,6 +176,14 @@ def _live(out: Checklist, d, renderer_cls, workdir: Path, repo_dir, checkpoint_d
     except Exception as exc:  # noqa: BLE001
         out.add("live.render", False, f"{type(exc).__name__}: {exc}")
         return
+    seen = []
+    try:
+        r.generate(req, None, workdir / "progress.wav", on_progress=lambda done, total=1.0: seen.append(done / total))
+        rising = all(b >= a for a, b in zip(seen, seen[1:]))
+        out.add("live.progress", bool(seen) and rising and all(0.0 <= f <= 1.0 for f in seen) and seen[-1] == 1.0,
+                f"{len(seen)} reports, {seen[:1]} to {seen[-1:]}")
+    except Exception as exc:  # noqa: BLE001
+        out.add("live.progress", False, f"{type(exc).__name__}: {exc}")
     try:
         r.generate(req, None, workdir / "stopped.wav", should_stop=lambda: True)
         out.add("live.cancel", False, "a render asked to stop finished anyway")
