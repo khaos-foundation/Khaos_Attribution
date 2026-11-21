@@ -1,76 +1,72 @@
 #!/usr/bin/env bash
 # Runs this repository's gates: those a change touches (--changed), named ones or all, or the quick check a Stop runs
 # (--quick, which --hook answers with): only the test files for what changed since its last run that was not red.
+# The same file in every Khaos repository; scripts/gate.conf.sh holds what is this repository's own and names this
+# file's blob as GATE_CORE.
 
-ALL_GATES="pytest"
-# Named only, never in all, --changed or --quick: the release needs it, and a machine without torch must not go red.
-NAMED_GATES="torch"
-# Python files under src/ and scripts/ that no test can name yet: exact paths only, and the list only shrinks
-# (gate.sh --stale fails on a path that got a test or a new glob).
-# engines/sa3/forward_mlx.py: its load_bundle and conditioning are reached only through measure_worker_mlx, and no
-# stand-in test calls them yet.
-NO_TEST_OK="scripts/watermark_survival.py src/khaos_attribution/engines/mimetic/convert_worker.py
-  src/khaos_attribution/engines/sa3/convert_worker.py src/khaos_attribution/engines/sa3/forward_mlx.py
-  src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
-
-gate_cmd() {
-  local py
-  case "$1" in
-    pytest) echo "$VENV/python -m pytest -q -p no:cacheprovider" ;;
-    torch)
-      # Without torch the suite skips the torch tests, so a missing interpreter is a FAIL, never a SKIP.
-      if py=$(torch_python); then
-        printf 'KHAOS_TORCH_RUN=1 %q -m pytest -q -p no:cacheprovider\n' "$py"
-      elif [ -n "$KHAOS_TORCH_PYTHON" ]; then
-        echo "echo 'KHAOS_TORCH_PYTHON names no interpreter with all of: $TORCH_RUN_NEEDS pytest'; exit 1"
-      else
-        echo "echo 'no interpreter with all of $TORCH_RUN_NEEDS pytest in the checkout venv or on PATH; set KHAOS_TORCH_PYTHON to one'; exit 1"
-      fi ;;
-    *) return 1 ;;
-  esac
+# The Stop's answer from a check's output in $2: $1 is 1 when it is red, which blocks once; $3 is the hook's input.
+hook_answer() {
+  local py=${VENV:-.venv/bin}/python
+  [ -x "$py" ] || py=$(command -v python3 || command -v python) || return 0
+  "$py" -I -S -c '
+import json, sys
+red, path = sys.argv[1] == "1", sys.argv[2]
+try:
+    active = bool(json.loads(sys.argv[3] or "{}").get("stop_hook_active"))
+except ValueError:
+    active = False
+text = open(path, encoding="utf-8", errors="replace").read().strip()
+if not text:
+    sys.exit(0)
+lines = text.splitlines()
+summary = "; ".join(l for l in lines if l.startswith(("== ", "PASS ", "FAIL ", "SKIP ", "DRIFT ")))
+if red and not active:
+    print(json.dumps({"decision": "block", "systemMessage": summary,
+                      "reason": "A gate is red. Fix it before stopping:\n" + "\n".join(lines[-150:])}))
+elif red:
+    print(json.dumps({"systemMessage": "Still red after a fix attempt; not blocking again. " + summary}))
+else:
+    print(json.dumps({"systemMessage": summary}))
+' "$1" "$2" "$3"
 }
-
-# Every package the torch run needs; tests/conftest.py's TORCH_RUN_NEEDS names the same, and a test holds them equal.
-TORCH_RUN_NEEDS="torch torchaudio librosa huggingface_hub soundfile"
-
-has_torch() {
-  [ -x "$1" ] && "$1" -c 'import importlib.util as u, sys; sys.exit(not all(u.find_spec(m) for m in sys.argv[1:]))' \
-    $TORCH_RUN_NEEDS pytest 2> /dev/null
-}
-
-# KHAOS_TORCH_PYTHON when set, else the first of this checkout's venv, python3 and python on PATH that has them.
-torch_python() {
-  local py
-  if [ -n "$KHAOS_TORCH_PYTHON" ]; then
-    has_torch "$KHAOS_TORCH_PYTHON" && echo "$KHAOS_TORCH_PYTHON"
-    return
-  fi
-  for py in "$VENV/python" "$(command -v python3)" "$(command -v python)"; do
-    [ -n "$py" ] && has_torch "$py" && { echo "$py"; return 0; }
-  done
-  return 1
-}
-
-# Changed paths on stdin, the gates they need on stdout.
-gates_for() {
-  local paths named
-  paths=$(cat)
-  # A path some test file names is that test's to check, as --quick checks it.
-  named=$(printf '%s\n' "$paths" | quick_tests)
-  if [ -n "$named" ] || printf '%s\n' "$paths" | grep -qE '^(src/|tests/|pyproject\.toml$|uv\.lock$)'; then
-    echo pytest
-  fi
-  return 0
-}
+# Sourced with GATE_LIB=1, the file gives only hook_answer.
+if [ -n "${GATE_LIB:-}" ]; then return 0 2> /dev/null || :; fi
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.." || exit 2
-# Every gate reads this checkout's code: a worktree shares a venv whose editable install is the main checkout's.
-export PYTHONPATH="$PWD/src"
-# Only the torch gate sets it, on its own command: left in a shell it would change every other gate's skip rule.
-unset KHAOS_TORCH_RUN
 VENV=.venv/bin
 [ -d "$VENV" ] || VENV=.venv/Scripts
+
+# What scripts/gate.conf.sh may set, with the default each has when it does not.
+# shellcheck disable=SC2034
+{
+  ALL_GATES=          # the gates `all` runs
+  OTHER_GATES=        # the gates that run only by name
+  SUITE_GATE=         # the gate that runs every test file: the first of ALL_GATES unless set
+  TEST_ENV=           # the environment every pytest here starts with, as `NAME=value ...`
+  SRC_ON_PATH=1       # every gate gets this checkout's src/ as PYTHONPATH; empty when TEST_ENV sets it
+  PINS_EXPECTED=      # 1 when a repository beside this one holds pins on it, so finding none is said
+  NO_TEST_OK=         # exact paths under src/ and scripts/ that no test can name yet; the list only shrinks
+  NO_TEST_OK_GLOBS=   # globs kept from before NO_TEST_OK took exact paths; they only shrink
+  SIBLING_PINS=       # the tests here that read another repository, read as text by pins_declared
+  GATE_CORE=          # the git blob of this file, which this repository's suite holds it to
+}
+# A conf's gate commands and its changed-path mapping; plan_from turns the mapping's lines into PLAN.
+gate_cmd() { return 1; }
+gates_for() { cat > /dev/null; }
+plan_from() {
+  PLAN=$(tr '\n' ' ')
+  PLAN=${PLAN% }
+}
+if [ ! -f scripts/gate.conf.sh ]; then
+  echo "scripts/gate.conf.sh is missing: it holds this repository's gates"
+  exit 2
+fi
+# shellcheck source=/dev/null
+. scripts/gate.conf.sh
+[ -n "$SUITE_GATE" ] || SUITE_GATE=${ALL_GATES%% *}
+# Every gate reads this checkout's code: a worktree shares a venv whose editable install is the main checkout's.
+if [ -n "$SRC_ON_PATH" ]; then export PYTHONPATH="$PWD/src"; fi
 GITDIR=$(git rev-parse --git-common-dir) || exit 2
 LOCK="$GITDIR/khaos-gate.lock"
 GREEN="$GITDIR/khaos-gate.green"
@@ -84,16 +80,15 @@ OWED="$QUICK.owed"
 PINS_BRANCH=$(git symbolic-ref --short -q HEAD) || PINS_BRANCH="HEAD $(git rev-parse --short HEAD 2> /dev/null)"
 PINS_RED="$QUICK.pins.$(printf '%s' "$PINS_BRANCH" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_').$(printf '%s' "$PINS_BRANCH" | git hash-object --stdin | cut -c1-8)"
 PINS_OWED="$PINS_RED.owed"
-# The gate that runs every test file: only a green run of it, or of --changed, settles what is owed.
-SUITE_GATE=pytest
 # A Stop waits at most this long; a change that names more test files waits for --changed before the PR.
 QUICK_SECONDS=90
 QUICK_MAX_FILES=25
-QUICK_PYTEST="$VENV/python -m pytest -q -p no:cacheprovider"
+QUICK_PYTEST="${TEST_ENV:+$TEST_ENV }$VENV/python -m pytest -q -p no:cacheprovider"
 
 usage() {
   echo "usage: scripts/gate.sh [all | <gate>... | --changed | --plan | --quick | --hook | --unnamed | --stale] [--budget SECONDS]"
-  echo "gates: $ALL_GATES; by name only: $NAMED_GATES"
+  echo "all: $ALL_GATES"
+  [ -z "$OTHER_GATES" ] || echo "by name only: $OTHER_GATES"
   echo "pins: the tests a repository beside this one holds on it, which --changed and --quick also run"
 }
 
@@ -354,7 +349,12 @@ code_paths() {
   grep -vE '^(archive|docs|reports)/|\.md$'
 }
 
-# The SIBLING_PINS entries the gate.sh at $1 declares, one per line: `<repo>[,<repo>]:<test file or id>`, and
+# The file a checkout's SIBLING_PINS is read from: its gate.conf.sh, or the gate.sh of a checkout from before it.
+pins_file() {
+  if [ -f "$1/scripts/gate.conf.sh" ]; then echo "$1/scripts/gate.conf.sh"; else echo "$1/scripts/gate.sh"; fi
+}
+
+# The SIBLING_PINS entries the file at $1 declares, one per line: `<repo>[,<repo>]:<test file or id>`, and
 # `!<repo>[,<repo>]:<test id>` for a test that repository's own gate keeps.
 pins_declared() {
   [ -f "$1" ] && awk '/^SIBLING_PINS="/ { on = 1; sub(/^SIBLING_PINS="/, "") }
@@ -363,19 +363,71 @@ pins_declared() {
          if (last) exit }' "$1"
 }
 
-# Each repository beside this checkout whose gate.sh holds a pin on it, as its folder.
+# The main checkout of this one (itself when it is not a worktree), by its folder.
+main_checkout() {
+  local common
+  common=$(git rev-parse --git-common-dir 2> /dev/null) || return 1
+  (cd "$common/.." 2> /dev/null && pwd)
+}
+
+# Each repository holding a pin on this checkout, as its folder: those beside it, then those beside its main checkout
+# under the main checkout's name (a worktree with no siblings linked beside it), each name once.
 pin_holders() {
-  local ws me folder entry
-  ws=$(cd .. && pwd)
-  me=$(basename "$PWD")
-  for folder in "$ws"/*/; do
-    folder=${folder%/}
-    [ "$(basename "$folder")" = "$me" ] && continue
-    while IFS= read -r entry; do
-      case "$entry" in '!'*) continue ;; esac
-      case ",${entry%%:*}," in *",$me,"*) echo "$folder"; break ;; esac
-    done < <(pins_declared "$folder/scripts/gate.sh")
+  local ws me main folder entry seen=" "
+  main=$(main_checkout)
+  for ws in "$(cd .. && pwd)" ${main:+"${main%/*}"}; do
+    if [ "$ws" = "$(cd .. && pwd)" ]; then me=$(basename "$PWD"); else me=$(basename "$main"); fi
+    case "$seen" in *" $ws/ "*) continue ;; esac
+    seen="$seen$ws/ "
+    for folder in "$ws"/*/; do
+      folder=${folder%/}
+      [ "$(basename "$folder")" = "$me" ] && continue
+      case "$seen" in *" =$(basename "$folder") "*) continue ;; esac
+      while IFS= read -r entry; do
+        case "$entry" in '!'*) continue ;; esac
+        case ",${entry%%:*}," in *",$me,"*) echo "$folder"; seen="$seen=$(basename "$folder") "; break ;; esac
+      done < <(pins_declared "$(pins_file "$folder")")
+    done
   done
+}
+
+# Sets PINS_SRC and PINS_ME for the holder at $1: the folder whose repositories its pins read beside this checkout,
+# and the name this checkout has there.
+pins_home() {
+  local main
+  PINS_SRC=$(cd .. && pwd)
+  PINS_ME=$(basename "$PWD")
+  [ "${1%/*}" = "$PINS_SRC" ] && return 0
+  main=$(main_checkout)
+  PINS_SRC=${main%/*}
+  PINS_ME=$(basename "$main")
+}
+
+# True when a link made in the folder $1 is a link: where it would be a copy (Git Bash on Windows), a copy would hold
+# a venv and every sibling.
+links_work() {
+  local ok=0
+  mkdir "$1/.link-target" || return 1
+  if ln -s "$1/.link-target" "$1/.link-probe" 2> /dev/null && [ -L "$1/.link-probe" ]; then ok=1; fi
+  rm -rf "${1:?}/.link-probe" "${1:?}/.link-target"
+  [ "$ok" -eq 1 ]
+}
+
+# A folder of links in which this checkout stands as $2 beside every other repository in $1, for pins found beside
+# the main checkout; its path on stdout. Fails where links cannot be made.
+linked_workspace() {
+  local tmp sibling
+  tmp=$(mktemp -d) || return 1
+  if ! links_work "$tmp"; then
+    rm -rf "${tmp:?}"
+    return 1
+  fi
+  ln -s "$PWD" "$tmp/$2"
+  for sibling in "$1"/*/; do
+    sibling=${sibling%/}
+    if [ "$(basename "$sibling")" != "$2" ] && [ -e "$sibling/.git" ]; then ln -s "$sibling" "$tmp/$(basename "$sibling")"; fi
+  done
+  echo "$tmp"
 }
 
 # Sets the lines of the record $1 for the holder $2 to the rest of the arguments, one line each; none clears them.
@@ -445,21 +497,18 @@ red_ids() {
 }
 
 # Of the pins $2 (test ids) the repository at $1 holds on this one, those red on this checkout's committed base too,
-# run beside the same siblings within $3 seconds (0: no limit). Fails when that run could not be made.
+# run beside the same siblings (PINS_SRC, this checkout as PINS_ME) within $3 seconds (0: no limit). Fails when that
+# run could not be made.
 red_before() {
-  local holder=$1 ids=$2 secs=$3 ws me base tmp sibling out rc began
-  ws=$(cd .. && pwd)
-  me=$(basename "$PWD")
+  local holder=$1 ids=$2 secs=$3 ws=$PINS_SRC me=$PINS_ME base tmp sibling out rc began
   base=$(git merge-base HEAD origin/main 2> /dev/null) || base=HEAD
   began=$(date +%s)
   tmp=$(mktemp -d) || return 1
-  mkdir "$tmp/$me"
-  # Where a link is made as a copy (Git Bash on Windows), the copy would hold a venv and every sibling: not made.
-  if ! ln -s "$tmp/$me" "$tmp/link-probe" 2> /dev/null || [ ! -L "$tmp/link-probe" ]; then
+  if ! links_work "$tmp"; then
     rm -rf "${tmp:?}"
     return 1
   fi
-  rm -f "${tmp:?}/link-probe"
+  mkdir "$tmp/$me"
   if with_timeout "$secs" bash -c 'git archive --format=tar "$1" | tar -x -C "$2"' _ "$base" "$tmp/$me"; then
     # The copy holds what git tracks; a pin may also read the venv beside it, which no change to the files moves.
     [ -e .venv ] && ln -s "$PWD/.venv" "$tmp/$me/.venv"
@@ -520,31 +569,6 @@ run_gates() {
   return 0
 }
 
-hook_answer() {
-  local py=$VENV/python
-  [ -x "$py" ] || py=$(command -v python3 || command -v python) || return 0
-  "$py" -I -S -c '
-import json, sys
-red, path = sys.argv[1] == "1", sys.argv[2]
-try:
-    active = bool(json.loads(sys.argv[3] or "{}").get("stop_hook_active"))
-except ValueError:
-    active = False
-text = open(path, encoding="utf-8", errors="replace").read().strip()
-if not text:
-    sys.exit(0)
-lines = text.splitlines()
-summary = "; ".join(l for l in lines if l.startswith(("== gate ", "PASS ", "FAIL ", "SKIP ")))
-if red and not active:
-    print(json.dumps({"decision": "block", "systemMessage": summary,
-                      "reason": "A gate is red. Fix it before stopping:\n" + "\n".join(lines[-150:])}))
-elif red:
-    print(json.dumps({"systemMessage": "Still red after a fix attempt; not blocking again. " + summary}))
-else:
-    print(json.dumps({"systemMessage": summary}))
-' "$1" "$2" "$3"
-}
-
 MODE=names
 BUDGET=0
 PLAN_ONLY=""
@@ -600,7 +624,11 @@ case "$MODE" in
     # on this branch blocks, once; the pins run keeps the records later stops name.
     pins_then_finish() {
       local left out prc holder
-      if [ -z "$(printf '%s\n' "$fresh" | code_paths)" ] || [ -z "$(pin_holders)" ]; then finish "$1"; fi
+      [ -z "$(printf '%s\n' "$fresh" | code_paths)" ] && finish "$1"
+      if [ -z "$(pin_holders)" ]; then
+        [ -z "$PINS_EXPECTED" ] || echo "SKIP pins: no repository beside this checkout holds a pin on it"
+        finish "$1"
+      fi
       left=$(( secs - ($(date +%s) - began) ))
       if [ "$left" -lt 3 ]; then
         echo "SKIP pins: the stop's seconds are spent; scripts/gate.sh --changed runs them"
@@ -686,8 +714,9 @@ case "$MODE" in
     [ "$rc" -eq 0 ] && pins_then_finish 0
     finish "$rc" ;;
   changed)
-    gates=$(changed_paths | gates_for | tr '\n' ' ')
-    gates=${gates% }
+    unset NAMED_TESTS
+    plan_from <<< "$(changed_paths | gates_for)"
+    gates=$PLAN
     owed=$(owed_tests)
     unnamed=$(changed_paths | unnamed_sources)
     if [ -n "$unnamed" ]; then
@@ -698,7 +727,10 @@ case "$MODE" in
       esac
     fi
     pins=""
-    if [ -n "$(changed_paths | code_paths)" ] && [ -n "$(pin_holders)" ]; then pins=pins; fi
+    pins_none=""
+    if [ -n "$(changed_paths | code_paths)" ]; then
+      if [ -n "$(pin_holders)" ]; then pins=pins; elif [ -n "$PINS_EXPECTED" ]; then pins_none=1; fi
+    fi
     if [ -n "$PLAN_ONLY" ]; then
       echo "gates: ${gates:-none}"
       echo "named: ${NAMED_TESTS:-none}"
@@ -708,6 +740,7 @@ case "$MODE" in
       exit 0
     fi
     contract_note
+    [ -z "$pins_none" ] || echo "SKIP pins: no repository beside this checkout holds a pin on it"
     # A file no test names fails here, before any gate runs: write a test (NO_TEST_OK lists only files no test can
     # name yet, and it only shrinks).
     if [ -n "$unnamed" ]; then
@@ -718,7 +751,8 @@ case "$MODE" in
       echo "SKIP changed: no changed path maps to a gate or is named by a test; nothing to run"
       exit 0
     fi
-    key=$(state_key "$gates")
+    # A plan_from that sets NAMED_TESTS keys on it, even empty, as its green runs were keyed.
+    key=$(state_key "$gates${NAMED_TESTS+ $NAMED_TESTS}")
     green=0
     if [ -n "$gates" ] && [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then
       echo "PASS $gates: unchanged since its last green run"
@@ -765,9 +799,22 @@ case "$MODE" in
           continue
         fi
       fi
+      pins_home "$holder"
+      run_ws=$PINS_SRC
+      linked=""
+      if [ "$PINS_SRC" != "$ws" ]; then
+        if ! linked=$(linked_workspace "$PINS_SRC" "$PINS_ME"); then
+          echo "SKIP pins $name: this checkout could not be linked beside its main checkout's repositories"
+          record_set "$PINS_OWED" "$name" "this checkout could not be linked beside its main checkout's repositories"
+          worse 3
+          continue
+        fi
+        run_ws=$linked
+      fi
       start=$(date +%s)
-      out=$(bash "$holder/scripts/gate.sh" --pins-for "$me" --workspace "$ws" --budget "$left" < /dev/null 2>&1)
+      out=$(bash "$holder/scripts/gate.sh" --pins-for "$PINS_ME" --workspace "$run_ws" --budget "$left" < /dev/null 2>&1)
       hrc=$?
+      [ -z "$linked" ] || rm -rf "${linked:?}"
       took=$(( $(date +%s) - start ))
       case "$hrc" in
         0|5)
@@ -833,7 +880,7 @@ case "$MODE" in
         '!'*) entry=${entry#!}; case ",${entry%%:*}," in *",$TARGET,"*) drop="$drop --deselect ${entry#*:}" ;; esac ;;
         *) case ",${entry%%:*}," in *",$TARGET,"*) files="$files ${entry#*:}" ;; esac ;;
       esac
-    done < <(pins_declared "$SELF")
+    done < <(pins_declared "$(pins_file "$PWD")")
     [ -n "$ONLY" ] && files=" $ONLY"
     [ -n "$files" ] || { echo "SKIP pins $(basename "$PWD"): it holds none on $TARGET"; exit 3; }
     take_lock || { echo "SKIP pins $(basename "$PWD"): another gate run holds its lock"; exit 3; }
