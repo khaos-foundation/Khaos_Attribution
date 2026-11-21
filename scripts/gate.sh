@@ -5,7 +5,7 @@
 ALL_GATES="pytest"
 # Named only, never in all, --changed or --quick: the release needs it, and a machine without torch must not go red.
 NAMED_GATES="torch"
-# Python files under src/ and scripts/ that no test names yet, known: exact paths only, and the list only shrinks
+# Python files under src/ and scripts/ that no test can name yet: exact paths only, and the list only shrinks
 # (gate.sh --stale fails on a path that got a test or a new glob).
 # engines/sa3/forward_mlx.py: its load_bundle and conditioning are reached only through measure_worker_mlx, and no
 # stand-in test calls them yet.
@@ -601,8 +601,13 @@ case "$MODE" in
       finish 0
     fi
     tests=$(printf '%s\n' "$fresh" | quick_tests)
-    # At most fifty files are looked up here; --changed looks at all of them.
-    unnamed=$(printf '%s\n' "$fresh" | head -50 | unnamed_sources)
+    # At most fifty changed source files are looked up here; --changed looks them all up.
+    sources=$(printf '%s\n' "$fresh" | grep -E '^(src|scripts)/.*\.py$' || true)
+    n_sources=$(printf '%s' "$sources" | grep -c . || true)
+    unnamed=$(printf '%s\n' "$sources" | head -50 | unnamed_sources)
+    if [ "$n_sources" -gt 50 ]; then
+      echo "SKIP quick: $((n_sources - 50)) more changed source files were not looked up for a test; gate.sh --changed looks them all up"
+    fi
     if [ -n "$unnamed" ]; then
       n=$(printf '%s\n' "$unnamed" | wc -l | tr -d ' ')
       shown=$(printf '%s\n' "$unnamed" | head -5 | tr '\n' ' ')
@@ -670,10 +675,10 @@ case "$MODE" in
       exit 0
     fi
     contract_note
-    # A file no test names fails here, before any gate runs: write a test (NO_TEST_OK is for files that cannot be
-    # tested, and it only shrinks).
+    # A file no test names fails here, before any gate runs: write a test (NO_TEST_OK lists only files no test can
+    # name yet, and it only shrinks).
     if [ -n "$unnamed" ]; then
-      printf '%s\n' "$unnamed" | sed 's/^/FAIL changed: no test file names /; s/$/; write a test (NO_TEST_OK is for files that cannot be tested, and it only shrinks)/'
+      printf '%s\n' "$unnamed" | sed 's/^/FAIL changed: no test file names /; s/$/; write a test (NO_TEST_OK lists only files no test can name yet, and it only shrinks)/'
       exit 1
     fi
     if [ -z "$gates" ] && [ -z "$owed" ] && [ -z "$pins" ]; then
