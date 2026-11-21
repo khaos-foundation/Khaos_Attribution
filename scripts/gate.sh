@@ -5,10 +5,10 @@
 ALL_GATES="pytest"
 # Named only, never in all, --changed or --quick: the release needs it, and a machine without torch must not go red.
 NAMED_GATES="torch"
-# Python files under src/ and scripts/ that no test names yet, known: the list only shrinks, and gate.sh --stale fails
-# on a glob that no longer matches an untested file.
-NO_TEST_OK="scripts/watermark_survival.py src/khaos_attribution/engines/*/convert_worker.py src/khaos_attribution/seal/__main__.py
-  src/register_service/bom.py"
+# Python files under src/ and scripts/ that no test names yet, known: exact paths only, and the list only shrinks
+# (gate.sh --stale fails on a path that got a test or a new glob).
+NO_TEST_OK="scripts/watermark_survival.py src/khaos_attribution/engines/mimetic/convert_worker.py
+  src/khaos_attribution/engines/sa3/convert_worker.py src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
 
 gate_cmd() {
   local py
@@ -120,7 +120,7 @@ quick_tests() {
       base=${p##*/}
       case "$p" in
         ''|*/|archive/*|reports/*|docs/research/*) continue ;;
-        tests/*conftest.py)
+        conftest.py|*/conftest.py)
           git ls-files -co --exclude-standard -- "${p%conftest.py}" 2> /dev/null
           continue ;;
         tests/*test_*.py)
@@ -135,7 +135,8 @@ quick_tests() {
           continue ;;
       esac
       mod=""
-      case "$p" in src/*.py) mod=$(printf '%s' "${p#src/}" | sed -e 's#/#.#g' -e 's#\.py$##' -e 's#\.__init__$##') ;; esac
+      # A package's __init__.py is named by its file: its package name would select every importer of the package.
+      case "$p" in */__init__.py) ;; src/*.py) mod=$(printf '%s' "${p#src/}" | sed -e 's#/#.#g' -e 's#\.py$##') ;; esac
       case "$base" in
         *.py) pats+=(-e "$base" -e "import ${base%.py}" -e "from ${base%.py}" ${mod:+-e "$mod"}) ;;
         *) pats+=(-e "$base") ;;
@@ -159,7 +160,7 @@ quick_tests() {
 unnamed_sources() {
   local p glob skip
   local -a globs=()
-  read -r -d "" -a globs <<< "${NO_TEST_OK:-}" || true
+  read -r -d "" -a globs <<< "${NO_TEST_OK:-} ${NO_TEST_OK_GLOBS:-}" || true
   while IFS= read -r p; do
     case "$p" in src/*.py|scripts/*.py) [ -f "$p" ] || continue ;; *) continue ;; esac
     skip=0
@@ -236,7 +237,7 @@ owed_tests() {
 # red folder's FAILED and ERROR lines come again at the end, then the folders' counts summed; the exit is the highest
 # red folder's (5, nothing collected, only when every folder has none). Output is held in variables: no temp file to leak.
 pytest_by_folder() {
-  local folder files out one worst=0 ran=0 counts="" failures=""
+  local folder files out one worst=0 red=0 ran=0 counts="" failures=""
   for folder in $(printf '%s\n' "$@" | awk -F/ '{ print (NF > 2 ? $1 "/" $2 : $1) }' | awk '!seen[$0]++'); do
     files=$(printf '%s\n' "$@" | awk -F/ -v f="$folder" '(NF > 2 ? $1 "/" $2 : $1) == f' | tr '\n' ' ')
     out=$(bash -c "$QUICK_PYTEST $files" 2>&1)
@@ -248,6 +249,7 @@ pytest_by_folder() {
       0) ran=1 ;;
       5) ;;
       *)
+        [ "$one" -eq 1 ] && red=1
         [ "$one" -gt "$worst" ] && worst=$one
         failures="$failures$folder (exit $one)
 $(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) ' | head -20)
@@ -261,6 +263,7 @@ $(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) ' | head -20)
     "$(printf '%s' "$counts" | grep -oE '[0-9]+ failed' | awk '{ n += $1 } END { print n + 0 }')" \
     "$(printf '%s' "$counts" | grep -oE '[0-9]+ skipped' | awk '{ n += $1 } END { print n + 0 }')" \
     "$(printf '%s' "$counts" | grep -oE '[0-9]+ errors?' | awk '{ n += $1 } END { print n + 0 }')"
+  [ "$red" -eq 1 ] && return 1
   [ "$worst" -ne 0 ] && return "$worst"
   [ "$ran" -eq 1 ] && return 0
   return 5
@@ -593,7 +596,7 @@ case "$MODE" in
       n=$(printf '%s\n' "$unnamed" | wc -l | tr -d ' ')
       shown=$(printf '%s\n' "$unnamed" | head -5 | tr '\n' ' ')
       [ "$n" -gt 5 ] && shown="${shown}and $((n - 5)) more "
-      echo "SKIP quick: no test file names ${shown% }; gate.sh --changed runs the suite before the PR"
+      echo "SKIP quick: no test file names ${shown% }; gate.sh --changed runs the suite and fails until a test names it or NO_TEST_OK lists it"
     fi
     [ -z "$tests" ] && { remember; pins_then_finish 0; }
     count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
@@ -615,7 +618,9 @@ case "$MODE" in
     take_lock || { echo "SKIP quick: another gate run holds this repository's lock"; finish 0; }
     log=$(mktemp)
     start=$(date +%s)
-    with_timeout "$secs" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
+    left=$(( secs - ($(date +%s) - began) ))
+    [ "$left" -lt 1 ] && left=1
+    with_timeout "$left" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
     rc=$?
     took=$(( $(date +%s) - start ))
     summary=$(grep -E '[0-9]+ (passed|failed)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
@@ -635,6 +640,14 @@ case "$MODE" in
     gates=$(changed_paths | gates_for | tr '\n' ' ')
     gates=${gates% }
     owed=$(owed_tests)
+    unnamed=$(changed_paths | unnamed_sources)
+    if [ -n "$unnamed" ]; then
+      # The suite holds every test; the named tests it would run again are dropped.
+      case " $gates " in
+        *" $SUITE_GATE "*) ;;
+        *) gates=$(printf '%s' " $gates " | sed 's/ named / /g; s/^ *//; s/ *$//'); gates="${gates:+$gates }$SUITE_GATE"; NAMED_TESTS="" ;;
+      esac
+    fi
     pins=""
     if [ -n "$(changed_paths | code_paths)" ] && [ -n "$(pin_holders)" ]; then pins=pins; fi
     if [ -n "$PLAN_ONLY" ]; then
@@ -642,6 +655,7 @@ case "$MODE" in
       echo "named: ${NAMED_TESTS:-none}"
       echo "owed: $(printf '%s' "$owed" | tr '\n' ' ')"
       echo "pins: ${pins:-none}"
+      echo "unnamed: $(printf '%s' "$unnamed" | tr '\n' ' ')"
       exit 0
     fi
     contract_note
@@ -654,7 +668,7 @@ case "$MODE" in
     if [ -n "$gates" ] && [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then
       echo "PASS $gates: unchanged since its last green run"
       green=1
-      [ -z "$owed" ] && [ -z "$pins" ] && exit 0
+      [ -z "$owed" ] && [ -z "$pins" ] && [ -z "$unnamed" ] && exit 0
     fi
     take_lock || { echo "SKIP ${gates:-owed}: another gate run holds this repository's lock"; exit 3; }
     rc=0
@@ -669,6 +683,10 @@ case "$MODE" in
     # What the quick check skipped is run itself, unless the suite gate covered it: another gate may not hold it.
     if [ "$rc" -eq 0 ] && [ -n "$owed" ]; then
       case " $gates " in *" $SUITE_GATE "*) rm -f "${OWED:?}" ;; *) run_owed; rc=$? ;; esac
+    fi
+    if [ -n "$unnamed" ]; then
+      printf '%s\n' "$unnamed" | sed 's/^/FAIL changed: no test file names /; s/$/; write one, or add it to NO_TEST_OK/'
+      rc=1
     fi
     # The pins siblings hold on this repository read them too, so a green run of them is never remembered.
     if [ -n "$pins" ]; then
@@ -779,6 +797,10 @@ case "$MODE" in
     [ -n "$STALE_ONLY" ] || git ls-files -- 'src/*.py' 'scripts/*.py' | unnamed_sources | sed 's/^/UNNAMED /'
     rc=0
     read -r -d "" -a globs <<< "${NO_TEST_OK:-}" || true
+    for glob in ${globs[@]+"${globs[@]}"}; do
+      case "$glob" in *[*?[]*) echo "STALE $glob: NO_TEST_OK takes exact paths; a glob would hide every new file it matches"; rc=1 ;; esac
+    done
+    read -r -d "" -a globs <<< "${NO_TEST_OK:-} ${NO_TEST_OK_GLOBS:-}" || true
     for glob in ${globs[@]+"${globs[@]}"}; do
       if [ -z "$(git ls-files -- 'src/*.py' 'scripts/*.py' | unnamed_under "$glob")" ]; then
         echo "STALE $glob: every file it matches has a test, or none is left"
