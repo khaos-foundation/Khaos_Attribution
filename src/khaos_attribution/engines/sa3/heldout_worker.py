@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import sys
-import zlib
 from pathlib import Path
 
 if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
@@ -17,7 +16,9 @@ if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through
 
 
 def pair_noise_seed(seed: int, name: str) -> int:
-    return (int(seed) * 1_000_003 + zlib.crc32(name.encode("utf-8"))) % (2 ** 31 - 1)
+    """The contract's per-clip noise seed, read once the launcher has put the room's contract in place."""
+    from khaos_attribution.gradient import pair_noise_seed as seed_of  # noqa: PLC0415
+    return seed_of(seed, name)
 
 
 def _load_adapters(wrapped, paths: list, torch) -> None:
@@ -70,51 +71,26 @@ def heldout_torch(req: dict) -> dict:
 
 
 def _score_torch(wrapped, req: dict, torch) -> dict:
-    """Per-sample bucket losses of the clips under the model as it stands."""
-    import soundfile as sf  # noqa: PLC0415
-    from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
+    """Per-sample bucket losses of the clips under the model as it stands: the trainer's forward, noise seeded per
+    clip by torch's own generator, the input at the model's precision."""
+    from khaos_attribution.engines.sa3 import forward_torch as F  # noqa: PLC0415
     model = wrapped.model
     model.eval()
     device = wrapped.device
-    sr = int(model.sample_rate)
-    ratio = int(model.pretransform.downsampling_ratio)
     timesteps = [float(t) for t in req["timesteps"]]
     per_sample = {}
-    clips = sorted(Path(req["clips_dir"]).glob("*.wav"))
     with torch.no_grad():
-        for wav in clips:
-            audio, file_sr = sf.read(str(wav), dtype="float32", always_2d=True)
-            if file_sr != sr:
-                raise RuntimeError(f"{wav.name} is at {file_sr} Hz, the model wants {sr}")
-            x = torch.from_numpy(audio.T).unsqueeze(0).to(device)
-            n = x.shape[-1]
-            padded = ((n + ratio - 1) // ratio) * ratio
-            if padded != n:
-                x = torch.nn.functional.pad(x, (0, padded - n))
-            caption = wav.with_suffix(".txt").read_text(encoding="utf-8").strip() if wav.with_suffix(".txt").exists() else ""
-            seconds = n / sr
-            with torch.autocast(device_type=device if isinstance(device, str) else device.type, enabled=str(device).startswith("cuda")):
-                latents = model.pretransform.encode(x)
-            latents = latents.float()
-            with measure_autocast(device):
-                cond = model.conditioner([{"prompt": caption, "seconds_total": seconds}], device)
-            # The trainer always conditions on an inpaint mask (0 = generate, 1 = keep); a held-out clip is
-            # generated whole, so the mask is all zeros and the masked input empty.
-            cond["inpaint_mask"] = [torch.zeros(1, 1, latents.shape[-1], dtype=torch.bool, device=latents.device)]
-            cond["inpaint_masked_input"] = [torch.zeros_like(latents)]
-            valid = int(round(n / ratio))
-            mask = torch.zeros(1, latents.shape[-1], dtype=torch.bool, device=latents.device)
-            mask[:, :max(1, min(valid, latents.shape[-1]))] = True
+        for wav in sorted(Path(req["clips_dir"]).glob("*.wav")):
+            latents, n, valid = F.encode(model, torch, wav, device)
+            cond = F.condition(model, torch, latents, F.caption(wav), n / int(model.sample_rate), device)
+            mask = F.padding_mask(torch, latents, valid)
             gen = torch.Generator(device="cpu").manual_seed(pair_noise_seed(int(req["seed"]), wav.name))
             noise = torch.randn(latents.shape, generator=gen, dtype=torch.float32).to(latents.device)
             target = noise - latents
             row = {}
             for t in timesteps:
-                tt = torch.full((1,), t, device=latents.device, dtype=torch.float32)
-                noised = latents * (1.0 - t) + noise * t
-                with measure_autocast(device):
-                    out = model(noised.to(model.dtype if hasattr(model, "dtype") else noised.dtype), tt, cond=cond,
-                                cfg_dropout_prob=0.0, padding_mask=mask).float()
+                out = F.forward(model, torch, latents, cond, mask, noise, t,
+                                input_dtype=getattr(model, "dtype", latents.dtype))
                 mse = ((out - target) ** 2).mean(dim=1)
                 row[f"{t:.2f}"] = float(mse[mask].mean())
             per_sample[wav.name] = row
@@ -124,16 +100,13 @@ def _score_torch(wrapped, req: dict, torch) -> dict:
 def heldout_mlx(req: dict) -> dict:
     """The MLX trainer's own loss on its pre-encoded latents, with the model, the conditioner and the adapter loaded
     the way lora_train_mlx.py loads them in main(); t a bucket centre, noise seeded per clip, no CFG dropout."""
-    import importlib  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
     mlx_dir = Path.cwd() / "optimized" / "mlx"
     sys.path.insert(0, str(mlx_dir))
     sys.path.insert(0, str(mlx_dir / "scripts"))
     import mlx.core as mx  # noqa: PLC0415
-    from lora_train_mlx import (DIT_CHOICES, T5GEMMA_NPZ_REL, T5Gemma, TrainBundle,  # noqa: PLC0415
-                                TrainableSecondsEmbedder, build_conditioning, ensure_local, inject_from_lora_config,
-                                load_conditioner_from_npz, load_lora_checkpoint, load_trainable_lora_state,
-                                rectified_flow_loss, underfit_lora_config)
+    from lora_train_mlx import rectified_flow_loss  # noqa: PLC0415
+    from khaos_attribution.engines.sa3 import forward_mlx as FM  # noqa: PLC0415
 
     latents_dir = Path(req["latents_dir"])
     items = []
@@ -143,25 +116,7 @@ def heldout_mlx(req: dict) -> dict:
     if not items:
         raise RuntimeError(f"no pre-encoded latents under {latents_dir}")
     t_lat = max(arr.shape[-1] for _n, _m, arr in items)
-    base_path = req["base_npz"]
-    mod = importlib.import_module(DIT_CHOICES["medium"]["loader"])
-    dit_model = mod.load_dit(base_path, T_lat=t_lat, dtype=mx.float16, compile_=False)
-    t5 = T5Gemma.from_npz(str(ensure_local(T5GEMMA_NPZ_REL)))
-    padding_emb, secs_embedder = load_conditioner_from_npz(base_path, prefix="cond.")
-    secs_module = None
-    # Before the first checkpoint there is no adapter: the base model alone, as the torch path scores it.
-    if req.get("adapter"):
-        sd, ckpt_cfg = load_lora_checkpoint(str(req["adapter"]))
-        lora_config = underfit_lora_config()
-        lora_config.update({k: ckpt_cfg[k] for k in ("adapter_type", "rank", "alpha", "include", "exclude")
-                            if (ckpt_cfg or {}).get(k) is not None})
-        inject_from_lora_config(dit_model, lora_config, checkpoint_prefix="model.")
-        if any(str(k).startswith("conditioners.seconds_total.") for k in sd):
-            secs_module = TrainableSecondsEmbedder(secs_embedder.W, secs_embedder.b)
-            inject_from_lora_config(secs_module, lora_config, checkpoint_prefix="conditioners.seconds_total.")
-    bundle = TrainBundle(dit_model, secs_module)
-    if req.get("adapter"):
-        load_trainable_lora_state(bundle, sd)
+    bundle, t5, padding_emb, secs_embedder, _state = FM.load_bundle(req, t_lat, mx.float16)
     # The generation mask, as the renderer and Khaos's patched trainer condition.
     channels = items[0][2].shape[0]
     lac_const = mx.array(np.zeros((1, 1 + channels, t_lat), np.float32).transpose(0, 2, 1)).astype(mx.float16)
@@ -177,15 +132,8 @@ def heldout_mlx(req: dict) -> dict:
         mask_np[0, :len(meta.get("padding_mask") or [])] = np.asarray(meta.get("padding_mask") or [], bool)[:t_lat]
         loss_mask = mx.array(mask_np)
         prompt = str(meta.get("prompt") or meta.get("text") or "")
-        prompt_cond = build_conditioning(t5, padding_emb, [prompt])
         seconds = float(meta.get("seconds_total") or 0.0)
-        if bundle.secs is not None:
-            sec_tok = bundle.secs(mx.array([seconds], dtype=mx.float32))
-        else:
-            sec_tok = secs_embedder([seconds])
-        sec_tok = mx.stop_gradient(sec_tok.astype(mx.float32))
-        cross16 = mx.concatenate([prompt_cond, sec_tok], axis=1).astype(mx.float16)
-        global16 = sec_tok[:, 0, :].astype(mx.float16)
+        cross16, global16 = FM.conditioning(mx, prompt, seconds, t5, padding_emb, secs_embedder, bundle, mx.float16)
         rng = np.random.default_rng(pair_noise_seed(int(req["seed"]), npy.stem + ".wav"))
         noise = mx.array(rng.standard_normal(arr[None].shape).astype(np.float32)).astype(mx.float16)
 

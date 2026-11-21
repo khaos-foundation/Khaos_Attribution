@@ -305,6 +305,36 @@ def load_sample(path: Path | str) -> dict:
     return {k: data[k] for k in SAMPLE_KEYS}
 
 
+def _pair_inputs(module: Any, sample: dict, noise_seed: int, torch) -> tuple:
+    """(noise, x0, x1, the decoder's other inputs) of one pair on the module's device and precision: the noise drawn
+    on the CPU from the pair's own seed, as the trainer's forward takes it with the randomness removed."""
+    dev, dtype = module.device, module.dtype
+    x0_cpu = sample["target_latents"]
+    gen = torch.Generator(device="cpu").manual_seed(int(noise_seed))
+    noise = torch.randn(x0_cpu.shape, generator=gen, dtype=torch.float32)
+    x0 = x0_cpu.unsqueeze(0).to(dev, dtype=dtype)
+    x1 = noise.unsqueeze(0).to(dev, dtype=dtype)
+    inputs = {"attention_mask": sample["attention_mask"], "encoder_hidden_states": sample["encoder_hidden_states"],
+              "encoder_attention_mask": sample["encoder_attention_mask"], "context_latents": sample["context_latents"]}
+    return noise, x0, x1, {k: v.unsqueeze(0).to(dev, dtype=dtype) for k, v in inputs.items()}
+
+
+def _pair_autocast(module: Any, torch):
+    """The module's own autocast when it runs below float32 on an accelerator; none otherwise."""
+    from contextlib import nullcontext  # noqa: PLC0415
+    if module.device_type in ("cuda", "xpu", "mps") and module.dtype != torch.float32:
+        return torch.autocast(device_type=module.device_type, dtype=module.dtype)
+    return nullcontext()
+
+
+def _pair_decode(module: Any, decoder: Any, x0, x1, inputs: dict, t: float, torch):
+    """The decoder's output at ``t`` from ``x_t = t·x1 + (1−t)·x0``."""
+    tt = torch.full((1,), t, device=module.device, dtype=module.dtype)
+    t_ = tt.unsqueeze(-1).unsqueeze(-1)
+    xt = t_ * x1 + (1.0 - t_) * x0
+    return decoder(hidden_states=xt, timestep=tt, timestep_r=tt, **inputs)
+
+
 def pair_gradient(module: Any, sample: dict, *, timesteps: Sequence[float], noise_seed: int,
                   params: Sequence[Any] | None = None, target: str = "vnorm",
                   timestep_norm: bool = False) -> np.ndarray:
@@ -312,7 +342,6 @@ def pair_gradient(module: Any, sample: dict, *, timesteps: Sequence[float], nois
     from the trainer's forward with the randomness removed; ``vnorm``
     differentiates the predicted velocity's squared norm, ``loss`` the MSE."""
     import torch  # noqa: PLC0415
-    from contextlib import nullcontext  # noqa: PLC0415
 
     if target not in TARGETS:
         raise ValueError(f"target must be one of {TARGETS}, not {target!r}")
@@ -320,16 +349,7 @@ def pair_gradient(module: Any, sample: dict, *, timesteps: Sequence[float], nois
     ts = [float(t) for t in timesteps]
     if not ts:
         raise ValueError("pair_gradient needs at least one timestep")
-    dev, dtype = module.device, module.dtype
-    x0_cpu = sample["target_latents"]
-    gen = torch.Generator(device="cpu").manual_seed(int(noise_seed))
-    noise = torch.randn(x0_cpu.shape, generator=gen, dtype=torch.float32)
-    x0 = x0_cpu.unsqueeze(0).to(dev, dtype=dtype)
-    x1 = noise.unsqueeze(0).to(dev, dtype=dtype)
-    attention_mask = sample["attention_mask"].unsqueeze(0).to(dev, dtype=dtype)
-    ehs = sample["encoder_hidden_states"].unsqueeze(0).to(dev, dtype=dtype)
-    eam = sample["encoder_attention_mask"].unsqueeze(0).to(dev, dtype=dtype)
-    ctx = sample["context_latents"].unsqueeze(0).to(dev, dtype=dtype)
+    noise, x0, x1, inputs = _pair_inputs(module, sample, noise_seed, torch)
     flow = x1 - x0
     decoder = module.model.decoder
     was_training = bool(getattr(decoder, "training", True))
@@ -338,16 +358,8 @@ def pair_gradient(module: Any, sample: dict, *, timesteps: Sequence[float], nois
     total: Any = None
     try:
         for t in ts:
-            tt = torch.full((1,), t, device=dev, dtype=dtype)
-            t_ = tt.unsqueeze(-1).unsqueeze(-1)
-            xt = t_ * x1 + (1.0 - t_) * x0
-            if module.device_type in ("cuda", "xpu", "mps") and dtype != torch.float32:
-                ctx_mgr = torch.autocast(device_type=module.device_type, dtype=dtype)
-            else:
-                ctx_mgr = nullcontext()
-            with torch.enable_grad(), ctx_mgr:
-                out = decoder(hidden_states=xt, timestep=tt, timestep_r=tt, attention_mask=attention_mask,
-                              encoder_hidden_states=ehs, encoder_attention_mask=eam, context_latents=ctx)
+            with torch.enable_grad(), _pair_autocast(module, torch):
+                out = _pair_decode(module, decoder, x0, x1, inputs, t, torch)
                 if target == "vnorm":
                     loss = out[0].float().pow(2).mean()
                 else:
@@ -374,22 +386,12 @@ def pair_loss(module: Any, sample: dict, *, timesteps: Sequence[float], noise_se
     """The flow-matching loss of one pair, the mean over ``timesteps``: the
     trainer's forward with the randomness removed and no gradient taken."""
     import torch  # noqa: PLC0415
-    from contextlib import nullcontext  # noqa: PLC0415
 
     ts = [float(t) for t in timesteps]
     if not ts:
         raise ValueError("pair_loss needs at least one timestep")
-    dev, dtype = module.device, module.dtype
-    x0_cpu = sample["target_latents"]
-    gen = torch.Generator(device="cpu").manual_seed(int(noise_seed))
-    noise = torch.randn(x0_cpu.shape, generator=gen, dtype=torch.float32)
-    target = noise - x0_cpu.to(torch.float32)
-    x0 = x0_cpu.unsqueeze(0).to(dev, dtype=dtype)
-    x1 = noise.unsqueeze(0).to(dev, dtype=dtype)
-    attention_mask = sample["attention_mask"].unsqueeze(0).to(dev, dtype=dtype)
-    ehs = sample["encoder_hidden_states"].unsqueeze(0).to(dev, dtype=dtype)
-    eam = sample["encoder_attention_mask"].unsqueeze(0).to(dev, dtype=dtype)
-    ctx = sample["context_latents"].unsqueeze(0).to(dev, dtype=dtype)
+    noise, x0, x1, inputs = _pair_inputs(module, sample, noise_seed, torch)
+    target = noise - sample["target_latents"].to(torch.float32)
     decoder = module.model.decoder
     was_training = bool(getattr(decoder, "training", True))
     if hasattr(decoder, "eval"):
@@ -397,16 +399,8 @@ def pair_loss(module: Any, sample: dict, *, timesteps: Sequence[float], noise_se
     total = 0.0
     try:
         for t in ts:
-            tt = torch.full((1,), t, device=dev, dtype=dtype)
-            t_ = tt.unsqueeze(-1).unsqueeze(-1)
-            xt = t_ * x1 + (1.0 - t_) * x0
-            if module.device_type in ("cuda", "xpu", "mps") and dtype != torch.float32:
-                ctx_mgr = torch.autocast(device_type=module.device_type, dtype=dtype)
-            else:
-                ctx_mgr = nullcontext()
-            with torch.no_grad(), ctx_mgr:
-                out = decoder(hidden_states=xt, timestep=tt, timestep_r=tt, attention_mask=attention_mask,
-                              encoder_hidden_states=ehs, encoder_attention_mask=eam, context_latents=ctx)
+            with torch.no_grad(), _pair_autocast(module, torch):
+                out = _pair_decode(module, decoder, x0, x1, inputs, t, torch)
             pred = out[0].squeeze(0).detach().to("cpu", torch.float32)
             total += float(torch.nn.functional.mse_loss(pred, target))
     finally:

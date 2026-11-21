@@ -72,32 +72,14 @@ def _latents(files, encoder_box):
 
 def _load(req: dict, t_lat: int):
     """The DiT, the conditioner and the adapter, loaded as lora_train_mlx.py's main() loads them."""
-    import importlib  # noqa: PLC0415
     mx, _nn = _imports()
-    from lora_train_mlx import (DIT_CHOICES, T5GEMMA_NPZ_REL, T5Gemma, TrainBundle, TrainableSecondsEmbedder,  # noqa: PLC0415
-                                ensure_local, inject_from_lora_config, load_conditioner_from_npz, load_lora_checkpoint,
-                                load_trainable_lora_state, underfit_lora_config)
+    from khaos_attribution.engines.sa3 import forward_mlx as FM  # noqa: PLC0415
     if not req.get("adapter"):
         raise RuntimeError("a feature needs the adapter; none was named")
-    base_path = str(req["base_npz"])
-    mod = importlib.import_module(DIT_CHOICES["medium"]["loader"])
-    dit = mod.load_dit(base_path, T_lat=int(t_lat), dtype=_half(mx), compile_=False)
-    t5 = T5Gemma.from_npz(str(ensure_local(T5GEMMA_NPZ_REL)))
-    padding_emb, secs_embedder = load_conditioner_from_npz(base_path, prefix="cond.")
-    state, cfg = load_lora_checkpoint(str(req["adapter"]))
-    lora_config = underfit_lora_config()
-    lora_config.update({k: cfg[k] for k in ("adapter_type", "rank", "alpha", "include", "exclude")
-                        if (cfg or {}).get(k) is not None})
-    inject_from_lora_config(dit, lora_config, checkpoint_prefix="model.")
-    secs = None
-    if any(str(k).startswith("conditioners.seconds_total.") for k in state):
-        secs = TrainableSecondsEmbedder(secs_embedder.W, secs_embedder.b)
-        inject_from_lora_config(secs, lora_config, checkpoint_prefix="conditioners.seconds_total.")
-    bundle = TrainBundle(dit, secs)
-    load_trainable_lora_state(bundle, state)
+    bundle, t5, padding_emb, secs_embedder, state = FM.load_bundle(req, t_lat, _half(mx))
     if int(t_lat) > CHECKPOINT_ABOVE_LATENTS:
         from lora_train_mlx import grad_checkpoint  # noqa: PLC0415
-        grad_checkpoint(dit.transformer.layers[0])
+        grad_checkpoint(bundle.dit.transformer.layers[0])
     return bundle, t5, padding_emb, secs_embedder, state
 
 
@@ -132,15 +114,9 @@ def _ordered_names(bundle, state) -> tuple:
 def _conditioning(mx, item, t5, padding_emb, secs_embedder, bundle):
     """cross_attn, global_cond and the local inpaint conditioning, as the trainer builds them, detached."""
     import numpy as np  # noqa: PLC0415
-    from lora_train_mlx import build_conditioning  # noqa: PLC0415
-    prompt_cond = build_conditioning(t5, padding_emb, [item["prompt"]])
-    if bundle.secs is not None:
-        sec_tok = bundle.secs(mx.array([item["seconds"]], dtype=mx.float32))
-    else:
-        sec_tok = secs_embedder([item["seconds"]])
-    sec_tok = mx.stop_gradient(sec_tok.astype(mx.float32))
-    cross16 = mx.concatenate([prompt_cond, sec_tok], axis=1).astype(_half(mx))
-    global16 = sec_tok[:, 0, :].astype(_half(mx))
+    from khaos_attribution.engines.sa3 import forward_mlx as FM  # noqa: PLC0415
+    cross16, global16 = FM.conditioning(mx, item["prompt"], item["seconds"], t5, padding_emb, secs_embedder, bundle,
+                                        _half(mx))
     # The generation mask: what the renderer, the torch trainer and Khaos's patched MLX trainer condition on.
     t_lat = item["latents"].shape[-1]
     lac = mx.array(np.zeros((1, 1 + item["latents"].shape[0], t_lat), np.float32).transpose(0, 2, 1)).astype(_half(mx))
