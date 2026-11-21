@@ -122,7 +122,8 @@ class Renderer:
         self._end_resident()
 
     def _end_resident(self) -> None:
-        """The resident worker, if one runs, stopped, so its model leaves the device."""
+        """The resident worker, if one runs, stopped, so its model leaves the device. Asked mid-render, it waits for
+        that render to finish (up to its deadline), so a caller on an event loop must not end a worker mid-render."""
         with self._resident_lock:
             if self._resident is not None:
                 self._resident.close()

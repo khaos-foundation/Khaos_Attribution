@@ -372,7 +372,8 @@ class Resident:
                     reply = json.loads(line[len(REPLY_PREFIX):])
                     break
         except BaseException:
-            self.close()
+            if not self._err.closed:  # _failed has already closed it
+                self.close()
             raise
         if reply.get("error"):
             raise WorkerFailed(f"the {self.label} worker failed: {reply['error']}", why=str(reply["error"]))
