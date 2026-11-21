@@ -5,6 +5,13 @@
 ALL_GATES="pytest"
 # Named only, never in all, --changed or --quick: the release needs it, and a machine without torch must not go red.
 NAMED_GATES="torch"
+# Python files under src/ and scripts/ that no test can name yet: exact paths only, and the list only shrinks
+# (gate.sh --stale fails on a path that got a test or a new glob).
+# engines/sa3/forward_mlx.py: its load_bundle and conditioning are reached only through measure_worker_mlx, and no
+# stand-in test calls them yet.
+NO_TEST_OK="scripts/watermark_survival.py src/khaos_attribution/engines/mimetic/convert_worker.py
+  src/khaos_attribution/engines/sa3/convert_worker.py src/khaos_attribution/engines/sa3/forward_mlx.py
+  src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
 
 gate_cmd() {
   local py
@@ -85,7 +92,7 @@ QUICK_MAX_FILES=25
 QUICK_PYTEST="$VENV/python -m pytest -q -p no:cacheprovider"
 
 usage() {
-  echo "usage: scripts/gate.sh [all | <gate>... | --changed | --quick | --hook] [--budget SECONDS]"
+  echo "usage: scripts/gate.sh [all | <gate>... | --changed | --plan | --quick | --hook | --unnamed | --stale] [--budget SECONDS]"
   echo "gates: $ALL_GATES; by name only: $NAMED_GATES"
   echo "pins: the tests a repository beside this one holds on it, which --changed and --quick also run"
 }
@@ -104,20 +111,107 @@ branch_files() {
   done
 }
 
-# Changed paths on stdin; on stdout, each once, a changed test file itself or the test files that name a changed file.
+# Changed paths on stdin; on stdout, each once, the test files for them. A changed test file itself, and the files
+# that import from it; under a changed conftest.py, every test file it reaches; for a doc, the test files that name it
+# or its folder, and the repository's test_docs_current files; for any other file, the test files that name it by its
+# file name, its module name or its dotted path under src/, also as `from <package> import (... <name> ...)`.
 quick_tests() {
-  local p base
+  local p base mod item parent name f
+  local -a pats=() parents=()
+  {
+    while IFS= read -r p; do
+      base=${p##*/}
+      case "$p" in
+        ''|*/|archive/*|reports/*|docs/research/*) continue ;;
+        conftest.py|*/conftest.py)
+          git ls-files -co --exclude-standard -- "${p%conftest.py}" 2> /dev/null
+          continue ;;
+        tests/*test_*.py)
+          [ -f "$p" ] || continue
+          echo "$p"
+          pats+=(-e "from ${base%.py} import" -e "import ${base%.py}")
+          continue ;;
+        docs/*|*.md)
+          pats+=(-e "$base" -e "$p")
+          case "$p" in docs/*/*) pats+=(-e "${p%/*}") ;; esac
+          git ls-files -co --exclude-standard -- 'tests/*test_docs_current*.py' 2> /dev/null
+          continue ;;
+      esac
+      mod=""
+      # A package's __init__.py is named by its file: its package name would select every importer of the package.
+      case "$p" in */__init__.py) ;; src/*.py) mod=$(printf '%s' "${p#src/}" | sed -e 's#/#.#g' -e 's#\.py$##') ;; esac
+      case "$base" in
+        *.py) pats+=(-e "$base" -e "import ${base%.py}" -e "from ${base%.py}" ${mod:+-e "$mod"}) ;;
+        *) pats+=(-e "$base") ;;
+      esac
+      case "$mod" in *.*) parents+=("${mod%.*} ${mod##*.}") ;; esac
+    done
+    # One search for every pattern: a quick run's time goes to its tests.
+    # A line that is only a comment names nothing.
+    [ "${#pats[@]}" -eq 0 ] || git grep --untracked -w -F "${pats[@]}" -- 'tests/*.py' 2> /dev/null |
+      grep -v -E '^[^:]+:[[:space:]]*#' | cut -d: -f1
+    for item in ${parents[@]+"${parents[@]}"}; do
+      parent=${item% *}
+      name=${item#* }
+      git grep --untracked -l -F "from $parent import" -- 'tests/*.py' 2> /dev/null | while IFS= read -r f; do
+        grep -v -E '^[[:space:]]*#' "$f" | grep -q -w -F -- "$name" && echo "$f"
+      done
+    done
+  } | grep -E '(^|/)test_[^/]*\.py$' | awk '!seen[$0]++'
+}
+
+# Changed paths on stdin; on stdout the Python files under src/ and scripts/ that no test file names, which a quick run
+# cannot check, less those this repository's NO_TEST_OK globs say are known to have none.
+unnamed_sources() {
+  local p glob skip
+  local -a globs=()
+  read -r -d "" -a globs <<< "${NO_TEST_OK:-} ${NO_TEST_OK_GLOBS:-}" || true
   while IFS= read -r p; do
-    case "$p" in
-      archive/*|docs/*|reports/*|*.md) continue ;;
-      tests/*test_*.py) [ -f "$p" ] && echo "$p"; continue ;;
+    case "$p" in src/*.py|scripts/*.py) [ -f "$p" ] || continue ;; *) continue ;; esac
+    skip=0
+    for glob in ${globs[@]+"${globs[@]}"}; do
+      # shellcheck disable=SC2254
+      case "$p" in $glob) skip=1 ;; esac
+    done
+    [ "$skip" -eq 0 ] && [ -z "$(printf '%s\n' "$p" | quick_tests)" ] && echo "$p"
+  done
+  return 0
+}
+
+# Paths on stdin; on stdout those the glob $1 matches that no test file names.
+unnamed_under() {
+  local p
+  while IFS= read -r p; do
+    # shellcheck disable=SC2254
+    case "$p" in $1) [ -z "$(printf '%s\n' "$p" | quick_tests)" ] && echo "$p" ;; esac
+  done
+  return 0
+}
+
+# The venv's packages and the contract's file list: a venv another checkout moved is not the one that ran green.
+venv_packages() {
+  local site
+  for site in .venv/lib/python*/site-packages .venv/Lib/site-packages; do
+    [ -d "$site" ] || continue
+    # One order whatever the locale, so the key does not move with the shell's sorting.
+    (cd "$site" && { LC_ALL=C ls -d -- *.dist-info; cat -- khaos_attribution-*.dist-info/RECORD; }) 2> /dev/null
+  done
+}
+
+# One line when the venv's contract is not this checkout's pin: its tests then fail for the venv, not the change.
+contract_note() {
+  local file pin="" have
+  for file in src/common/contract.py src/listening_space/contract.py; do
+    [ -f "$file" ] && pin=$(sed -n 's/^CONTRACT_VERSION = "\(.*\)"$/\1/p' "$file") && break
+  done
+  have=$(venv_packages | sed -n 's/^khaos_attribution-\(.*\)\.dist-info$/\1/p' | tr '\n' ' ')
+  have=${have% }
+  if [ -n "$pin" ] && [ -n "$have" ] && [ "$have" != "$pin" ]; then
+    case " $have " in
+      *" $pin "*) echo "NOTE contract: the venv holds more than one khaos_attribution ($have), $file pins $pin; re-run the installer (never uv sync)" ;;
+      *) echo "NOTE contract: the venv holds khaos_attribution $have, $file pins $pin; re-run the installer (never uv sync)" ;;
     esac
-    base=${p##*/}
-    case "$base" in
-      *.py) git grep --untracked -l -w -F -e "$base" -e "import ${base%.py}" -e "from ${base%.py}" -- 'tests/*.py' ;;
-      *) git grep --untracked -l -w -F -e "$base" -- 'tests/*.py' ;;
-    esac 2> /dev/null
-  done | grep -E '(^|/)test_[^/]*\.py$' | awk '!seen[$0]++'
+  fi
 }
 
 state_key() {
@@ -126,6 +220,7 @@ state_key() {
     git rev-parse HEAD
     git diff HEAD --
     git ls-files --others --exclude-standard | while IFS= read -r f; do git hash-object -- "$f"; done
+    venv_packages
   } 2> /dev/null | git hash-object --stdin
 }
 
@@ -149,10 +244,10 @@ owed_tests() {
 
 # Runs test files with $QUICK_PYTEST, one pytest process per top-level test folder: in one process a module name is
 # imported once, so two folders' modules of the same name (a conftest.py, a helper imported by name) collide. Each
-# red folder's FAILED and ERROR lines come again at the end, then the folders' counts summed; the exit is the worst
-# folder's (5, nothing collected, only when every folder has none). Output is held in variables: no temp file to leak.
+# red folder's FAILED and ERROR lines come again at the end, then the folders' counts summed; the exit is the highest
+# red folder's (5, nothing collected, only when every folder has none). Output is held in variables: no temp file to leak.
 pytest_by_folder() {
-  local folder files out one worst=0 ran=0 counts="" failures=""
+  local folder files out one worst=0 red=0 ran=0 counts="" failures=""
   for folder in $(printf '%s\n' "$@" | awk -F/ '{ print (NF > 2 ? $1 "/" $2 : $1) }' | awk '!seen[$0]++'); do
     files=$(printf '%s\n' "$@" | awk -F/ -v f="$folder" '(NF > 2 ? $1 "/" $2 : $1) == f' | tr '\n' ' ')
     out=$(bash -c "$QUICK_PYTEST $files" 2>&1)
@@ -164,7 +259,8 @@ pytest_by_folder() {
       0) ran=1 ;;
       5) ;;
       *)
-        worst=$one
+        [ "$one" -eq 1 ] && red=1
+        [ "$one" -gt "$worst" ] && worst=$one
         failures="$failures$folder (exit $one)
 $(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) ' | head -20)
 "
@@ -177,6 +273,7 @@ $(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) ' | head -20)
     "$(printf '%s' "$counts" | grep -oE '[0-9]+ failed' | awk '{ n += $1 } END { print n + 0 }')" \
     "$(printf '%s' "$counts" | grep -oE '[0-9]+ skipped' | awk '{ n += $1 } END { print n + 0 }')" \
     "$(printf '%s' "$counts" | grep -oE '[0-9]+ errors?' | awk '{ n += $1 } END { print n + 0 }')"
+  [ "$red" -eq 1 ] && return 1
   [ "$worst" -ne 0 ] && return "$worst"
   [ "$ran" -eq 1 ] && return 0
   return 5
@@ -417,6 +514,8 @@ else:
 
 MODE=names
 BUDGET=0
+PLAN_ONLY=""
+STALE_ONLY=""
 TARGET=""
 WORKSPACE=""
 ONLY=""
@@ -428,6 +527,9 @@ while [ $# -gt 0 ]; do
     --hook) MODE=hook ;;
     --budget) BUDGET=${2:-0}; shift ;;
     --pins) MODE=pins ;;
+    --plan) MODE=changed; PLAN_ONLY=1 ;;
+    --unnamed) MODE=unnamed ;;
+    --stale) MODE=unnamed; STALE_ONLY=1 ;;
     --pins-for) MODE=pins_for; TARGET=${2:-}; shift ;;
     --workspace) WORKSPACE=${2:-}; shift ;;
     --only) ONLY=${2:-}; shift ;;
@@ -450,7 +552,7 @@ case "$MODE" in
     exit 0 ;;
   quick)
     # The test files a quick run had to skip are owed: every later run counts them until they have run green.
-    owe() { { cat "$OWED" 2> /dev/null; printf '%s\n' "$tests"; } | sort -u > "$OWED.tmp" && mv "$OWED.tmp" "$OWED"; }
+    owe() { { cat "$OWED" 2> /dev/null; printf '%s\n' "$1"; } | grep -v '^$' | sort -u > "$OWED.tmp" && mv "$OWED.tmp" "$OWED"; }
     finish() {
       if [ -s "$OWED" ]; then
         owed_tests > "$OWED.tmp"
@@ -499,18 +601,42 @@ case "$MODE" in
       finish 0
     fi
     tests=$(printf '%s\n' "$fresh" | quick_tests)
+    # At most fifty changed source files are looked up here; --changed looks them all up.
+    sources=$(printf '%s\n' "$fresh" | grep -E '^(src|scripts)/.*\.py$' || true)
+    n_sources=$(printf '%s' "$sources" | grep -c . || true)
+    unnamed=$(printf '%s\n' "$sources" | head -50 | unnamed_sources)
+    if [ "$n_sources" -gt 50 ]; then
+      echo "SKIP quick: $((n_sources - 50)) more changed source files were not looked up for a test; gate.sh --changed looks them all up"
+    fi
+    if [ -n "$unnamed" ]; then
+      n=$(printf '%s\n' "$unnamed" | wc -l | tr -d ' ')
+      shown=$(printf '%s\n' "$unnamed" | head -5 | tr '\n' ' ')
+      [ "$n" -gt 5 ] && shown="${shown}and $((n - 5)) more "
+      echo "SKIP quick: no test file names ${shown% }; gate.sh --changed fails until a test names it"
+    fi
     [ -z "$tests" ] && { remember; pins_then_finish 0; }
     count=$(printf '%s\n' "$tests" | wc -l | tr -d ' ')
     if [ "$count" -gt "$QUICK_MAX_FILES" ]; then
-      echo "SKIP quick: $count test files name the change; gate.sh --changed checks it before the PR"
-      remember
-      owe
-      pins_then_finish 0
+      # Over the cap the changed test files still run; the files that only import from them are owed.
+      own=$(printf '%s\n' "$fresh" | grep -E '^tests/(.*/)?test_[^/]*\.py$' | while IFS= read -r t; do [ -f "$t" ] && echo "$t"; done)
+      n_own=$(printf '%s' "$own" | grep -c . || true)
+      if [ "$n_own" -eq 0 ] || [ "$n_own" -gt "$QUICK_MAX_FILES" ]; then
+        echo "SKIP quick: $count test files name the change; gate.sh --changed checks it before the PR"
+        remember
+        owe "$tests"
+        pins_then_finish 0
+      fi
+      echo "SKIP quick: $((count - n_own)) more test files name the change; gate.sh --changed checks them before the PR"
+      owe "$(comm -23 <(printf '%s\n' "$tests" | sort -u) <(printf '%s\n' "$own" | sort -u))"
+      tests=$own
+      count=$n_own
     fi
     take_lock || { echo "SKIP quick: another gate run holds this repository's lock"; finish 0; }
     log=$(mktemp)
     start=$(date +%s)
-    with_timeout "$secs" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
+    left=$(( secs - ($(date +%s) - began) ))
+    [ "$left" -lt 1 ] && left=1
+    with_timeout "$left" bash -c "pytest_by_folder $(printf '%s' "$tests" | tr '\n' ' ')" > "$log" 2>&1
     rc=$?
     took=$(( $(date +%s) - start ))
     summary=$(grep -E '[0-9]+ (passed|failed)' "$log" | tail -1 | sed -E 's/=+//g; s/^ +//; s/ +$//')
@@ -519,7 +645,7 @@ case "$MODE" in
       124)
         echo "SKIP quick: over ${secs}s ($count test files); gate.sh --changed checks it before the PR"
         remember
-        owe
+        owe "$tests"
         rc=0 ;;
       *) echo "FAIL quick (${took}s, exit $rc): $(printf '%s' "$tests" | tr '\n' ' ')"; tail -60 "$log"; rc=1 ;;
     esac
@@ -530,8 +656,31 @@ case "$MODE" in
     gates=$(changed_paths | gates_for | tr '\n' ' ')
     gates=${gates% }
     owed=$(owed_tests)
+    unnamed=$(changed_paths | unnamed_sources)
+    if [ -n "$unnamed" ]; then
+      # The suite holds every test; the named tests it would run again are dropped.
+      case " $gates " in
+        *" $SUITE_GATE "*) ;;
+        *) gates=$(printf '%s' " $gates " | sed 's/ named / /g; s/^ *//; s/ *$//'); gates="${gates:+$gates }$SUITE_GATE"; NAMED_TESTS="" ;;
+      esac
+    fi
     pins=""
     if [ -n "$(changed_paths | code_paths)" ] && [ -n "$(pin_holders)" ]; then pins=pins; fi
+    if [ -n "$PLAN_ONLY" ]; then
+      echo "gates: ${gates:-none}"
+      echo "named: ${NAMED_TESTS:-none}"
+      echo "owed: $(printf '%s' "$owed" | tr '\n' ' ')"
+      echo "pins: ${pins:-none}"
+      echo "unnamed: $(printf '%s' "$unnamed" | tr '\n' ' ')"
+      exit 0
+    fi
+    contract_note
+    # A file no test names fails here, before any gate runs: write a test (NO_TEST_OK lists only files no test can
+    # name yet, and it only shrinks).
+    if [ -n "$unnamed" ]; then
+      printf '%s\n' "$unnamed" | sed 's/^/FAIL changed: no test file names /; s/$/; write a test (NO_TEST_OK lists only files no test can name yet, and it only shrinks)/'
+      exit 1
+    fi
     if [ -z "$gates" ] && [ -z "$owed" ] && [ -z "$pins" ]; then
       echo "SKIP changed: no changed path maps to a gate or is named by a test; nothing to run"
       exit 0
@@ -660,6 +809,23 @@ case "$MODE" in
     export QUICK_PYTEST
     with_timeout "$BUDGET" bash -c "pytest_by_folder$files"
     exit $? ;;
+  unnamed)
+    # Every tracked Python file under src/ and scripts/ no test names (not with --stale), and each NO_TEST_OK glob that
+    # no longer matches an unnamed file: the list only shrinks, so a stale glob fails and a new unnamed file is shown.
+    [ -n "$STALE_ONLY" ] || git ls-files -- 'src/*.py' 'scripts/*.py' | unnamed_sources | sed 's/^/UNNAMED /'
+    rc=0
+    read -r -d "" -a globs <<< "${NO_TEST_OK:-}" || true
+    for glob in ${globs[@]+"${globs[@]}"}; do
+      case "$glob" in *[*?[]*) echo "STALE $glob: NO_TEST_OK takes exact paths; a glob would hide every new file it matches"; rc=1 ;; esac
+    done
+    read -r -d "" -a globs <<< "${NO_TEST_OK:-} ${NO_TEST_OK_GLOBS:-}" || true
+    for glob in ${globs[@]+"${globs[@]}"}; do
+      if [ -z "$(git ls-files -- 'src/*.py' 'scripts/*.py' | unnamed_under "$glob")" ]; then
+        echo "STALE $glob: every file it matches has a test, or none is left"
+        rc=1
+      fi
+    done
+    exit "$rc" ;;
   names)
     [ ${#NAMES[@]} -eq 0 ] && { usage; exit 2; }
     expanded=()
@@ -670,6 +836,7 @@ case "$MODE" in
     for g in "${NAMES[@]}"; do
       [ "$g" = pins ] || gate_cmd "$g" > /dev/null || { echo "no gate named $g"; usage; exit 2; }
     done
+    contract_note
     take_lock || { echo "another gate run holds this repository's lock"; exit 3; }
     run_gates "${NAMES[@]}"
     rc=$?
