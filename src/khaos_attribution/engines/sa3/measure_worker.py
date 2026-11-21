@@ -63,65 +63,32 @@ def _require_switch_off(wrapped, model, torch, what: str) -> None:
                            f"the adapter cannot be switched off for {what}")
 
 
-def _encode(model, torch, wav: Path, device):
-    """(latents, sample count, valid frame count) of one clip through the engine's autoencoder."""
-    import soundfile as sf  # noqa: PLC0415
-    sr = int(model.sample_rate)
-    ratio = int(model.pretransform.downsampling_ratio)
-    audio, file_sr = sf.read(str(wav), dtype="float32", always_2d=True)
-    if file_sr != sr:
-        raise RuntimeError(f"{wav.name} is at {file_sr} Hz, the model wants {sr}")
-    x = torch.from_numpy(audio.T).unsqueeze(0).to(device)
-    n = x.shape[-1]
-    padded = ((n + ratio - 1) // ratio) * ratio
-    if padded != n:
-        x = torch.nn.functional.pad(x, (0, padded - n))
-    with torch.no_grad():
-        with torch.autocast(device_type=device if isinstance(device, str) else device.type, enabled=str(device).startswith("cuda")):
-            latents = model.pretransform.encode(x)
-    latents = latents.float().detach()
-    return latents, n, max(1, min(int(round(n / ratio)), latents.shape[-1]))
-
-
 def _clip(model, torch, wav: Path, device, pair_seed: int):
     """One clip as the trainer sees it: latents, conditioning with an empty inpaint mask, the padding mask, the
     seeded noise."""
-    sr = int(model.sample_rate)
-    latents, n, valid = _encode(model, torch, wav, device)
-    caption = wav.with_suffix(".txt").read_text(encoding="utf-8").strip() if wav.with_suffix(".txt").exists() else ""
+    from khaos_attribution import gradient as G  # noqa: PLC0415
+    from khaos_attribution.engines.sa3 import forward_torch as F  # noqa: PLC0415
+    latents, n, valid = F.encode(model, torch, wav, device)
     # The conditioning is taken once and detached: the feature is the DiT adapter's gradient, and a conditioner
     # graph reused across timesteps would be walked twice.
-    from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
-    with torch.no_grad(), measure_autocast(device):
-        cond = model.conditioner([{"prompt": caption, "seconds_total": n / sr}], device)
-    cond = _detached(cond, torch)
-    cond["inpaint_mask"] = [torch.zeros(1, 1, latents.shape[-1], dtype=torch.bool, device=latents.device)]
-    cond["inpaint_masked_input"] = [torch.zeros_like(latents)]
-    mask = torch.zeros(1, latents.shape[-1], dtype=torch.bool, device=latents.device)
-    mask[:, :valid] = True
-    from khaos_attribution import gradient as G  # noqa: PLC0415
+    cond = F.condition(model, torch, latents, F.caption(wav), n / int(model.sample_rate), device)
     noise = torch.from_numpy(G.pair_noise(pair_seed, latents.shape)).to(latents.device)
-    return latents, cond, mask, noise
+    return latents, cond, F.padding_mask(torch, latents, valid), noise
+
+
+def _encode(model, torch, wav: Path, device):
+    from khaos_attribution.engines.sa3 import forward_torch as F  # noqa: PLC0415
+    return F.encode(model, torch, wav, device)
 
 
 def _detached(value, torch):
-    if isinstance(value, dict):
-        return {k: _detached(v, torch) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return type(value)(_detached(v, torch) for v in value)
-    if hasattr(value, "detach"):
-        return value.detach()
-    return value
+    from khaos_attribution.engines.sa3 import forward_torch as F  # noqa: PLC0415
+    return F.detached(value, torch)
 
 
 def _forward(model, torch, latents, cond, mask, noise, t: float, *, checkpointing: bool = True):
-    from khaos_attribution.engines.sa3.loading import measure_autocast  # noqa: PLC0415
-    tt = torch.full((1,), t, device=latents.device, dtype=torch.float32)
-    noised = latents * (1.0 - t) + noise * t
-    # Checkpointed blocks run their forward twice, so a forward hook would see each layer twice.
-    extra = {} if checkpointing else {"use_checkpointing": False}
-    with measure_autocast(latents.device):
-        return model(noised, tt, cond=cond, cfg_dropout_prob=0.0, padding_mask=mask, **extra).float()
+    from khaos_attribution.engines.sa3 import forward_torch as F  # noqa: PLC0415
+    return F.forward(model, torch, latents, cond, mask, noise, t, checkpointing=checkpointing)
 
 
 # vmean and dmean take the gradient of the signed mean of the prediction (or of the adapter's delta): the scalar
