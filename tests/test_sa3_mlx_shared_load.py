@@ -61,7 +61,8 @@ def _fake_trainer():
 
     def rectified_flow_loss(model_fn, clean, t, noise=None, loss_mask=None):
         out = model_fn(clean.astype(np.float32), t)
-        return float(np.mean(out * loss_mask[:, None, :]) + float(np.mean(noise)) * 0.0)
+        # The noise counts, so the worker's per-clip seed and draw are pinned with the loss.
+        return float(np.mean(out * loss_mask[:, None, :]) + 0.1 * float(np.mean(noise.astype(np.float32) ** 2)))
     T.rectified_flow_loss = rectified_flow_loss
     return T
 
@@ -90,6 +91,8 @@ def mlx_stand_in(monkeypatch):
     return mx
 
 
+# Produced by main's heldout_worker.py on this stand-in, before the load was shared.
+A_WITH, B_WITH, A_BASE, B_BASE = 4.819815158843994, 1.2706491947174072, 3.7541897296905518, 0.7373484969139099
 LOAD_WITH_ADAPTER = [
     ("ensure_local", "t5gemma.npz"), ("t5", "/cache/t5gemma.npz"), ("conditioner", "/b/base.npz", "cond."),
     ("lora_checkpoint", "/a/adapter.safetensors"), ("underfit",),
@@ -112,12 +115,13 @@ def test_the_held_out_worker_loads_and_conditions_as_the_trainer_does(mlx_stand_
     assert CALLS[0] == ("load_dit", "/b/base.npz", 5, "float16", False)
     assert CALLS[1:] == LOAD_WITH_ADAPTER
     assert out["per_sample"].keys() == {"a_seg_000.wav", "b_seg_001.wav"} and out["runtime"] == "mlx"
-    # Produced by main's heldout_worker.py on this stand-in, before the load was shared.
-    assert out["per_sample"]["a_seg_000.wav"]["0.50"] == pytest.approx(4.692816, rel=1e-5)
-    assert out["per_sample"]["b_seg_001.wav"]["0.50"] == pytest.approx(1.239996, rel=1e-5)
+    assert out["per_sample"]["a_seg_000.wav"]["0.50"] == pytest.approx(A_WITH, rel=1e-5)
+    assert out["per_sample"]["b_seg_001.wav"]["0.50"] == pytest.approx(B_WITH, rel=1e-5)
     CALLS.clear()
-    HW.heldout_mlx({**req, "adapter": None})
+    base = HW.heldout_mlx({**req, "adapter": None})
     assert CALLS[1:] == LOAD_WITH_ADAPTER[:3] + [("bundle", False)], "the base alone, as the torch path scores it"
+    assert base["per_sample"]["a_seg_000.wav"]["0.50"] == pytest.approx(A_BASE, rel=1e-5)
+    assert base["per_sample"]["b_seg_001.wav"]["0.50"] == pytest.approx(B_BASE, rel=1e-5)
 
 
 def test_the_measure_worker_loads_and_conditions_as_the_trainer_does(mlx_stand_in, monkeypatch):
