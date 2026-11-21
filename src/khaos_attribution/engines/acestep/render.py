@@ -167,7 +167,7 @@ class AceStepRenderer:
     """The weights once per process, an adapter per variant, one render at a time (the caller serialises)."""
 
     def __init__(self, repo_dir, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float | None = None):
+                 base_resident: bool = False, default_adapter_scale: float | None = None, **engine_options):
         self.repo_dir = Path(repo_dir).resolve()
         self.checkpoint_dir = Path(checkpoint_dir).resolve() if checkpoint_dir else None
         self.device = device
@@ -304,9 +304,10 @@ class AceStepRenderer:
         self._yielded = True
         flush_accelerator()
 
-    def forget_adapter(self, name: str) -> None:
+    def forget_adapter(self, name: str | None = None) -> None:
+        """No longer serve ``name``'s adapter, or with no name any adapter."""
         for variant, active in self._active.items():
-            if active == name:
+            if name is None or active == name:
                 self._active[variant] = None
 
     # ── the adapter ──────────────────────────────────────────────────────────
@@ -322,10 +323,11 @@ class AceStepRenderer:
         if stripped.startswith("⚠️"):
             log.warning("%s: %s", doing, status)
 
-    def apply_adapter(self, adapter_path, scale: float | None, variant: str) -> tuple:
+    def apply_adapter(self, adapter_path, scale: float | None, variant: str | None = None) -> tuple:
         """Attach the adapter to the variant's weights (unload then load on a change: a LoKR patches the decoder in
         place) and set its strength; returns (applied, via). The LyCORIS multiplier takes the number whole; without it
         ACE-Step's control clamps to [0, 1]."""
+        variant = variant or DESCRIPTOR.default_variant
         adapter_path = Path(adapter_path)
         handler = self._handler_for(variant)
         loaded, name = self._loaded[variant], adapter_path.parent.name

@@ -19,8 +19,8 @@ STEPS = 4
 class Renderer:
     """The surface the rooms drive: load, resolve_variant, apply_adapter, generate; nothing heavier than wave."""
 
-    def __init__(self, repo_dir=None, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float | None = None):
+    def __init__(self, repo_dir=None, checkpoint_dir=None, device: str = "auto",
+                 default_adapter_scale: float | None = None, **engine_options):
         self.repo_dir = repo_dir
         self.device = "cpu" if device == "auto" else device
         self.default_adapter_scale = float(DESCRIPTOR.adapter_strength if default_adapter_scale is None else default_adapter_scale)
@@ -50,7 +50,7 @@ class Renderer:
         self.adapter = (digest, scale)
         return scale, "mock"
 
-    def forget_adapter(self) -> None:
+    def forget_adapter(self, name: str | None = None) -> None:
         self.adapter = None
 
     def release_base(self) -> None:

@@ -49,8 +49,8 @@ def worker_env(root: Path) -> dict:
 class Renderer:
     """The surface the rooms drive; every render is one worker process in the engine's environment."""
 
-    def __init__(self, repo_dir=None, checkpoint_dir=None, device: str = "auto", base_checkpoint=None,
-                 base_resident: bool = False, default_adapter_scale: float | None = None):
+    def __init__(self, repo_dir=None, checkpoint_dir=None, device: str = "auto",
+                 default_adapter_scale: float | None = None, **engine_options):
         self.root = find_root(repo_dir)
         self.checkpoint_dir = Path(checkpoint_dir).resolve() if checkpoint_dir else None
         self.device = device
@@ -79,7 +79,7 @@ class Renderer:
         self.adapter = (str(Path(path).resolve()), scale)
         return scale, "lora_strength"
 
-    def forget_adapter(self) -> None:
+    def forget_adapter(self, name: str | None = None) -> None:
         self.adapter = None
 
     def release_base(self) -> None:

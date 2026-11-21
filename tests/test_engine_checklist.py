@@ -13,7 +13,7 @@ def test_the_mock_engine_passes_the_whole_checklist_live(tmp_path):
     assert result.passed, result.report()
     names = {f.name for f in result.findings}
     assert {"live.deterministic", "live.seed_matters", "live.sample_rate", "live.duration", "live.cancel",
-            "render.words", "measure.memory_plan"} <= names
+            "render.words", "measure.memory_plan", "render.Renderer.calls", "live.progress"} <= names
 
 
 @pytest.mark.parametrize("engine_id", ["acestep-1.5", "stable-audio-3"])
@@ -156,3 +156,39 @@ def test_the_mocks_measure_path_runs_end_to_end(tmp_path):
     with pytest.raises(Exception, match="block sketches"):
         M.index_rows(handle, files, projection=make_projection(n, 8, 1), timesteps=[0.5], noise_seed=7,
                      param_groups="x", groups_out=tmp_path / "g.npy")
+
+
+@pytest.mark.parametrize("engine_id", sorted(E.KNOWN_ENGINES))
+def test_every_renderer_takes_every_call_the_rooms_make(tmp_path, engine_id):
+    """One written Renderer: each engine's methods take the rooms' calls, forget_adapter with or without a name."""
+    from khaos_attribution.engines import render as R
+    result = C.check(engine_id, tmp_path, live=False)
+    assert "render.Renderer.calls" in {f.name for f in result.findings if f.ok}, result.report()
+    assert set(R.RENDERER_METHODS) <= {n for n in dir(R.Renderer) if not n.startswith("_")}
+
+
+def test_a_renderer_whose_forget_takes_only_a_name_fails_the_checklist(tmp_path, monkeypatch):
+    mock = E.engine("mock")
+
+    class Strict(mock.render.Renderer):
+        def forget_adapter(self, name):
+            return None
+    slot = types.SimpleNamespace(**{**{n: getattr(mock.render, n) for n in C.RENDER_NAMES}, "Renderer": Strict})
+
+    class Engine:
+        descriptor = mock.descriptor
+        render = slot
+        train = mock.train
+        measure = mock.measure
+    monkeypatch.setattr(C, "engine", lambda engine_id: Engine())
+    result = C.check("mock", tmp_path)
+    assert "render.Renderer.calls" in {f.name for f in result.failed} and "forget_adapter" in result.report()
+
+
+def test_the_mocks_progress_is_a_rising_fraction_that_ends_whole(tmp_path):
+    from khaos_attribution.engines.render import RenderRequest
+    seen = []
+    renderer = E.engine("mock").render.Renderer()
+    renderer.generate(RenderRequest(prompt="p", duration_seconds=1.0, seed=1), None, tmp_path / "o.wav",
+                      on_progress=lambda done, total=1.0: seen.append(done / total))
+    assert seen and seen == sorted(seen) and seen[-1] == 1.0 and all(0.0 <= f <= 1.0 for f in seen)
