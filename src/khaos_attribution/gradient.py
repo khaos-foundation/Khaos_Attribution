@@ -327,12 +327,11 @@ def _pair_autocast(module: Any, torch):
     return nullcontext()
 
 
-def _pair_decode(module: Any, decoder: Any, x0, x1, inputs: dict, t: float, torch):
-    """The decoder's output at ``t`` from ``x_t = t·x1 + (1−t)·x0``."""
+def _pair_xt(module: Any, x0, x1, t: float, torch) -> tuple:
+    """(t, x_t) at the module's precision, ``x_t = t·x1 + (1−t)·x0``."""
     tt = torch.full((1,), t, device=module.device, dtype=module.dtype)
     t_ = tt.unsqueeze(-1).unsqueeze(-1)
-    xt = t_ * x1 + (1.0 - t_) * x0
-    return decoder(hidden_states=xt, timestep=tt, timestep_r=tt, **inputs)
+    return tt, t_ * x1 + (1.0 - t_) * x0
 
 
 def pair_gradient(module: Any, sample: dict, *, timesteps: Sequence[float], noise_seed: int,
@@ -358,8 +357,9 @@ def pair_gradient(module: Any, sample: dict, *, timesteps: Sequence[float], nois
     total: Any = None
     try:
         for t in ts:
+            tt, xt = _pair_xt(module, x0, x1, t, torch)
             with torch.enable_grad(), _pair_autocast(module, torch):
-                out = _pair_decode(module, decoder, x0, x1, inputs, t, torch)
+                out = decoder(hidden_states=xt, timestep=tt, timestep_r=tt, **inputs)
                 if target == "vnorm":
                     loss = out[0].float().pow(2).mean()
                 else:
@@ -399,8 +399,9 @@ def pair_loss(module: Any, sample: dict, *, timesteps: Sequence[float], noise_se
     total = 0.0
     try:
         for t in ts:
+            tt, xt = _pair_xt(module, x0, x1, t, torch)
             with torch.no_grad(), _pair_autocast(module, torch):
-                out = _pair_decode(module, decoder, x0, x1, inputs, t, torch)
+                out = decoder(hidden_states=xt, timestep=tt, timestep_r=tt, **inputs)
             pred = out[0].squeeze(0).detach().to("cpu", torch.float32)
             total += float(torch.nn.functional.mse_loss(pred, target))
     finally:

@@ -30,6 +30,8 @@ def _toy(torch):
 
     class Toy(torch.nn.Module):
         sample_rate = RATE
+        # The held-out worker casts its input to the model's precision; the measure worker does not.
+        dtype = torch.bfloat16
 
         def __init__(self):
             super().__init__()
@@ -44,8 +46,8 @@ def _toy(torch):
 
         def forward(self, x, t, cond=None, cfg_dropout_prob=0.0, padding_mask=None, **kw):
             assert torch.count_nonzero(cond["inpaint_mask"][0]) == 0 and torch.count_nonzero(cond["inpaint_masked_input"][0]) == 0
-            h = torch.einsum("bct,cd->bdt", x, self.w)
-            return torch.tanh(h + cond["emb"] + t.view(1, 1, 1)) * padding_mask.unsqueeze(1)
+            h = torch.einsum("bct,cd->bdt", x, self.w.to(x.dtype))
+            return torch.tanh(h + cond["emb"].to(x.dtype) + t.view(1, 1, 1).to(x.dtype)) * padding_mask.unsqueeze(1)
 
     class Wrapped:
         def __init__(self):
@@ -59,44 +61,50 @@ def _toy(torch):
 def _clips(tmp_path, torch):
     import soundfile as sf
     rng = np.random.default_rng(5)
-    for name, n, words in (("a_seg_000", 30, "a bright riff"), ("b_seg_001", 16, "")):
+    for name, n, words in (("a_seg_000", 29, "a bright riff"), ("b_seg_001", 16, "")):
         sf.write(str(tmp_path / f"{name}.wav"), (0.3 * rng.standard_normal((n, 2))).astype(np.float32), RATE, subtype="FLOAT")
         if words:
             (tmp_path / f"{name}.txt").write_text(words, encoding="utf-8")
     return sorted(tmp_path.glob("*.wav"))
 
 
-# Produced by d0f48fb's heldout_worker.py and measure_worker.py on this toy (CPU, float32).
+# Produced by 3d9d28b's heldout_worker.py and measure_worker.py on this toy (CPU).
 FROZEN = {
  "heldout": {
   "a_seg_000.wav": {
-   "0.25": 3.655775785446167,
-   "0.75": 4.244961261749268
+   "0.25": 3.546501398086548,
+   "0.75": 4.232885360717773
   },
   "b_seg_001.wav": {
-   "0.25": 3.5399017333984375,
-   "0.75": 3.6973724365234375
+   "0.25": 2.6972880363464355,
+   "0.75": 3.055788993835449
   }
  },
  "forward": [
-  -0.4638978838920593,
-  0.4167802333831787,
-  0.2940020263195038,
-  0.6916921138763428,
-  0.4833274185657501,
-  0.7396332621574402,
-  0.4671363830566406,
-  0.38252896070480347,
-  0.9999792575836182,
-  0.9999661445617676,
+  -0.465086966753006,
+  0.4155265986919403,
+  0.29261621832847595,
+  0.6909005045890808,
+  0.48216453194618225,
+  0.738945722579956,
+  0.4659501910209656,
+  -0.0,
+  0.9999748468399048,
   0.9999589323997498,
-  0.9999425411224365,
-  0.9999449849128723,
-  0.9999062418937683,
-  0.9999677538871765,
-  0.9999634027481079
+  0.9999502301216125,
+  0.9999303221702576,
+  0.9999332427978516,
+  0.9998862147331238,
+  0.9999608993530273,
+  0.0
  ],
- "loss": 4.709249973297119
+ "loss": 3.3510621786117554,
+ "gradient": [
+  0.13132111728191376,
+  0.00012260081712156534,
+  0.02185479737818241,
+  -5.2118743042228743e-05
+ ]
 }
 
 
@@ -106,18 +114,22 @@ def _values(torch, tmp_path):
     req = {"clips_dir": str(tmp_path), "timesteps": TIMESTEPS, "seed": 11}
     heldout = HW._score_torch(wrapped, req, torch)
     clip = MW._clip(wrapped.model, torch, wavs[0], "cpu", 1234)
+    masks = [MW._clip(wrapped.model, torch, w, "cpu", 1)[2].reshape(-1).tolist() for w in wavs]
     forward = MW._forward(wrapped.model, torch, *clip, 0.5).reshape(-1).tolist()
     loss = MW._loss(wrapped.model, torch, clip, TIMESTEPS)
-    return {"heldout": heldout, "forward": forward, "loss": loss}
+    flat, _residual = MW._gradient(wrapped.model, torch, [wrapped.model.w], clip, TIMESTEPS, "vnorm")
+    return {"heldout": heldout, "forward": forward, "loss": loss, "gradient": [float(v) for v in flat], "_masks": masks}
 
 
 def test_the_shared_forward_gives_the_frozen_values(tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("soundfile")
     got = _values(torch, tmp_path)
+    assert not all(all(m) for m in got.pop("_masks")), "a clip's padding mask leaves frames out"
     assert got["heldout"].keys() == FROZEN["heldout"].keys()
     for name, row in FROZEN["heldout"].items():
         np.testing.assert_allclose([got["heldout"][name][k] for k in sorted(row)], [row[k] for k in sorted(row)],
                                    rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(got["forward"], FROZEN["forward"], rtol=1e-5, atol=1e-6)
     assert got["loss"] == pytest.approx(FROZEN["loss"], rel=1e-5)
+    np.testing.assert_allclose(got["gradient"], FROZEN["gradient"], rtol=1e-5, atol=1e-7)
