@@ -487,6 +487,7 @@ WORKERS = [("khaos_attribution.engines.sa3.worker", "render_torch"),
            ("khaos_attribution.engines.sa3.heldout_worker", "heldout_torch"),
            ("khaos_attribution.engines.sa3.measure_worker", "run"),
            ("khaos_attribution.engines.sa3.measure_worker_mlx", "run"),
+           ("khaos_attribution.engines.sa3.tid_worker", "run"),
            ("khaos_attribution.engines.mimetic.worker", "render"),
            ("khaos_attribution.engines.mimetic.heldout_worker", "heldout"),
            ("khaos_attribution.engines.mimetic.measure_worker", "run")]
