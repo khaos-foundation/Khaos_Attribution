@@ -12,6 +12,7 @@ import secrets
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,13 @@ class Renderer:
         self.loaded: str | None = None
         self.adapter: tuple | None = None
         self.descriptor = DESCRIPTOR
+        # One worker kept between renders, on torch, only where the descriptor's switch says so. The descriptor's
+        # memory.resident_gb counts no model between renders: turning the switch on gives it the worker's footprint.
+        self.resident = bool(DESCRIPTOR.runtime.get("resident_render")) and self.runtime == "torch"
+        self._resident: W.Resident | None = None
+        self._resident_key: tuple | None = None
+        # A render and an end of its worker take turns: an end asked mid-render waits for that render to finish.
+        self._resident_lock = threading.RLock()
 
     def load(self, variant: str | None = None) -> None:
         """Nothing stays resident between renders; load checks the environment is there and the variant is known."""
@@ -105,12 +113,62 @@ class Renderer:
 
     def forget_adapter(self, name: str | None = None) -> None:
         self.adapter = None
+        self._end_resident()
 
     def release_base(self) -> None:
-        return None
+        self._end_resident()
 
     def yield_memory(self) -> None:
-        return None
+        self._end_resident()
+
+    def _end_resident(self) -> None:
+        """The resident worker, if one runs, stopped, so its model leaves the device. Asked mid-render, it waits for
+        that render to finish (up to its deadline), so a caller on an event loop must not end a worker mid-render."""
+        with self._resident_lock:
+            if self._resident is not None:
+                self._resident.close()
+            self._resident, self._resident_key = None, None
+
+    @staticmethod
+    def _resident_key_of(request: dict) -> tuple:
+        """What a resident worker holds: the model, and the adapter file as it is on disk, so a rewritten file at
+        the same path is loaded again."""
+        adapter = request.get("adapter")
+        try:
+            stat = Path(adapter).stat() if adapter else None
+        except OSError:
+            stat = None
+        return request["model"], adapter, (stat.st_size, stat.st_mtime_ns) if stat else None
+
+    def _resident_reply(self, request: dict, should_stop, on_step) -> dict:
+        """The render through the worker that holds this model and adapter, started first when none does; an
+        adapter or model change ends the one before, so no two adapters ever share a model."""
+        from khaos_attribution.engines import contract_guard  # noqa: PLC0415
+        with self._resident_lock:
+            key = self._resident_key_of(request)
+            if self._resident is None or not self._resident.alive or self._resident_key != key:
+                self._end_resident()
+                python = python_for(self.root, self.runtime)
+                contract_guard.require(python, engine="Stable Audio 3", engine_id=DESCRIPTOR.id, error=RenderFailed)
+                try:
+                    self._resident = W.Resident(python, WORKER, cwd=self.root, env=W.engine_env(self.root),
+                                                label="Stable Audio 3")
+                except W.WorkerFailed as exc:
+                    raise RenderFailed(str(exc)) from None
+                self._resident_key = key
+            resident = self._resident
+            try:
+                return resident.ask(request, on_row=on_step, should_stop=should_stop, required=("seed",))
+            except W.WorkerCancelled:
+                self._end_resident()
+                raise RenderCancelled() from None
+            except W.WorkerFailed as exc:
+                if not resident.alive:
+                    self._end_resident()
+                raise RenderFailed(str(exc)) from None
+            except Exception:
+                self._end_resident()
+                raise
 
     def worker_request(self, req: RenderRequest, out_path: Path, **rework) -> dict:
         """The worker's JSON: Khaos's request in the engine's words, the descriptor's row filling what is unset; a
@@ -168,7 +226,8 @@ class Renderer:
         if on_progress is not None:
             on_progress(done, total)
         try:
-            reply = run_worker(self.root, self.runtime, request, should_stop=should_stop, on_step=step)
+            reply = (self._resident_reply(request, should_stop, step) if self.resident
+                     else run_worker(self.root, self.runtime, request, should_stop=should_stop, on_step=step))
         except (RenderCancelled, RenderFailed):
             # A worker stopped past its grace is killed before it can tidy up, so its unfinished audio goes here.
             part_path(request["out"]).unlink(missing_ok=True)
