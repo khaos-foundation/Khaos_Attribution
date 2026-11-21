@@ -86,8 +86,8 @@ def test_only_a_torch_run_of_1_changes_the_rule(tmp_path):
 
 
 def test_the_gate_looks_for_an_interpreter_with_every_package_the_torch_run_needs():
-    """gate.sh's interpreter probe and the conftest's torch-run list name the same packages."""
-    gate = (Path(__file__).parents[1] / "scripts" / "gate.sh").read_text(encoding="utf-8")
+    """gate.conf.sh's interpreter probe and the conftest's torch-run list name the same packages."""
+    gate = (Path(__file__).parents[1] / "scripts" / "gate.conf.sh").read_text(encoding="utf-8")
     probe = re.search(r'^TORCH_RUN_NEEDS="([^"]*)"', gate, re.M)
     listed = re.search(r"^TORCH_RUN_NEEDS = \(([^)]*)\)", CONFTEST.read_text(encoding="utf-8"), re.M)
     assert probe and listed
