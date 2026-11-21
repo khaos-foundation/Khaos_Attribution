@@ -12,6 +12,7 @@ import pytest
 from khaos_attribution import tid as T
 from khaos_attribution.engines.sa3 import measure as M
 from khaos_attribution.engines.sa3 import measure_worker as W
+from khaos_attribution.engines.sa3 import tid_worker as TW
 from khaos_attribution.gradient import GradientUnavailable
 
 
@@ -116,17 +117,17 @@ def test_the_hooks_lora_factor_matrices_give_autogradss_gradients():
                      (torch.nn.Conv1d(6, 4, 1, bias=False), lambda g: torch.randn(2, 6, 9, generator=g, dtype=torch.float64))):
         _adapt(torch, layer, rank=3, alpha=6.0, seed=2)
         lora = layer.parametrizations.weight[0]
-        entries = W._lora_modules(layer, ["parametrizations.weight.0.lora_A"])
-        assert [e[0] for e in entries] == [""] and W._lora_scale(lora) == 2.0
+        entries = TW._lora_modules(layer, ["parametrizations.weight.0.lora_A"])
+        assert [e[0] for e in entries] == [""] and TW._lora_scale(lora) == 2.0
         seen = {}
 
         def sink(key, lo, X, G_out):
-            a_A, b_A, a_B, b_B = T.lora_factor_matrices(X, G_out, lo.lora_A.detach(), lo.lora_B.detach(), W._lora_scale(lo))
+            a_A, b_A, a_B, b_B = T.lora_factor_matrices(X, G_out, lo.lora_A.detach(), lo.lora_B.detach(), TW._lora_scale(lo))
             seen["A"], seen["B"] = b_A @ a_A.T, b_B @ a_B.T
 
         gen = torch.Generator().manual_seed(9)
         inp = x(gen)
-        with W._TidHooks(entries, sink):
+        with TW._TidHooks(entries, sink):
             y = layer(inp)
             weights = torch.randn(y.shape, generator=gen, dtype=torch.float64)
             gA, gB = torch.autograd.grad((y * weights).sum(), [lora.lora_A, lora.lora_B])
@@ -202,24 +203,24 @@ def test_the_worker_path_equals_a_brute_force_kronecker_reference(tmp_path, targ
     model, wrapped, names, params = _toy(torch)
     train, queries = _clips(torch, [7, 9, 5, 8], seed=21), _clips(torch, [6, 9], seed=22)
     grid, seed = [0.85, 0.4, 0.15], 1000
-    entries = W._lora_modules(model, names)
+    entries = TW._lora_modules(model, names)
     acc = T.FactorAccumulator()
-    W._tid_factor_pass(model, torch, train, grid, seed, target, entries, acc, wrapped=wrapped, params=params)
+    TW._tid_factor_pass(model, torch, train, grid, seed, target, entries, acc, wrapped=wrapped, params=params)
     modules = acc.save(tmp_path)
-    live, dropped = W._tid_live(names, modules)
+    live, dropped = TW._tid_live(names, modules)
     assert sorted(dropped) == sorted(n for n in names if n.startswith(("zero.", "unused."))), \
         "a layer on a zero input and a layer never run carry no gradient"
     (tmp_path / T.FACTORS_RECORD).write_text(json.dumps({"tid_version": T.TID_VERSION, "modules": modules}))
-    summary = W.run({"command": "tid_invert", "factors_dir": str(tmp_path), "alpha": 0.1})
+    summary = TW.run({"command": "tid_invert", "factors_dir": str(tmp_path), "alpha": 0.1})
     assert summary["factors"] == 16 and summary["max_trace_deviation"] < 1e-12
-    layout, bounds, order, n_live = W._tid_layout(names, params, live)
+    layout, bounds, order, n_live = TW._tid_layout(names, params, live)
     assert order == live and n_live == sum(int(p.numel()) for n, p in zip(names, params) if n in set(live))
-    inverses = W._tid_inverses(tmp_path, list(layout), pin=False)
-    sink = W._RowSink(layout)
+    inverses = TW._tid_inverses(tmp_path, list(layout), pin=False)
+    sink = TW._RowSink(layout)
     kept = [e for e in entries if e[0] in layout]
     K = np.zeros((len(grid), len(queries), len(train)))
     for m, t in enumerate(grid):
-        k_m, l_m = W._tid_draw(model, torch, train, queries, m, t, seed, target, kept, layout, inverses, sink,
+        k_m, l_m = TW._tid_draw(model, torch, train, queries, m, t, seed, target, kept, layout, inverses, sink,
                                n_live=n_live, wrapped=wrapped, params=params, train_chunk=3, bounds=bounds)
         assert torch.allclose(l_m.sum(dim=1), k_m, rtol=0, atol=1e-12), "the tensors' shares sum to the kernel"
         K[m] = k_m.numpy()
@@ -245,16 +246,16 @@ def test_every_clip_of_a_draw_is_noised_at_that_draws_time_with_its_shared_noise
         seen.append((t, noise.detach().clone()))
         return forward(model_, torch_, latents, cond, mask, noise, t, **kw)
 
-    monkeypatch.setattr(W, "_forward", spy)
-    entries = W._lora_modules(model, names)
-    W._tid_factor_pass(model, torch, train + queries, grid, seed, "vmean", entries, T.FactorAccumulator(),
+    monkeypatch.setattr(TW, "_forward", spy)
+    entries = TW._lora_modules(model, names)
+    TW._tid_factor_pass(model, torch, train + queries, grid, seed, "vmean", entries, T.FactorAccumulator(),
                        wrapped=wrapped, params=params)
     assert len(seen) == len(grid) * 3
     for t, noise in seen:
         m = grid.index(t)
         want = torch.from_numpy(T.draw_noise(seed, m, tuple(noise.shape))).to(noise.dtype)
         assert torch.equal(noise, want), "draw m pairs grid[m] with draw_noise(seed, m) for every clip"
-    src = inspect.getsource(W)
+    src = inspect.getsource(TW)
     for fn in ("_tid_factor_pass", "_tid_draw"):
         body = src[src.index(f"def {fn}("):]
         body = body[:body.index("\ndef ", 1)]
@@ -270,41 +271,41 @@ def test_the_forward_turns_checkpointing_off_only_when_asked():
     assert model.kwargs == {"use_checkpointing": False}
     W._forward(model, torch, latents, cond, mask, torch.zeros_like(latents), 0.5)
     assert model.kwargs == {}, "every other measure keeps the engine's own checkpointing"
-    src = inspect.getsource(W._tid_backward)
+    src = inspect.getsource(TW._tid_backward)
     assert src.count("checkpointing=False") == 2
 
 
 def test_a_layer_run_twice_in_one_forward_is_refused():
     torch = _torch()
     model, wrapped, names, params = _toy(torch, twice=True)
-    entries = W._lora_modules(model, names)
+    entries = TW._lora_modules(model, names)
     with pytest.raises(RuntimeError, match="ran twice in one forward"):
-        W._tid_factor_pass(model, torch, _clips(torch, [5], seed=26), [0.5], 1000, "vmean", entries,
+        TW._tid_factor_pass(model, torch, _clips(torch, [5], seed=26), [0.5], 1000, "vmean", entries,
                            T.FactorAccumulator(), wrapped=wrapped, params=params)
 
 
 def test_compiled_blocks_and_live_dropout_are_refused(monkeypatch):
     entries = [("layer", None, SimpleNamespace(training=False), "linear")]
-    W._tid_guard(entries)
+    TW._tid_guard(entries)
     monkeypatch.setenv("ENABLE_TORCH_COMPILE", "1")
     with pytest.raises(RuntimeError, match="ENABLE_TORCH_COMPILE"):
-        W._tid_guard(entries)
+        TW._tid_guard(entries)
     monkeypatch.delenv("ENABLE_TORCH_COMPILE")
     with pytest.raises(RuntimeError, match="training mode"):
-        W._tid_guard([("layer", None, SimpleNamespace(training=True), "linear")])
+        TW._tid_guard([("layer", None, SimpleNamespace(training=True), "linear")])
 
 
 def test_a_weight_decomposed_or_stacked_adapter_is_refused():
     torch = _torch()
     layer = _adapt(torch, torch.nn.Linear(4, 3), adapter_type="dora-rows")
     with pytest.raises(RuntimeError, match="plain LoRA"):
-        W._lora_modules(layer, ["parametrizations.weight.0.lora_A"])
+        TW._lora_modules(layer, ["parametrizations.weight.0.lora_A"])
     stacked = _adapt(torch, torch.nn.Linear(4, 3))
     _adapt(torch, stacked)
     with pytest.raises(RuntimeError, match="2 weight parametrizations"):
-        W._lora_modules(stacked, ["parametrizations.weight.0.lora_A"])
+        TW._lora_modules(stacked, ["parametrizations.weight.0.lora_A"])
     with pytest.raises(RuntimeError, match="no LoRA layer"):
-        W._lora_modules(_adapt(torch, torch.nn.Linear(4, 3)), ["parametrizations.weight.0.lora_A"], pattern="nothing")
+        TW._lora_modules(_adapt(torch, torch.nn.Linear(4, 3)), ["parametrizations.weight.0.lora_A"], pattern="nothing")
 
 
 def test_tid_requests_are_refused_on_mlx_and_when_malformed():
@@ -325,9 +326,9 @@ def test_tid_requests_are_refused_on_mlx_and_when_malformed():
     with pytest.raises(GradientUnavailable, match=".npy"):
         M.tid_kernels(cuda, [], [], [], grid=[0.5], noise_seed=0, target="vmean", factors_dir="f", out="k.bin")
     with pytest.raises(RuntimeError, match="strictly inside"):
-        W._tid_settings({"grid": [1.0], "noise_seed": 0})
+        TW._tid_settings({"grid": [1.0], "noise_seed": 0})
     with pytest.raises(RuntimeError, match="target"):
-        W._tid_settings({"grid": [0.5], "noise_seed": 0, "target": "vnorm"})
+        TW._tid_settings({"grid": [0.5], "noise_seed": 0, "target": "vnorm"})
 
 
 def test_the_host_functions_take_the_workshops_keywords_and_check_the_replys_keys():
@@ -350,32 +351,32 @@ def test_the_host_functions_take_the_workshops_keywords_and_check_the_replys_key
 def test_a_resumed_kernels_file_keeps_its_draws_and_refuses_other_settings(tmp_path):
     out = tmp_path / "kernels.npy"
     config = {"grid": [0.5, 0.25], "noise_seed": 1000}
-    K, done = W._tid_store(out, (2, 3, 4), config, resume=True)
+    K, done = TW._tid_store(out, (2, 3, 4), config, resume=True)
     assert done == [] and K.shape == (2, 3, 4) and K.dtype == np.float32
     K[1] = 7.0
     K.flush()
-    W._tid_mark(out, config, [1])
+    TW._tid_mark(out, config, [1])
     del K
-    again, done = W._tid_store(out, (2, 3, 4), config, resume=True)
+    again, done = TW._tid_store(out, (2, 3, 4), config, resume=True)
     assert done == [1] and float(again[1, 0, 0]) == 7.0, "a resumed run skips the draws already written"
     del again
     with pytest.raises(RuntimeError, match="other settings"):
-        W._tid_store(out, (2, 3, 4), {**config, "noise_seed": 1}, resume=True)
+        TW._tid_store(out, (2, 3, 4), {**config, "noise_seed": 1}, resume=True)
     with pytest.raises(RuntimeError, match="not"):
-        W._tid_store(out, (2, 3, 5), config, resume=True)
-    fresh, done = W._tid_store(out, (2, 3, 4), config, resume=False)
+        TW._tid_store(out, (2, 3, 5), config, resume=True)
+    fresh, done = TW._tid_store(out, (2, 3, 4), config, resume=False)
     assert done == [] and not np.asarray(fresh).any()
 
 
 def test_the_factor_pass_can_hold_half_the_transformer_at_a_time():
     keys = [f"model.model.transformer.layers.{i}.ff.ff.2" for i in range(4)] + ["model.model.to_cond_embed.0"]
-    assert W._factor_groups(keys, 1) == [keys]
-    first, second = W._factor_groups(keys, 2)
+    assert TW._factor_groups(keys, 1) == [keys]
+    first, second = TW._factor_groups(keys, 2)
     assert first == keys[:2] and second == keys[2:]
     with pytest.raises(RuntimeError):
-        W._factor_groups(keys, 3)
+        TW._factor_groups(keys, 3)
     with pytest.raises(RuntimeError, match="name none"):
-        W._factor_groups(["model.model.to_cond_embed.0"], 2)
+        TW._factor_groups(["model.model.to_cond_embed.0"], 2)
 
 
 @pytest.fixture
@@ -383,7 +384,7 @@ def _restore_determinism(monkeypatch):
     import os
     import warnings
     torch = _torch()
-    monkeypatch.setattr(W, "_DETERMINISM", {})
+    monkeypatch.setattr(TW, "_DETERMINISM", {})
     shown, had = warnings.showwarning, os.environ.get("CUBLAS_WORKSPACE_CONFIG")
     yield torch
     torch.use_deterministic_algorithms(False)
@@ -402,14 +403,14 @@ def test_flash_attention_runs_its_deterministic_backward_and_is_wrapped_once(_re
         calls.append(deterministic)
         return q
     module = SimpleNamespace(flash_attn_func=fake, flash_attn_kvpacked_func=None, flash_attn_varlen_func=fake)
-    assert W._deterministic_attention(module) == ["flash_attn_func", "flash_attn_varlen_func"]
+    assert TW._deterministic_attention(module) == ["flash_attn_func", "flash_attn_varlen_func"]
     first = module.flash_attn_func
-    assert W._deterministic_attention(module) == ["flash_attn_func", "flash_attn_varlen_func"]
+    assert TW._deterministic_attention(module) == ["flash_attn_func", "flash_attn_varlen_func"]
     assert module.flash_attn_func is first, "a second call must not wrap the wrapper"
     module.flash_attn_func(1, 2, 3)
     module.flash_attn_varlen_func(1, 2, 3)
     assert calls == [True, True]
-    assert W._deterministic_attention(None) == []
+    assert TW._deterministic_attention(None) == []
 
 
 def test_a_tid_pass_is_deterministic_before_the_model_loads(_restore_determinism, monkeypatch):
@@ -426,14 +427,14 @@ def test_a_tid_pass_is_deterministic_before_the_model_loads(_restore_determinism
     def load(req):
         seen.update(env=os.environ.get("CUBLAS_WORKSPACE_CONFIG"), flag=torch.are_deterministic_algorithms_enabled())
         raise Loaded
-    monkeypatch.setattr(W, "_load", load)
+    monkeypatch.setattr(TW, "_load", load)
     monkeypatch.setattr(warnings, "showwarning", lambda *a, **k: None)
     with pytest.raises(Loaded):
-        W._tid_setup({})
-    assert seen == {"env": W.CUBLAS_WORKSPACE, "flag": True}
+        TW._tid_setup({})
+    assert seen == {"env": TW.CUBLAS_WORKSPACE, "flag": True}
     warnings.showwarning("an op does not have a deterministic implementation", UserWarning, "x.py", 1)
     warnings.showwarning("an unrelated warning", UserWarning, "x.py", 2)
-    assert W._DETERMINISM["warned"] == ["an op does not have a deterministic implementation"]
+    assert TW._DETERMINISM["warned"] == ["an op does not have a deterministic implementation"]
 
 
 def test_the_d_trak_commands_do_not_take_the_tid_settings(_restore_determinism, monkeypatch):
@@ -448,4 +449,21 @@ def test_the_d_trak_commands_do_not_take_the_tid_settings(_restore_determinism, 
     monkeypatch.setattr(W, "_load", load)
     with pytest.raises(Loaded):
         W.run({"command": "index"})
-    assert not torch.are_deterministic_algorithms_enabled() and W._DETERMINISM == {}
+    assert not torch.are_deterministic_algorithms_enabled() and TW._DETERMINISM == {}
+
+
+def test_tid_commands_go_to_the_tid_worker_and_the_measure_worker_refuses_them(tmp_path, monkeypatch):
+    """The served measure worker carries none of TID: the client sends tid_* to tid_worker.py, which serves only them."""
+    from khaos_attribution.engines import contract_guard
+    from khaos_attribution.engines import worker_process as WP
+    seen = []
+    monkeypatch.setattr(contract_guard, "refusal", lambda *a, **k: None)
+    monkeypatch.setattr(WP, "stream", lambda python, script, request, **kw: seen.append(Path(script).name) or
+                        {"tid_version": T.TID_VERSION, "inverses": "i", "factors": "f"})
+    handle = M.Handle(root=tmp_path, python=tmp_path / "python", adapter=tmp_path / "a.safetensors")
+    M.tid_invert(handle, tmp_path)
+    assert seen == ["tid_worker.py"]
+    with pytest.raises(RuntimeError, match="TID worker"):
+        W.run({"command": "tid_invert", "factors_dir": str(tmp_path)})
+    with pytest.raises(RuntimeError, match="serves"):
+        TW.run({"command": "index"})

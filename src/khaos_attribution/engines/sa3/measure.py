@@ -51,6 +51,7 @@ def flush_accelerator() -> None:
 
 MEASURE_WORKER = Path(__file__).with_name("measure_worker.py")
 MEASURE_WORKER_MLX = Path(__file__).with_name("measure_worker_mlx.py")
+TID_WORKER = Path(__file__).with_name("tid_worker.py")
 
 
 @dataclass
@@ -86,7 +87,10 @@ _REPLY_KEYS = {**PE.REPLY_KEYS, "latent_stats": ("transform",),
 def _ask(handle: Handle, request: dict, on_progress=None) -> dict:
     """The worker's reply; its ``khaos-row`` lines reach ``on_progress`` as they come, so a long index shows its
     progress while the worker runs."""
-    worker = MEASURE_WORKER_MLX if handle.runtime == "mlx" else MEASURE_WORKER
+    if str(request.get("command") or "").startswith("tid_"):
+        worker = TID_WORKER
+    else:
+        worker = MEASURE_WORKER_MLX if handle.runtime == "mlx" else MEASURE_WORKER
     return PE.measure_reply(handle.python, worker, request, cwd=handle.root, env=_env(handle), label="Stable Audio 3",
                             descriptor=DESCRIPTOR, engine="Stable Audio 3", reply_keys=_REPLY_KEYS, on_progress=on_progress)
 
