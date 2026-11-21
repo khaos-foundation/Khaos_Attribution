@@ -1,6 +1,6 @@
-"""The trainer's forward on Stable Audio 3 has one owner: the held-out worker's per-sample losses and the measure
-worker's clip, forward and loss on a toy model, from wav files, equal values frozen from the code before it was
-shared."""
+"""The trainer's forward on Stable Audio 3 has one owner, forward_torch.py: the held-out worker's per-sample losses and
+the measure worker's clip, forward and loss on a toy model, from wav files, equal values frozen from the code before
+it was shared."""
 import numpy as np
 import pytest
 

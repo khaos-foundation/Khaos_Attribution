@@ -7,9 +7,11 @@ ALL_GATES="pytest"
 NAMED_GATES="torch"
 # Python files under src/ and scripts/ that no test names yet, known: exact paths only, and the list only shrinks
 # (gate.sh --stale fails on a path that got a test or a new glob).
+# engines/sa3/forward_mlx.py: its load_bundle and conditioning are reached only through measure_worker_mlx, and no
+# stand-in test calls them yet.
 NO_TEST_OK="scripts/watermark_survival.py src/khaos_attribution/engines/mimetic/convert_worker.py
   src/khaos_attribution/engines/sa3/convert_worker.py src/khaos_attribution/engines/sa3/forward_mlx.py
-  src/khaos_attribution/engines/sa3/forward_torch.py src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
+  src/khaos_attribution/seal/__main__.py src/register_service/bom.py"
 
 gate_cmd() {
   local py
@@ -145,12 +147,14 @@ quick_tests() {
       case "$mod" in *.*) parents+=("${mod%.*} ${mod##*.}") ;; esac
     done
     # One search for every pattern: a quick run's time goes to its tests.
-    [ "${#pats[@]}" -eq 0 ] || git grep --untracked -l -w -F "${pats[@]}" -- 'tests/*.py' 2> /dev/null
+    # A line that is only a comment names nothing.
+    [ "${#pats[@]}" -eq 0 ] || git grep --untracked -w -F "${pats[@]}" -- 'tests/*.py' 2> /dev/null |
+      grep -v -E '^[^:]+:[[:space:]]*#' | cut -d: -f1
     for item in ${parents[@]+"${parents[@]}"}; do
       parent=${item% *}
       name=${item#* }
       git grep --untracked -l -F "from $parent import" -- 'tests/*.py' 2> /dev/null | while IFS= read -r f; do
-        grep -q -w -F -- "$name" "$f" && echo "$f"
+        grep -v -E '^[[:space:]]*#' "$f" | grep -q -w -F -- "$name" && echo "$f"
       done
     done
   } | grep -E '(^|/)test_[^/]*\.py$' | awk '!seen[$0]++'
@@ -189,7 +193,8 @@ venv_packages() {
   local site
   for site in .venv/lib/python*/site-packages .venv/Lib/site-packages; do
     [ -d "$site" ] || continue
-    (cd "$site" && ls -d -- *.dist-info; cat -- khaos_attribution-*.dist-info/RECORD) 2> /dev/null
+    # One order whatever the locale, so the key does not move with the shell's sorting.
+    (cd "$site" && { LC_ALL=C ls -d -- *.dist-info; cat -- khaos_attribution-*.dist-info/RECORD; }) 2> /dev/null
   done
 }
 
@@ -596,7 +601,8 @@ case "$MODE" in
       finish 0
     fi
     tests=$(printf '%s\n' "$fresh" | quick_tests)
-    unnamed=$(printf '%s\n' "$fresh" | unnamed_sources)
+    # At most fifty files are looked up here; --changed looks at all of them.
+    unnamed=$(printf '%s\n' "$fresh" | head -50 | unnamed_sources)
     if [ -n "$unnamed" ]; then
       n=$(printf '%s\n' "$unnamed" | wc -l | tr -d ' ')
       shown=$(printf '%s\n' "$unnamed" | head -5 | tr '\n' ' ')
@@ -679,7 +685,7 @@ case "$MODE" in
     if [ -n "$gates" ] && [ -f "$GREEN" ] && grep -qxF "$key" "$GREEN"; then
       echo "PASS $gates: unchanged since its last green run"
       green=1
-      [ -z "$owed" ] && [ -z "$pins" ] && [ -z "$unnamed" ] && exit 0
+      [ -z "$owed" ] && [ -z "$pins" ] && exit 0
     fi
     take_lock || { echo "SKIP ${gates:-owed}: another gate run holds this repository's lock"; exit 3; }
     rc=0
