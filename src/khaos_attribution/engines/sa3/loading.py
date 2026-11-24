@@ -33,8 +33,9 @@ def resolved_config(model_name: str) -> tuple:
         return with_open_encoder(json.load(f)), local_ckpt
 
 
-def load_model(model_name: str, device=None, model_half: bool = True):
-    """Stability's StableAudioModel.from_pretrained, step for step, on the rewritten config."""
+def load_model(model_name: str, device=None, model_half: bool = True, dtype=None):
+    """Stability's StableAudioModel.from_pretrained on the rewritten config, built and cast (to half, or to ``dtype``)
+    on the processor before it moves to the device."""
     import torch  # noqa: PLC0415
     from stable_audio_3.loading_utils import load_diffusion_cond  # noqa: PLC0415
     from stable_audio_3.model import StableAudioModel  # noqa: PLC0415
@@ -43,7 +44,11 @@ def load_model(model_name: str, device=None, model_half: bool = True):
     if not torch.cuda.is_available():
         model_half = False
     model_config, local_ckpt = resolved_config(model_name)
-    model = load_diffusion_cond(model_config, local_ckpt, device=device, model_half=model_half)
+    # Stability's loader moves the model in full precision and casts on the device, which doubles a card's peak.
+    model = load_diffusion_cond(model_config, local_ckpt, device="cpu", model_half=model_half)
+    if dtype is not None:
+        model.to(dtype=dtype)
+    model.to(device)
     model.use_lora = False
     model.lora_names = []
     return StableAudioModel(model, model_config, device, model_half)
@@ -53,9 +58,9 @@ def load_measured(model_name: str):
     """The base as the trainer holds it, for a measurement: bfloat16 on CUDA (an adapter loaded after stays float32),
     full precision elsewhere."""
     import torch  # noqa: PLC0415
-    wrapped = load_model(model_name, model_half=False)
-    if str(wrapped.device).startswith("cuda"):
-        wrapped.model.to(dtype=torch.bfloat16)
+    on_cuda = torch.cuda.is_available()
+    wrapped = load_model(model_name, model_half=False, dtype=torch.bfloat16 if on_cuda else None)
+    if on_cuda:
         # Stability's inference wrapper turns these off process-wide; its trainer runs with them as below.
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.allow_tf32 = True

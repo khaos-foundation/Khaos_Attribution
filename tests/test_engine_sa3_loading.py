@@ -51,32 +51,94 @@ def _fake_torch(monkeypatch):
     return calls
 
 
-def test_a_measurement_on_cuda_holds_the_base_at_the_trainers_bfloat16(monkeypatch):
+class _Model:
+    """Stands in for Stability's model: knows its device and dtype, and records each device it was moved to with the
+    dtype it held while it moved."""
+
+    def __init__(self):
+        self.device, self.dtype, self.moves = "cpu", "fp32", []
+
+    def to(self, *args, device=None, dtype=None):
+        for a in args:
+            if a in ("fp16", "bf16", "fp32"):
+                dtype = a
+            else:
+                device = a
+        if dtype is not None:
+            self.dtype = dtype
+        if device is not None and device != self.device:
+            self.device = device
+            self.moves.append((device, self.dtype))
+        return self
+
+    def eval(self):
+        return self
+
+    def requires_grad_(self, flag):
+        return self
+
+
+def _fake_stability(monkeypatch, cuda: bool):
+    """Stability's loader as it is at the engine's pin (loading_utils.load_diffusion_cond: build, move to the device,
+    then cast to half), and its wrapper, over a fake torch whose CUDA is there or not."""
     import sys
+    import types
     calls = _fake_torch(monkeypatch)
-    moved = []
+    torch = sys.modules["torch"]
+    torch.float16 = "fp16"
+    torch.cuda = types.SimpleNamespace(is_available=lambda: cuda)
+    torch.backends.mps = types.SimpleNamespace(is_available=lambda: not cuda)
+    built = []
 
-    class Model:
-        def to(self, **kw):
-            moved.append(kw)
-            return self
+    def load_diffusion_cond(model_config, ckpt_path, device="cuda", model_half=False):
+        model = _Model()
+        built.append(model)
+        model.to(device).eval().requires_grad_(False)
+        if model_half:
+            model.to(torch.float16)
+        return model
 
-    class Wrapped:
-        def __init__(self, device):
-            self.device, self.model = device, Model()
+    utils = types.ModuleType("stable_audio_3.loading_utils")
+    utils.load_diffusion_cond = load_diffusion_cond
+    wrapper = types.ModuleType("stable_audio_3.model")
+    wrapper.StableAudioModel = lambda model, cfg, device, half: types.SimpleNamespace(
+        model=model, model_config=cfg, device=device, model_half=half)
+    monkeypatch.setitem(sys.modules, "stable_audio_3.loading_utils", utils)
+    monkeypatch.setitem(sys.modules, "stable_audio_3.model", wrapper)
+    monkeypatch.setattr(L, "resolved_config", lambda name: ({"model_type": "diffusion_cond"}, "/x/model.safetensors"))
+    return built, calls
 
-    asked = []
-    monkeypatch.setattr(L, "load_model", lambda name, model_half=True: asked.append(model_half) or Wrapped(device))
-    device = "cuda"
-    L.load_measured("medium-base")
-    assert asked == [False] and moved == [{"dtype": "bf16"}], "full precision loaded, then cast as the trainer casts"
+
+def test_a_render_model_is_halved_before_it_goes_on_the_card(monkeypatch):
+    """A render's model reaches the card already in half precision, never in full precision first."""
+    built, _ = _fake_stability(monkeypatch, cuda=True)
+    wrapped = L.load_model("medium-base")
+    assert built[0].moves == [("cuda", "fp16")], "the only move to the card carries the half-precision model"
+    assert (wrapped.device, wrapped.model_half, wrapped.model.dtype) == ("cuda", True, "fp16")
+
+
+def test_off_cuda_a_render_model_moves_at_full_precision_as_before(monkeypatch):
+    built, _ = _fake_stability(monkeypatch, cuda=False)
+    wrapped = L.load_model("medium-base")
+    assert built[0].moves == [("mps", "fp32")] and wrapped.model_half is False
+
+
+def test_a_measurement_on_cuda_holds_the_base_at_the_trainers_bfloat16_before_it_goes_on_the_card(monkeypatch):
+    """The held-out and influence scorers' model reaches the card already in bfloat16."""
+    import sys
+    built, calls = _fake_stability(monkeypatch, cuda=True)
+    wrapped = L.load_measured("medium-base")
+    assert built[0].moves == [("cuda", "bf16")], "the only move to the card carries the bfloat16 model"
+    assert wrapped.model_half is False
     torch = sys.modules["torch"]
     assert {"matmul": "high"} in calls and torch.backends.cudnn.allow_tf32
     assert torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction, "the trainer's settings, not the wrapper's"
-    moved.clear()
-    device = "mps"
+
+
+def test_off_cuda_a_measurement_keeps_the_base_at_full_precision(monkeypatch):
+    built, calls = _fake_stability(monkeypatch, cuda=False)
     L.load_measured("medium-base")
-    assert moved == [], "off CUDA the base stays at full precision"
+    assert built[0].moves == [("mps", "fp32")] and {"matmul": "high"} not in calls
 
 
 def test_the_forward_runs_under_bfloat16_autocast_on_cuda_only(monkeypatch):

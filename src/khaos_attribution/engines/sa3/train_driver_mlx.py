@@ -93,6 +93,8 @@ def main() -> int:
         loader = importlib.import_module("sa3_mlx").DIT_CHOICES[flag_value(args, "--dit", str, "medium")]["loader"]
         dit_cls = importlib.import_module(loader).DiT
         dit_cls.__call__ = batch_wide_conditioning(dit_cls, mx)
+    from khaos_attribution.engines import mlx_cache  # noqa: PLC0415
+    mlx_cache.apply()
     sys.argv = [str(script), *args]
     runpy.run_path(str(script), run_name="__main__")
     return 0
