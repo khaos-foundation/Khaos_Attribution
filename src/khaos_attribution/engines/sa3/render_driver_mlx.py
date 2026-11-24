@@ -143,6 +143,9 @@ def main() -> int:
     sys.path[:0] = [str(script.parent.parent), str(script.parent)]
     import mlx.core as mx  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
+
+    from khaos_attribution.engines import mlx_cache  # noqa: PLC0415
+    mlx_cache.apply(mx)
     state: dict = {}
     script_module = importlib.import_module("sa3_mlx")
     pipeline = importlib.import_module("models.defs.sa3_pipeline")

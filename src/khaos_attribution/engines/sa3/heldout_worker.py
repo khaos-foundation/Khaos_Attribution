@@ -106,7 +106,9 @@ def heldout_mlx(req: dict) -> dict:
     sys.path.insert(0, str(mlx_dir / "scripts"))
     import mlx.core as mx  # noqa: PLC0415
     from lora_train_mlx import rectified_flow_loss  # noqa: PLC0415
+    from khaos_attribution.engines import mlx_cache  # noqa: PLC0415
     from khaos_attribution.engines.sa3 import forward_mlx as FM  # noqa: PLC0415
+    mlx_cache.apply(mx)
 
     latents_dir = Path(req["latents_dir"])
     items = []
