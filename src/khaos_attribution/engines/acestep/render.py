@@ -26,6 +26,9 @@ WEIGHT_FILENAMES = ("model.safetensors", "model.safetensors.index.json",
 BASE_MISSING_NOTE = ("Base checkpoint not installed — rendered on turbo instead (set generation.base_checkpoint, or place "
                      "acestep-v15-base under the checkpoints directory; the server log names the path)")
 CHECKPOINTS_ENV = "ACESTEP_CHECKPOINTS_DIR"   # the engine's own name for where its weights are
+VAE_ON_CPU_ENV = "ACESTEP_VAE_ON_CPU"
+# A CUDA card under this many GB renders with the engine's offload and the decode on the processor (decision 0144).
+SMALL_CARD_GB = 12
 
 
 def flush_accelerator() -> None:
@@ -43,16 +46,15 @@ def flush_accelerator() -> None:
         log.debug("accelerator cache flush skipped", exc_info=True)
 
 
-def force_mps_bf16(handler_cls) -> None:
-    """Run the DiT in bf16 on Apple silicon: ACE-Step hardcodes float32 on MPS and exposes no dtype hook, and
-    `self.dtype` is assigned inline mid-method, so the class gets a property that answers bf16 on MPS. Idempotent;
-    CUDA and CPU untouched."""
+def force_dit_bf16(handler_cls) -> None:
+    """Run the DiT in bf16 on CUDA and Apple silicon, whatever the device string: the engine picks bf16 only for a bare
+    "cuda", float32 on MPS, and assigns `self.dtype` inline, so the class gets a property. Idempotent; CPU untouched."""
     import torch  # noqa: PLC0415
-    if getattr(handler_cls, "_khaos_mps_bf16_installed", False):
+    if getattr(handler_cls, "_khaos_dit_bf16_installed", False):
         return
 
     def _get_dtype(self):
-        if str(getattr(self, "device", "")).startswith("mps"):
+        if str(getattr(self, "device", "")).startswith(("cuda", "mps")):
             return torch.bfloat16
         return getattr(self, "_khaos_dtype", torch.float32)
 
@@ -60,7 +62,81 @@ def force_mps_bf16(handler_cls) -> None:
         self._khaos_dtype = value
 
     handler_cls.dtype = property(_get_dtype, _set_dtype)
-    handler_cls._khaos_mps_bf16_installed = True
+    handler_cls._khaos_dit_bf16_installed = True
+
+
+def text_encoder_off_card(handler_cls) -> None:
+    """The text encoder loads straight into the run's precision and is on the accelerator only while it encodes. The
+    two install together or not at all: the load alone changed a Mac's audio, the pair did not. Under the engine's own
+    offload both are the engine's. Idempotent."""
+    if getattr(handler_cls, "_khaos_text_encoder_off_card", False):
+        return
+    load = getattr(handler_cls, "_load_text_encoder_and_tokenizer", None)
+    context = getattr(handler_cls, "_load_model_context", None)
+    if not callable(load) or not callable(context):
+        log.warning("The engine has no _load_text_encoder_and_tokenizer or _load_model_context: its text encoder stays "
+                    "on the accelerator (the seams canary names what moved)")
+        return
+
+    def _load_text_encoder_and_tokenizer(self, *, checkpoint_dir, device):
+        if getattr(self, "offload_to_cpu", False):
+            return load(self, checkpoint_dir=checkpoint_dir, device=device)
+        from transformers import AutoModel, AutoTokenizer  # noqa: PLC0415
+        path = os.path.join(checkpoint_dir, "Qwen3-Embedding-0.6B")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Text encoder not found at {path}")
+        self.text_tokenizer = AutoTokenizer.from_pretrained(path)
+        self.text_encoder = AutoModel.from_pretrained(path, torch_dtype=self.dtype)
+        self.text_encoder.eval()
+        return path
+
+    @contextlib.contextmanager
+    def _load_model_context(self, model_name):
+        if model_name != "text_encoder" or getattr(self, "offload_to_cpu", False):
+            with context(self, model_name):
+                yield
+            return
+        encoder = getattr(self, "text_encoder", None)
+        if encoder is not None:
+            # Cast on the move, as the engine's own load did, so its buffers match the old renders.
+            self._recursive_to_device(encoder, self.device, self.dtype)
+        try:
+            yield
+        finally:
+            if encoder is not None:
+                self._recursive_to_device(encoder, "cpu")
+                flush_accelerator()
+
+    handler_cls._load_text_encoder_and_tokenizer = _load_text_encoder_and_tokenizer
+    handler_cls._load_model_context = _load_model_context
+    handler_cls._khaos_text_encoder_off_card = True
+
+
+def small_card(device: str) -> bool:
+    """A CUDA card under SMALL_CARD_GB as sold (its reported size rounded to whole GB)."""
+    if not str(device).startswith("cuda"):
+        return False
+    import torch  # noqa: PLC0415
+    index = torch.device(str(device)).index or 0
+    total = torch.cuda.get_device_properties(index).total_memory
+    return int(round(total / 2**30)) < SMALL_CARD_GB
+
+
+@contextlib.contextmanager
+def cpu_decode(enabled: bool):
+    """The engine reads VAE_ON_CPU_ENV at decode time: set for one render, restored after, whatever it raised."""
+    if not enabled:
+        yield
+        return
+    previous = os.environ.get(VAE_ON_CPU_ENV)
+    os.environ[VAE_ON_CPU_ENV] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(VAE_ON_CPU_ENV, None)
+        else:
+            os.environ[VAE_ON_CPU_ENV] = previous
 
 
 def force_codec_fp32(handler_cls) -> None:
@@ -181,6 +257,7 @@ class AceStepRenderer:
         self._active: dict = {v: None for v in DESCRIPTOR.variants}
         self._missing_logged = False
         self._yielded = False
+        self._small_card = None
 
     # ── weights ──────────────────────────────────────────────────────────────
     def checkpoints_root(self) -> Path:
@@ -210,8 +287,8 @@ class AceStepRenderer:
     def _init_kwargs(self, config_path: str) -> dict:
         from acestep.handler import AceStepHandler  # noqa: PLC0415
         kwargs = dict(project_root=str(self.repo_dir), config_path=config_path, device=engine_device(self._resolved_device()),
-                      use_flash_attention=False, compile_model=False, offload_to_cpu=False, offload_dit_to_cpu=False,
-                      quantization=None)
+                      use_flash_attention=False, compile_model=False, offload_to_cpu=self.small_card(),
+                      offload_dit_to_cpu=False, quantization=None)
         # MLX DiT must be OFF for adapter inference: it snapshots the torch weights before the adapter attaches.
         try:
             params = inspect.signature(AceStepHandler.initialize_service).parameters
@@ -222,6 +299,11 @@ class AceStepRenderer:
         if "use_mlx_dit" in params:
             known["use_mlx_dit"] = False
         return known
+
+    def small_card(self) -> bool:
+        if self._small_card is None:
+            self._small_card = small_card(self._resolved_device())
+        return self._small_card
 
     def _resolved_device(self) -> str:
         if self.device and self.device != "auto":
@@ -256,8 +338,8 @@ class AceStepRenderer:
             log.error("Base checkpoint weights missing at %s", self.base_checkpoint_path())
             raise RuntimeError("Base checkpoint not installed (the server log names the path)")
         from acestep.handler import AceStepHandler  # noqa: PLC0415
-        if self._resolved_device() == "mps":
-            force_mps_bf16(AceStepHandler)
+        force_dit_bf16(AceStepHandler)
+        text_encoder_off_card(AceStepHandler)
         force_codec_fp32(AceStepHandler)
         lift_turbo_step_clamp(AceStepHandler)
         handler = AceStepHandler()
@@ -360,7 +442,11 @@ class AceStepRenderer:
         if model is None or tokenizer is None:
             return None
         from khaos_attribution.prompt_expansion import embed_texts  # noqa: PLC0415
-        return lambda texts: embed_texts(model, tokenizer, list(texts))
+
+        def embed(texts):
+            with handler._load_model_context("text_encoder"):
+                return embed_texts(model, tokenizer, list(texts))
+        return embed
 
     # ── the render ───────────────────────────────────────────────────────────
     def engine_kwargs(self, req: RenderRequest, variant: str, out_dir: Path) -> tuple:
@@ -482,7 +568,8 @@ class AceStepRenderer:
             raise RenderCancelled("cancelled before the render started")
         hooks = self._cancel_hooks(should_stop, handler) if should_stop else []
         try:
-            result = generate_music(handler, self.llm, params, config, save_dir=str(out_path.parent), **extra)
+            with cpu_decode(self.small_card()):
+                result = generate_music(handler, self.llm, params, config, save_dir=str(out_path.parent), **extra)
         finally:
             for h in hooks:
                 h.remove()
@@ -509,6 +596,8 @@ class AceStepRenderer:
         record = dict(audio.get("params") or {})
         record["khaos_seed"] = seed
         record["khaos_variant"] = variant
+        record["khaos_dit_dtype"] = str(getattr(handler, "dtype", "")).replace("torch.", "")
+        record["khaos_small_card"] = self.small_card()
         # Every output keeps its engine's own rate and its record says which.
         record.setdefault("sample_rate", DESCRIPTOR.sample_rate)
         if applied is not None:

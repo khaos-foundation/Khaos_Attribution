@@ -1,6 +1,7 @@
 """The seams Khaos patches in ACE-Step, read from a checkout's source and never imported, so an installer's --check
 can run it with no torch: the step normalisation the renderer un-clamps, the codec dtype rule it forces, the DiT's
-precision it holds at bf16 on Apple silicon, the base checkpoint's turbo flag, the trainer's precision selector, the
+precision it holds at bf16 on CUDA and Apple silicon, the text encoder's loader and device context, the offload and
+processor decode a small card asks for, the base checkpoint's turbo flag, the trainer's precision selector, the
 training step's loss, the preprocessor's codec loader and the data module's loader. A source that cannot be read
 fails, never passes.
 Usage: python -m khaos_attribution.engines.acestep.seams <ACE-Step checkout>"""
@@ -57,12 +58,28 @@ def problems(root) -> list:
     """Every seam the checkout at ``root`` no longer offers as Khaos patches it, in words; empty when all hold."""
     root, found = Path(root), []
     handlers = _handler_sources(root, found)
-    # force_mps_bf16 answers the DiT's precision through a property on the class, which only an attribute the
+    # force_dit_bf16 answers the DiT's precision through a property on the class, which only an attribute the
     # handler both sets and reads as self.dtype goes through.
     if handlers and not (any(_on_self(t, "dtype", ast.Store) for t in handlers)
                          and any(_on_self(t, "dtype", ast.Load) for t in handlers)):
         found.append("the handler does not keep the DiT's precision as self.dtype: it cannot be held at bf16 on "
-                     "Apple silicon")
+                     "CUDA and Apple silicon")
+    loader = [f for t in handlers for f in _functions(t, "_load_text_encoder_and_tokenizer")]
+    if handlers and not any({"checkpoint_dir", "device"} <= _params(f) and _on_self(f, "text_encoder", ast.Store)
+                            for f in loader):
+        found.append("the handler has no _load_text_encoder_and_tokenizer(checkpoint_dir, device) that sets "
+                     "self.text_encoder: the text encoder cannot load in the run's precision")
+    context = [f for t in handlers for f in _functions(t, "_load_model_context")]
+    if handlers and (not any("model_name" in _params(f) for f in context)
+                     or not any(_functions(t, "_recursive_to_device") for t in handlers)):
+        found.append("the handler has no _load_model_context(model_name) or _recursive_to_device: the text encoder "
+                     "cannot leave the accelerator between uses")
+    init = [f for t in handlers for f in _functions(t, "initialize_service")]
+    if handlers and not any("offload_to_cpu" in _params(f) for f in init):
+        found.append("initialize_service takes no offload_to_cpu: a small card cannot use the engine's offload")
+    if handlers and not any(isinstance(n, ast.Constant) and n.value == "ACESTEP_VAE_ON_CPU"
+                            for t in handlers for n in ast.walk(t)):
+        found.append("the handler never reads ACESTEP_VAE_ON_CPU: a small card cannot decode on the processor")
     normalise = [f for t in handlers for f in _functions(t, "_normalize_service_generate_inputs")]
     if handlers and not normalise:
         found.append("the handler has no _normalize_service_generate_inputs: the turbo step clamp cannot be lifted")

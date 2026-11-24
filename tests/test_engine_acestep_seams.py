@@ -32,7 +32,17 @@ FILES = {
     "acestep/core/generation/handler/vae_decode.py": "class M:\n    def decode(self):\n        return self._get_vae_dtype('cpu')\n",
     "acestep/core/generation/handler/init_service_catalog.py": "class M:\n    def is_turbo_model(self):\n        return True\n",
     "acestep/core/generation/handler/init_service_orchestrator.py":
-        "class M:\n    def initialize_service(self, device):\n        self.dtype = 1\n        return self.dtype\n",
+        "class M:\n    def initialize_service(self, device, offload_to_cpu=False):\n        self.dtype = 1\n"
+        "        return self.dtype\n",
+    "acestep/core/generation/handler/init_service_loader_components.py":
+        "class M:\n    def _load_text_encoder_and_tokenizer(self, *, checkpoint_dir, device):\n"
+        "        self.text_encoder = 1\n",
+    "acestep/core/generation/handler/init_service_offload_context.py":
+        "class M:\n    def _load_model_context(self, model_name):\n        yield\n",
+    "acestep/core/generation/handler/init_service_memory_transfer.py":
+        "class M:\n    def _recursive_to_device(self, model, device, dtype=None):\n        return model\n",
+    "acestep/core/generation/handler/generate_music_decode.py":
+        "import os\n\nclass M:\n    def decode(self):\n        return os.environ.get('ACESTEP_VAE_ON_CPU', '0')\n",
     "acestep/training_v2/fixed_lora_module.py":
         "import torch.nn.functional as F\n\ndef _select_compute_dtype(device_type, requested_precision='auto'):\n    return 1\n\n"
         "class FixedLoRAModule:\n    def training_step(self, batch):\n        return F.mse_loss(batch, batch)\n",
@@ -74,7 +84,16 @@ def test_a_checkout_holding_every_seam_passes(tmp_path):
     ("acestep/training/data_module.py", "class PreprocessedDataModule:\n    pass\n", "collate_preprocessed_batch"),
     ("acestep/core/generation/handler/init_service_catalog.py", "class M:\n    pass\n", "is_turbo_model"),
     ("acestep/core/generation/handler/init_service_orchestrator.py",
-     "class M:\n    def initialize_service(self, device):\n        self.precision = 1\n", "self.dtype"),
+     "class M:\n    def initialize_service(self, device, offload_to_cpu=False):\n        self.precision = 1\n", "self.dtype"),
+    ("acestep/core/generation/handler/init_service_orchestrator.py",
+     "class M:\n    def initialize_service(self, device):\n        self.dtype = 1\n        return self.dtype\n",
+     "offload_to_cpu"),
+    ("acestep/core/generation/handler/init_service_loader_components.py",
+     "class M:\n    def _load_text_encoder(self, path):\n        self.text_encoder = 1\n", "_load_text_encoder_and_tokenizer"),
+    ("acestep/core/generation/handler/init_service_offload_context.py",
+     "class M:\n    def _load_model_context(self, name):\n        yield\n", "_load_model_context"),
+    ("acestep/core/generation/handler/init_service_memory_transfer.py", "class M:\n    pass\n", "_recursive_to_device"),
+    ("acestep/core/generation/handler/generate_music_decode.py", "class M:\n    pass\n", "ACESTEP_VAE_ON_CPU"),
 ])
 def test_a_moved_seam_is_named(tmp_path, rel, text, words):
     found = S.problems(_checkout(tmp_path, **{rel: text}))
