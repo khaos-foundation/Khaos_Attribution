@@ -27,7 +27,7 @@ BASE_MISSING_NOTE = ("Base checkpoint not installed — rendered on turbo instea
                      "acestep-v15-base under the checkpoints directory; the server log names the path)")
 CHECKPOINTS_ENV = "ACESTEP_CHECKPOINTS_DIR"   # the engine's own name for where its weights are
 VAE_ON_CPU_ENV = "ACESTEP_VAE_ON_CPU"
-# A CUDA card under this many GB renders with the engine's offload and the decode on the processor (decision 0144).
+# A CUDA card under this many GB renders with the engine's offload, the DiT's included, and the decode on the processor.
 SMALL_CARD_GB = 12
 
 
@@ -288,7 +288,7 @@ class AceStepRenderer:
         from acestep.handler import AceStepHandler  # noqa: PLC0415
         kwargs = dict(project_root=str(self.repo_dir), config_path=config_path, device=engine_device(self._resolved_device()),
                       use_flash_attention=False, compile_model=False, offload_to_cpu=self.small_card(),
-                      offload_dit_to_cpu=False, quantization=None)
+                      offload_dit_to_cpu=self.small_card(), quantization=None)
         # MLX DiT must be OFF for adapter inference: it snapshots the torch weights before the adapter attaches.
         try:
             params = inspect.signature(AceStepHandler.initialize_service).parameters

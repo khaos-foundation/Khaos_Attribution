@@ -34,8 +34,8 @@ class _Engine:
         self.moves = []
         self.loaded = []
 
-    def initialize_service(self, device=None, offload_to_cpu=False, **kwargs):
-        self.device, self.offload_to_cpu = device, offload_to_cpu
+    def initialize_service(self, device=None, offload_to_cpu=False, offload_dit_to_cpu=False, **kwargs):
+        self.device, self.offload_to_cpu, self.offload_dit_to_cpu = device, offload_to_cpu, offload_dit_to_cpu
         self.dtype = "fp32" if device != "cuda" else "bf16"
         self.text_encoder = "te"
         return "ok", True
@@ -172,10 +172,11 @@ def test_a_card_under_twelve_nominal_gb_is_a_small_card(monkeypatch, total_mib, 
 
 
 def test_a_small_card_loads_with_the_engines_offload(monkeypatch, tmp_path):
+    """The DiT leaves the card too: a rework's fp32 encode beside a resident DiT ran out of an 8 GB card."""
     R, torch, renderer = _loaded(monkeypatch, tmp_path, total_mib=8192)
-    assert renderer.handler.offload_to_cpu is True
+    assert (renderer.handler.offload_to_cpu, renderer.handler.offload_dit_to_cpu) == (True, True)
     R, torch, renderer = _loaded(monkeypatch, tmp_path, total_mib=12288)
-    assert renderer.handler.offload_to_cpu is False
+    assert (renderer.handler.offload_to_cpu, renderer.handler.offload_dit_to_cpu) == (False, False)
 
 
 @pytest.mark.parametrize("total_mib, during", [(8192, "1"), (16384, None)])
