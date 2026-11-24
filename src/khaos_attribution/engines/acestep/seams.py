@@ -75,8 +75,9 @@ def problems(root) -> list:
         found.append("the handler has no _load_model_context(model_name) or _recursive_to_device: the text encoder "
                      "cannot leave the accelerator between uses")
     init = [f for t in handlers for f in _functions(t, "initialize_service")]
-    if handlers and not any("offload_to_cpu" in _params(f) for f in init):
-        found.append("initialize_service takes no offload_to_cpu: a small card cannot use the engine's offload")
+    if handlers and not any({"offload_to_cpu", "offload_dit_to_cpu"} <= _params(f) for f in init):
+        found.append("initialize_service takes no offload_to_cpu or offload_dit_to_cpu: a small card cannot use the "
+                     "engine's offload")
     if handlers and not any(isinstance(n, ast.Constant) and n.value == "ACESTEP_VAE_ON_CPU"
                             for t in handlers for n in ast.walk(t)):
         found.append("the handler never reads ACESTEP_VAE_ON_CPU: a small card cannot decode on the processor")

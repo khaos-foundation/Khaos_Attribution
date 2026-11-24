@@ -88,7 +88,7 @@ def test_the_dit_reads_bf16_on_cuda_and_mps_whatever_the_device_string(monkeypat
 
 
 def test_loading_on_cuda_renders_the_dit_in_bf16_and_the_codec_in_fp32(monkeypatch, tmp_path):
-    """The renderer hands ACE-Step "cuda:0", which its own rule leaves at fp32."""
+    """The DiT is bf16 on the indexed device string the renderer hands the engine, the codec fp32."""
     R, torch, renderer = _loaded(monkeypatch, tmp_path)
     handler = renderer.handler
     assert handler.device == "cuda:0"
@@ -139,6 +139,18 @@ def test_the_text_encoder_is_on_the_card_only_while_it_encodes(monkeypatch, tmp_
             raise RuntimeError("encode failed")
     assert handler.moves[-1] == ("te", "cpu", None), "an encode that raised still leaves the card"
     handler.moves.clear()
+
+    def full(model, device, dtype=None):
+        handler.moves.append((model, device, dtype))
+        if device != "cpu":
+            raise RuntimeError("out of memory")
+    handler._recursive_to_device = full
+    with pytest.raises(RuntimeError):
+        with handler._load_model_context("text_encoder"):
+            pass
+    assert handler.moves[-1] == ("te", "cpu", None), "a move onto the card that ran out still returns the encoder"
+    del handler._recursive_to_device
+    handler.moves.clear()
     with handler._load_model_context("vae"):
         pass
     assert handler.moves == [("engine", "vae")]
@@ -150,7 +162,7 @@ def test_the_text_encoder_is_on_the_card_only_while_it_encodes(monkeypatch, tmp_
 
 
 def test_the_load_and_the_move_install_together_or_not_at_all(monkeypatch, caplog):
-    """Loading straight into bf16 without the move changed a Mac's audio; with it the audio was identical."""
+    """The load and the move install together: only together do they leave the audio unchanged."""
     R, torch = _render(monkeypatch)
 
     class LoaderOnly:
@@ -172,7 +184,7 @@ def test_a_card_under_twelve_nominal_gb_is_a_small_card(monkeypatch, total_mib, 
 
 
 def test_a_small_card_loads_with_the_engines_offload(monkeypatch, tmp_path):
-    """The DiT leaves the card too: a rework's fp32 encode beside a resident DiT ran out of an 8 GB card."""
+    """A small card takes the DiT off the card between its uses too, so a rework's fp32 encode has room."""
     R, torch, renderer = _loaded(monkeypatch, tmp_path, total_mib=8192)
     assert (renderer.handler.offload_to_cpu, renderer.handler.offload_dit_to_cpu) == (True, True)
     R, torch, renderer = _loaded(monkeypatch, tmp_path, total_mib=12288)

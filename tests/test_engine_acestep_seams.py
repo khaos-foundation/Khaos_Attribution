@@ -32,8 +32,8 @@ FILES = {
     "acestep/core/generation/handler/vae_decode.py": "class M:\n    def decode(self):\n        return self._get_vae_dtype('cpu')\n",
     "acestep/core/generation/handler/init_service_catalog.py": "class M:\n    def is_turbo_model(self):\n        return True\n",
     "acestep/core/generation/handler/init_service_orchestrator.py":
-        "class M:\n    def initialize_service(self, device, offload_to_cpu=False):\n        self.dtype = 1\n"
-        "        return self.dtype\n",
+        "class M:\n    def initialize_service(self, device, offload_to_cpu=False, offload_dit_to_cpu=False):\n"
+        "        self.dtype = 1\n        return self.dtype\n",
     "acestep/core/generation/handler/init_service_loader_components.py":
         "class M:\n    def _load_text_encoder_and_tokenizer(self, *, checkpoint_dir, device):\n"
         "        self.text_encoder = 1\n",
@@ -84,7 +84,11 @@ def test_a_checkout_holding_every_seam_passes(tmp_path):
     ("acestep/training/data_module.py", "class PreprocessedDataModule:\n    pass\n", "collate_preprocessed_batch"),
     ("acestep/core/generation/handler/init_service_catalog.py", "class M:\n    pass\n", "is_turbo_model"),
     ("acestep/core/generation/handler/init_service_orchestrator.py",
-     "class M:\n    def initialize_service(self, device, offload_to_cpu=False):\n        self.precision = 1\n", "self.dtype"),
+     "class M:\n    def initialize_service(self, device, offload_to_cpu=False, offload_dit_to_cpu=False):\n"
+     "        self.precision = 1\n", "self.dtype"),
+    ("acestep/core/generation/handler/init_service_orchestrator.py",
+     "class M:\n    def initialize_service(self, device, offload_to_cpu=False):\n        self.dtype = 1\n"
+     "        return self.dtype\n", "offload_dit_to_cpu"),
     ("acestep/core/generation/handler/init_service_orchestrator.py",
      "class M:\n    def initialize_service(self, device):\n        self.dtype = 1\n        return self.dtype\n",
      "offload_to_cpu"),

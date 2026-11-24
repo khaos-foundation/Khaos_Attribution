@@ -67,8 +67,8 @@ def force_dit_bf16(handler_cls) -> None:
 
 def text_encoder_off_card(handler_cls) -> None:
     """The text encoder loads straight into the run's precision and is on the accelerator only while it encodes. The
-    two install together or not at all: the load alone changed a Mac's audio, the pair did not. Under the engine's own
-    offload both are the engine's. Idempotent."""
+    two install together or not at all: only together do they leave the audio unchanged. Under the engine's own offload
+    both are the engine's. Idempotent."""
     if getattr(handler_cls, "_khaos_text_encoder_off_card", False):
         return
     load = getattr(handler_cls, "_load_text_encoder_and_tokenizer", None)
@@ -97,10 +97,10 @@ def text_encoder_off_card(handler_cls) -> None:
                 yield
             return
         encoder = getattr(self, "text_encoder", None)
-        if encoder is not None:
-            # Cast on the move, as the engine's own load did, so its buffers match the old renders.
-            self._recursive_to_device(encoder, self.device, self.dtype)
         try:
+            if encoder is not None:
+                # Cast on the move: the buffers land in the run's precision, as the engine's own load leaves them.
+                self._recursive_to_device(encoder, self.device, self.dtype)
             yield
         finally:
             if encoder is not None:
@@ -443,8 +443,10 @@ class AceStepRenderer:
             return None
         from khaos_attribution.prompt_expansion import embed_texts  # noqa: PLC0415
 
+        on_card = getattr(handler, "_load_model_context", None)
+
         def embed(texts):
-            with handler._load_model_context("text_encoder"):
+            with on_card("text_encoder") if callable(on_card) else contextlib.nullcontext():
                 return embed_texts(model, tokenizer, list(texts))
         return embed
 
