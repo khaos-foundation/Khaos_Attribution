@@ -110,8 +110,7 @@ def _fake_stability(monkeypatch, cuda: bool):
 
 
 def test_a_render_model_is_halved_before_it_goes_on_the_card(monkeypatch):
-    """Stability's loader moves the model to the card in full precision and casts it there, so a render peaked at
-    11.4 GB; cast first, it needs 7.5 GB with the same audio."""
+    """A render's model reaches the card already in half precision, never in full precision first."""
     built, _ = _fake_stability(monkeypatch, cuda=True)
     wrapped = L.load_model("medium-base")
     assert built[0].moves == [("cuda", "fp16")], "the only move to the card carries the half-precision model"
@@ -125,8 +124,7 @@ def test_off_cuda_a_render_model_moves_at_full_precision_as_before(monkeypatch):
 
 
 def test_a_measurement_on_cuda_holds_the_base_at_the_trainers_bfloat16_before_it_goes_on_the_card(monkeypatch):
-    """The held-out scorer and the influence scorer load through here: cast on the card, the held-out pass of an
-    8 GB-card run ran out of memory at every epoch."""
+    """The held-out and influence scorers' model reaches the card already in bfloat16."""
     import sys
     built, calls = _fake_stability(monkeypatch, cuda=True)
     wrapped = L.load_measured("medium-base")
