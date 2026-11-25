@@ -34,14 +34,16 @@ class _Engine:
         self.moves = []
         self.loaded = []
 
-    def initialize_service(self, device=None, offload_to_cpu=False, offload_dit_to_cpu=False, **kwargs):
+    def initialize_service(self, device=None, offload_to_cpu=False, offload_dit_to_cpu=False, config_path=None,
+                           **kwargs):
         self.device, self.offload_to_cpu, self.offload_dit_to_cpu = device, offload_to_cpu, offload_dit_to_cpu
+        self.config_path = str(config_path)
         self.dtype = "fp32" if device != "cuda" else "bf16"
         self.text_encoder = "te"
         return "ok", True
 
     def is_turbo_model(self):
-        return True
+        return "base" not in getattr(self, "config_path", "")
 
     def _get_vae_dtype(self, device=None):
         return "bf16"
@@ -225,6 +227,37 @@ def test_a_small_card_decodes_on_the_processor_for_the_render_only(monkeypatch, 
     with pytest.raises(RuntimeError):
         renderer.generate(RenderRequest(prompt="p", duration_seconds=10), None, out / "piece2.wav")
     assert R.VAE_ON_CPU_ENV not in os.environ, "a render that raised restores the environment"
+
+
+def _fake_inference(monkeypatch, out):
+    def generate_music(handler, llm, params, config, save_dir=None):
+        produced = out / "take.wav"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_bytes(b"x")
+        return types.SimpleNamespace(success=True, audios=[{"path": str(produced), "params": {}}])
+
+    class Params:
+        def __init__(self, **kw):
+            self.kw = kw
+    monkeypatch.setitem(sys.modules, "acestep.inference", types.SimpleNamespace(
+        GenerationConfig=lambda **kw: kw, GenerationParams=Params, generate_music=generate_music))
+
+
+def test_a_base_render_that_releases_its_weights_still_records_its_precision(monkeypatch, tmp_path):
+    R, torch, renderer = _loaded(monkeypatch, tmp_path)
+    base = tmp_path / "acestep-v15-base"
+    base.mkdir()
+    (base / "config.json").write_text("{}")
+    (base / "model.safetensors").write_bytes(b"w")
+    hub = types.ModuleType("huggingface_hub")
+    hub.constants = types.SimpleNamespace(HF_HUB_OFFLINE=False)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    _fake_inference(monkeypatch, tmp_path / "out")
+    from khaos_attribution.engines.render import RenderRequest
+    result = renderer.generate(RenderRequest(prompt="p", duration_seconds=10, variant="base"), None,
+                               tmp_path / "out" / "piece.wav", release_base=True)
+    assert result.params["khaos_dit_dtype"] == "bf16"
+    assert "base" not in renderer._handlers
 
 
 def test_an_operators_own_cpu_decode_setting_is_kept(monkeypatch, tmp_path):
