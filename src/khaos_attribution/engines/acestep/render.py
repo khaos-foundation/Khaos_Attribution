@@ -569,6 +569,7 @@ class AceStepRenderer:
         if should_stop and should_stop():
             raise RenderCancelled("cancelled before the render started")
         hooks = self._cancel_hooks(should_stop, handler) if should_stop else []
+        dit_dtype = str(getattr(handler, "dtype", "")).replace("torch.", "")   # read now: a base release drops it
         try:
             with cpu_decode(self.small_card()):
                 result = generate_music(handler, self.llm, params, config, save_dir=str(out_path.parent), **extra)
@@ -598,7 +599,7 @@ class AceStepRenderer:
         record = dict(audio.get("params") or {})
         record["khaos_seed"] = seed
         record["khaos_variant"] = variant
-        record["khaos_dit_dtype"] = str(getattr(handler, "dtype", "")).replace("torch.", "")
+        record["khaos_dit_dtype"] = dit_dtype
         record["khaos_small_card"] = self.small_card()
         # Every output keeps its engine's own rate and its record says which.
         record.setdefault("sample_rate", DESCRIPTOR.sample_rate)
