@@ -247,6 +247,15 @@ def test_the_prompt_embedder_puts_the_encoder_on_the_card_for_its_call(monkeypat
     assert handler.moves[-1] == ("te", "cpu", None)
 
 
+def test_the_prompt_embedder_runs_on_an_engine_without_the_offload_context(monkeypatch, tmp_path):
+    R, torch = _render(monkeypatch)
+    renderer = R.AceStepRenderer(repo_dir=tmp_path, checkpoint_dir=tmp_path, device="cpu")
+    renderer.handler = types.SimpleNamespace(text_encoder="te", text_tokenizer="tok")
+    import khaos_attribution.prompt_expansion as PE
+    monkeypatch.setattr(PE, "embed_texts", lambda model, tok, texts: (model, tok, texts))
+    assert renderer.text_embedder()(["a"]) == ("te", "tok", ["a"])
+
+
 def test_the_real_engine_holds_bf16_on_cuda_after_assigning_float32():
     """Against ACE-Step's own handler class, when torch and the checkout are importable."""
     torch = pytest.importorskip("torch")
