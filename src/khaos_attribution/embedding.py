@@ -138,14 +138,17 @@ def clap_text_prefetch(cache_dir: Path | str | None = None, progress: Callable[[
     def lands(repo: str, commit: str, files: tuple[str, ...]) -> list[str]:
         if progress:
             progress(f"{repo} @ {commit[:12]}")
-        # Khaos's own mirror first, at the very commit; the hub when the mirror cannot serve it.
+        # Hugging Face, then the Khaos mirror, each file against its pin; the hub library when neither can serve it.
         from khaos_attribution import weights as mirror  # noqa: PLC0415
         try:
             served = mirror.fetch_into_hub_cache(repo, cache, [spec.split("|")[0] for spec in files], revision=commit)
+        except mirror.PinMismatch:
+            raise
         except (mirror.MirrorError, OSError):
             served = None
         if served is None:
-            snapshot_download(repo, revision=commit, allow_patterns=[spec.split("|")[0] for spec in files], cache_dir=str(cache))
+            with mirror.anonymous_hub():
+                snapshot_download(repo, revision=commit, allow_patterns=[spec.split("|")[0] for spec in files], cache_dir=str(cache))
         # The hub hands back a snapshot folder it could not complete without raising.
         return _short_of(cache, repo, commit, files)
 

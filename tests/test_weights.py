@@ -149,6 +149,7 @@ def test_the_mirror_address_comes_from_the_environment_or_the_default(monkeypatc
 
 def test_the_mlx_ports_files_land_where_the_port_reads_them(mirror, tmp_path, monkeypatch):
     """Stability keeps the port's files under MLX/; the engine's weights step puts them under models/mlx/."""
+    monkeypatch.setattr(W, "PINS", {})
     from khaos_attribution.engines.sa3 import provision as P
     base, _, rev, _ = mirror
     root = tmp_path / "mirror" / "stabilityai" / "stable-audio-3-optimized"

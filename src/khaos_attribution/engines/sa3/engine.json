@@ -10,10 +10,10 @@
   },
   "licence": {
     "name": "Stability AI Community License",
-    "notice": "Stable Audio 3 is under the Stability AI Community License. Its text encoder is Google's t5gemma-b-b-ul2, shipped inside Stability's open base repository under Google's Gemma terms; Khaos serves both from its own weights mirror, so no account is needed to run the engine.",
+    "notice": "Stable Audio 3 is under the Stability AI Community License. Its text encoder is Google's t5gemma-b-b-ul2, shipped inside Stability's open base repository under Google's Gemma terms; Khaos fetches both from Hugging Face at pinned revisions, checks every file against its pinned hash and keeps a copy on its own weights mirror, so no account is needed to run the engine.",
     "obligations": [
       "Stability AI Community License: free below its revenue threshold; the attribution it asks for is shown where the base model is named.",
-      "Gemma Terms of Use for the text encoder: Khaos serves it from its own weights mirror with Google's terms and Stability's licence beside the files, and they travel with every copy."
+      "Gemma Terms of Use for the text encoder: Khaos keeps it on its own weights mirror with Google's terms and Stability's licence beside the files, and they travel with every copy."
     ]
   },
   "weights": [

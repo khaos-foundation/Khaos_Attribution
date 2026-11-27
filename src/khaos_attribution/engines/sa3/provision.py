@@ -1,7 +1,8 @@
 """Stable Audio 3's provision slot: Stability's code at the descriptor's pin, its own environment for this
 machine's runtime (torch with Flash Attention on CUDA; the MLX port on Apple silicon), the weights the descriptor
 lists, and the MLX base weights exported once. --check reports without changing anything. Nothing here handles a
-Hugging Face account: every weight set comes from Khaos's own mirror first, the hub only when the mirror cannot serve it."""
+Hugging Face account: every weight set comes from Hugging Face at its pinned revision, else from Khaos's own mirror,
+each file checked against its pinned hash, and the hub library only when neither can serve it."""
 
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from khaos_attribution.engines.contract_guard import (CONTRACT_FINGERPRINT, CONT
 from khaos_attribution.engines.environment import (Report, archive_url, git_usable, make_venv,  # noqa: F401
                                                    remove_tree, uv_path)
 from khaos_attribution.engines.environment import from_mirror as _from_mirror
+from khaos_attribution.engines.environment import refused as _refused
 from khaos_attribution.engines.environment import run as _run
 from khaos_attribution.engines.worker_process import host_env
 
@@ -383,9 +385,8 @@ def mlx_base_link(root: Path, weights_dir: Path) -> Path:
 
 
 def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = False) -> list:
-    """Every weight set the descriptor lists for this runtime: torch sets into the Hugging Face cache by the
-    engine's own downloader (a gated set only once the user's own login has been approved); the MLX port's set
-    through its own weights module, its ready-made base file linked where the trainer looks."""
+    """Every weight set the descriptor lists for this runtime: torch sets into the Hugging Face cache, the MLX port's
+    set through its own weights module with its ready-made base file linked where the trainer looks."""
     python = venv_python(root, runtime)
     out = []
     for w in DESCRIPTOR.weights:
@@ -405,13 +406,19 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
             if check_only:
                 out.append((not required, f"{w['repo']} missing under {mlx}"))
                 continue
-            # Khaos's own mirror first; the port's downloader only when the mirror cannot serve the set.
-            if _from_mirror(lambda: _mlx_from_mirror(w["repo"], mlx, w.get("components") or [])) and all(f.exists() for f in parts):
-                out.append((True, f"{w['repo']} fetched from the Khaos weights mirror"))
+            # Hugging Face, then the Khaos mirror, each file against its pin; the port's downloader only when neither can serve.
+            try:
+                served = _from_mirror(lambda: _mlx_from_mirror(w["repo"], mlx, w.get("components") or []))
+            except mirror.PinMismatch:
+                out.append(_refused(w["repo"]))
+                continue
+            if served and all(f.exists() for f in parts):
+                out.append((True, f"{w['repo']} fetched and checked against its pinned hashes"))
                 continue
             code = ("import sys; sys.path.insert(0, 'scripts'); from weights import ensure_local; "
                     "[ensure_local(p, verbose=False) for p in sys.argv[1:]]")
-            done = _run([python, "-c", code, *(w.get("components") or [])], cwd=mlx, env={**host_env(), "HF_HUB_OFFLINE": "0"})
+            done = _run([python, "-c", code, *(w.get("components") or [])], cwd=mlx,
+                        env=mirror.anonymous_hub_env({**host_env(), "HF_HUB_OFFLINE": "0"}))
             whole = done.returncode == 0 and all(f.exists() for f in parts)
             out.append((whole, f"{w['repo']} fetched by the MLX port" if whole
                         else f"{w['repo']} could not be fetched: {done.stderr.strip()[-200:] or 'a file is still missing'}"))
@@ -423,18 +430,21 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
         if check_only or not required:
             out.append((not required, f"{w['repo']} missing from the Hugging Face cache" + ("" if required else " (optional)")))
             continue
-        if _from_mirror(lambda: mirror.fetch_into_hub_cache(w["repo"], mirror.default_hub_cache(), w.get("patterns"))) \
-                and cached(w["repo"], files):
-            out.append((True, f"{w['repo']} fetched from the Khaos weights mirror into the Hugging Face cache"))
+        try:
+            served = _from_mirror(lambda: mirror.fetch_into_hub_cache(w["repo"], mirror.default_hub_cache(), w.get("patterns")))
+        except mirror.PinMismatch:
+            out.append(_refused(w["repo"]))
+            continue
+        if served and cached(w["repo"], files):
+            out.append((True, f"{w['repo']} fetched and checked against its pinned hashes into the Hugging Face cache"))
             continue
         code = ("import json, sys; from huggingface_hub import snapshot_download; "
                 "snapshot_download(sys.argv[1], allow_patterns=json.loads(sys.argv[2]) or None)")
-        done = _run([python, "-c", code, w["repo"], json.dumps(w.get("patterns") or [])], env={**host_env(), "HF_HUB_OFFLINE": "0"})
+        done = _run([python, "-c", code, w["repo"], json.dumps(w.get("patterns") or [])],
+                    env=mirror.anonymous_hub_env({**host_env(), "HF_HUB_OFFLINE": "0"}))
         if done.returncode != 0 or not cached(w["repo"], files):
             why = done.stderr.strip().splitlines()[-1:] or ["a file is still missing"]
-            note = (f"{w['repo']} could not be downloaded: {why[0][:200]}"
-                    + ("; accept its terms on its Hugging Face page, then `hf auth login`" if w.get("gated") else ""))
-            out.append((False, note))
+            out.append((False, f"{w['repo']} could not be downloaded: {why[0][:200]}"))
         else:
             out.append((True, f"{w['repo']} downloaded to the Hugging Face cache"))
     if runtime == "mlx":
