@@ -65,4 +65,4 @@ __all__ = [
 ]
 
 # The code's own number, never the installed metadata: an editable install's metadata goes stale on a fast-forward.
-__version__ = "0.62.1"  # tests/test_version.py pins this to pyproject.toml
+__version__ = "0.63.0"  # tests/test_version.py pins this to pyproject.toml
