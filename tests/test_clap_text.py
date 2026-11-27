@@ -9,6 +9,13 @@ from pathlib import Path
 import pytest
 
 from khaos_attribution import embedding as E
+from khaos_attribution import weights as W
+
+
+@pytest.fixture(autouse=True)
+def _no_pins(monkeypatch):
+    """These tests are about the hub library's own path, taken for a set with no pin."""
+    monkeypatch.setattr(W, "PINS", {})
 
 
 def _home(cache, repo):
