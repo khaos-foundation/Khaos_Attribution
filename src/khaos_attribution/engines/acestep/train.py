@@ -84,6 +84,7 @@ def training_api(repo_dir: Path | str) -> TrainingApi:
         raise TrainingUnavailable(f"ACE-Step's training modules are not importable from {root}: {exc}") from exc
     patch_mps_precision()
     patch_vae_precision()
+    patch_audio_reader()
     return TrainingApi(preprocess=preprocess_audio_files, Trainer=FixedLoRATrainer, TrainingConfig=TrainingConfigV2,
                        LoRAConfig=LoRAConfigV2, LoKRConfig=LoKRConfigV2, load_decoder=load_decoder_for_training,
                        save_final=save_final, Module=FixedLoRAModule, select_dtype=_select_compute_dtype)
@@ -120,6 +121,39 @@ def patch_vae_precision() -> None:
 
     _ml.load_vae = load_vae
     _ml._khaos_vae_fp32 = True
+
+
+def load_audio_stereo(audio_path, target_sample_rate: int, max_duration: float):
+    """ACE-Step's preparation reader on soundfile: the engine's own tensor (two channels first, float32, resampled
+    and cut as it does) with no FFmpeg; a file soundfile cannot read fails with soundfile's reason."""
+    import soundfile as sf  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+    import torchaudio  # noqa: PLC0415
+    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
+    audio = torch.from_numpy(data.T.copy())
+    if sr != target_sample_rate:
+        audio = torchaudio.transforms.Resample(sr, target_sample_rate)(audio)
+    if audio.shape[0] == 1:
+        audio = audio.repeat(2, 1)
+    elif audio.shape[0] > 2:
+        audio = audio[:2, :]
+    max_samples = int(max_duration * target_sample_rate)
+    if audio.shape[1] > max_samples:
+        audio = audio[:, :max_samples]
+    return audio, sr
+
+
+def patch_audio_reader() -> None:
+    """Preparation reads its clips with soundfile, never through torchaudio's FFmpeg: the preprocessor imports the
+    reader by name at call time, so the module's reader is replaced. Idempotent."""
+    try:
+        from acestep.training.dataset_builder_modules import preprocess_audio as _pa  # noqa: PLC0415
+    except ImportError as exc:
+        raise TrainingUnavailable(f"ACE-Step's preparation reader is not importable: {exc}") from exc
+    if getattr(_pa, "_khaos_soundfile", False):
+        return
+    _pa.load_audio_stereo = load_audio_stereo
+    _pa._khaos_soundfile = True
 
 
 def patch_mps_precision() -> None:

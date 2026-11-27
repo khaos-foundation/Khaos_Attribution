@@ -2,7 +2,7 @@
 can run it with no torch: the step normalisation the renderer un-clamps, the codec dtype rule it forces, the DiT's
 precision it holds at bf16 on CUDA and Apple silicon, the text encoder's loader and device context, the offload and
 processor decode a small card asks for, the base checkpoint's turbo flag, the trainer's precision selector, the
-training step's loss, the preprocessor's codec loader and the data module's loader. A source that cannot be read
+training step's loss, the preprocessor's codec loader and audio reader, and the data module's loader. A source that cannot be read
 fails, never passes.
 Usage: python -m khaos_attribution.engines.acestep.seams <ACE-Step checkout>"""
 
@@ -16,6 +16,7 @@ HANDLER = "acestep/core/generation/handler"
 LORA_MODULE = "acestep/training_v2/fixed_lora_module.py"
 PREPROCESS = "acestep/training_v2/preprocess.py"
 DATA_MODULE = "acestep/training/data_module.py"
+AUDIO_READER_MODULE = "acestep.training.dataset_builder_modules.preprocess_audio"
 
 
 def _parse(root: Path, rel: str, found: list) -> ast.Module | None:
@@ -108,6 +109,12 @@ def problems(root) -> list:
                    and any(a.name == "load_vae" for a in n.names)]
         if not at_call:
             found.append("the preprocessor does not import load_vae when it runs: the codec loader cannot be replaced")
+        reader = [n for f in ast.walk(preprocess) if isinstance(f, ast.FunctionDef) for n in ast.walk(f)
+                  if isinstance(n, ast.ImportFrom) and n.module == AUDIO_READER_MODULE
+                  and any(a.name == "load_audio_stereo" for a in n.names)]
+        if not reader:
+            found.append("the preprocessor does not import load_audio_stereo when it runs: preparation cannot read "
+                         "the clips with soundfile")
     data = _parse(root, DATA_MODULE, found)
     if data is not None:
         if not _functions(data, "collate_preprocessed_batch"):
