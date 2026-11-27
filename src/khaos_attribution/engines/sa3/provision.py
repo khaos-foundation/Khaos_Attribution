@@ -250,7 +250,8 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
         return ok, ("the MLX runtime installed; " + note) if ok else note
     python = venv_python(root, "torch")
     # Flash Attention has no Windows build; Stability's model falls back to PyTorch's own attention without it.
-    probe_code = ("import torch, stable_audio_3" + ("" if WINDOWS else ", flash_attn")
+    # On Windows soundfile is the engine's only audio reader (torchaudio's FFmpeg bindings are left out).
+    probe_code = ("import torch, stable_audio_3" + (", soundfile" if WINDOWS else ", flash_attn")
                   + "; assert torch.cuda.is_available(); print('ok')")
     probe_note = "torch sees the GPU and stable_audio_3 imports" + ("" if WINDOWS else "; Flash Attention imports")
     if python.is_file():

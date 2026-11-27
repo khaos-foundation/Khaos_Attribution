@@ -112,7 +112,10 @@ def leave_out_ffmpeg_bindings(site_packages: Path, platform: str = sys.platform)
     lib = Path(site_packages) / "torio" / "lib"
     gone = []
     for path in sorted(lib.glob("*torio_ffmpeg*")) if lib.is_dir() else []:
-        path.unlink()
+        try:
+            path.unlink()
+        except PermissionError:
+            continue    # held open by a running job; the next provision takes it
         gone.append(path.name)
     return gone
 

@@ -418,6 +418,7 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
     joined = [" ".join(c) for c in calls]
     assert not any("flash-attn" in c for c in joined), "no Flash Attention build on Windows"
     assert not any("flash_attn" in c for c in joined), "the probe does not ask for it either"
+    assert any("import torch, stable_audio_3, soundfile" in c for c in joined), "soundfile is the Windows reader"
     assert any("Scripts/python.exe" in c or "Scripts\\python.exe" in c for c in joined)
     assert P.installed(root, "torch", tmp_path / "w")
 
@@ -909,6 +910,22 @@ def test_torchaudio_s_ffmpeg_bindings_leave_the_windows_environment_only(tmp_pat
     assert E.leave_out_ffmpeg_bindings(tmp_path / "site", platform="win32") == ["_torio_ffmpeg4.pyd", "libtorio_ffmpeg6.pyd"]
     assert [p.name for p in lib.iterdir()] == ["__init__.py"]
     assert E.leave_out_ffmpeg_bindings(tmp_path / "nowhere", platform="win32") == []
+
+
+def test_a_binding_held_open_is_passed_over_not_a_failure(tmp_path, monkeypatch):
+    from khaos_attribution.engines import environment as E
+    lib = tmp_path / "torio" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "_torio_ffmpeg4.pyd").write_bytes(b"")
+    (lib / "_torio_ffmpeg5.pyd").write_bytes(b"")
+    real = Path.unlink
+
+    def held(self, *a, **k):
+        if self.name == "_torio_ffmpeg4.pyd":
+            raise PermissionError("in use")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", held)
+    assert E.leave_out_ffmpeg_bindings(tmp_path, platform="win32") == ["_torio_ffmpeg5.pyd"]
 
 
 def test_making_the_environment_stand_alone_also_leaves_the_ffmpeg_bindings_out(tmp_path, monkeypatch):
