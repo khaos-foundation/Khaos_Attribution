@@ -25,7 +25,8 @@ from khaos_attribution.engines.contract_guard import (CONTRACT_FINGERPRINT, CONT
                                                       CONTRACT_WHEEL_ENV, contract_fingerprint, contract_into,
                                                       contract_mismatch, contract_present, contract_spec,
                                                       mismatch_words)
-from khaos_attribution.engines.environment import (Report, archive_url, carry_cpp_runtime, git_usable, make_venv,  # noqa: F401
+from khaos_attribution.engines.environment import (Report, archive_url, carry_cpp_runtime, git_usable,  # noqa: F401
+                                                   leave_out_ffmpeg_bindings, make_venv,
                                                    remove_tree, uv_path)
 from khaos_attribution.engines.environment import from_mirror as _from_mirror
 from khaos_attribution.engines.environment import refused as _refused
@@ -324,11 +325,15 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
 
 
 def _carry_runtime(root: Path) -> tuple:
-    """The C++ runtime into the torch environment (Windows only): (names copied, why it could not be, or "")."""
+    """The torch environment made to borrow nothing from the machine (Windows only): the C++ runtime carried in and
+    torchaudio's FFmpeg bindings left out. (names copied, why it could not be, or "")."""
+    site = root / ".venv" / "Lib" / "site-packages"
     try:
-        return carry_cpp_runtime(root / ".venv", root / ".venv" / "Lib" / "site-packages"), ""
+        carried = carry_cpp_runtime(root / ".venv", site)
+        leave_out_ffmpeg_bindings(site)
+        return carried, ""
     except OSError as exc:
-        return [], f"Microsoft's C++ runtime could not be put in the engine's environment: {exc}"
+        return [], f"the engine's environment could not be made to run on its own: {exc}"
 
 
 def cached(repo: str, filenames: list) -> bool:

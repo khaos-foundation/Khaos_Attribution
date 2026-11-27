@@ -894,4 +894,26 @@ def test_an_existing_environment_gets_the_runtime_and_a_copy_that_fails_is_said(
         raise PermissionError("denied")
     monkeypatch.setattr(P, "carry_cpp_runtime", refuse)
     carried, why = P._carry_runtime(root)
-    assert carried == [] and "could not be put in the engine's environment: denied" in why
+    assert carried == [] and "could not be made to run on its own: denied" in why
+
+
+def test_torchaudio_s_ffmpeg_bindings_leave_the_windows_environment_only(tmp_path):
+    """Through torio's bindings the engine would load an FFmpeg found on the machine; on Windows they leave."""
+    from khaos_attribution.engines import environment as E
+    lib = tmp_path / "site" / "torio" / "lib"
+    lib.mkdir(parents=True)
+    for name in ("_torio_ffmpeg4.pyd", "libtorio_ffmpeg6.pyd", "__init__.py"):
+        (lib / name).write_bytes(b"")
+    assert E.leave_out_ffmpeg_bindings(tmp_path / "site", platform="darwin") == []
+    assert len(list(lib.iterdir())) == 3
+    assert E.leave_out_ffmpeg_bindings(tmp_path / "site", platform="win32") == ["_torio_ffmpeg4.pyd", "libtorio_ffmpeg6.pyd"]
+    assert [p.name for p in lib.iterdir()] == ["__init__.py"]
+    assert E.leave_out_ffmpeg_bindings(tmp_path / "nowhere", platform="win32") == []
+
+
+def test_making_the_environment_stand_alone_also_leaves_the_ffmpeg_bindings_out(tmp_path, monkeypatch):
+    root = tmp_path / "sa3"
+    left = []
+    monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: [])
+    monkeypatch.setattr(P, "leave_out_ffmpeg_bindings", lambda site: left.append(site) or [])
+    assert P._carry_runtime(root) == ([], "") and left == [root / ".venv" / "Lib" / "site-packages"]
