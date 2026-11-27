@@ -73,6 +73,28 @@ def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool
     return True, note
 
 
+# Microsoft's C++ runtime: Windows does not carry it, and an engine's torch cannot load without it.
+WINDOWS_CPP_RUNTIME = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
+                       "msvcp140_codecvt_ids.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
+                       "vcomp140.dll")
+
+
+def carry_cpp_runtime(into: Path, source: Path | None = None, platform: str = sys.platform) -> list:
+    """On Windows, the C++ runtime files the room's own Python folder carries and ``into`` lacks, copied into it, so an
+    engine's environment takes them from the app and never from the machine; returns the names copied."""
+    if platform != "win32":
+        return []
+    source, into = Path(source or sys.base_prefix), Path(into)
+    into.mkdir(parents=True, exist_ok=True)
+    have = {p.name.lower() for p in into.iterdir()}
+    copied = []
+    for name in WINDOWS_CPP_RUNTIME:
+        if (source / name).is_file() and name not in have:
+            shutil.copy2(source / name, into / name)
+            copied.append(name)
+    return copied
+
+
 def git_usable() -> bool:
     """Whether git here runs without a dialog: a Mac without the developer tools has a git stub that opens one."""
     if not shutil.which("git"):

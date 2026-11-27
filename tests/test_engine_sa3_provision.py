@@ -403,8 +403,17 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
     monkeypatch.setattr(P, "requirements_missing", lambda python: None)
     monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
+    app_python = tmp_path / "app-python"
+    app_python.mkdir()
+    for name in ("msvcp140.dll", "vcruntime140.dll"):
+        (app_python / name).write_bytes(b"runtime")
+    from khaos_attribution.engines import environment as E
+    monkeypatch.setattr(P, "carry_cpp_runtime", lambda into: E.carry_cpp_runtime(into, app_python, platform="win32"))
     report = P.provision(root, tmp_path / "w", device="cuda")
     assert report.passed, report.text()
+    torch_lib = root / ".venv" / "Lib" / "site-packages" / "torch" / "lib"
+    assert sorted(p.name for p in torch_lib.iterdir()) == ["msvcp140.dll", "vcruntime140.dll"]
+    assert "C++ runtime carried from the app (msvcp140.dll, vcruntime140.dll)" in report.text()
     joined = [" ".join(c) for c in calls]
     assert not any("flash-attn" in c for c in joined), "no Flash Attention build on Windows"
     assert not any("flash_attn" in c for c in joined), "the probe does not ask for it either"
@@ -822,3 +831,18 @@ def test_an_mlx_environment_built_at_another_pin_fails_the_check_and_runs_the_po
     assert not ok and "built at 111111111111" in note and not any("install.sh" in c for c in seen)
     assert P.environment(root, "mlx")[0] and any("install.sh" in c for c in seen)
     assert json.loads((python.parent.parent / P.BUILD_RECORD).read_text())["commit"] == P.DESCRIPTOR.commit
+
+
+def test_the_cpp_runtime_is_carried_from_the_app_on_windows_only_and_never_over_what_is_there(tmp_path):
+    """An engine's environment takes Microsoft's C++ runtime from the app's own Python folder, never the machine's."""
+    from khaos_attribution.engines import environment as E
+    source, into = tmp_path / "app", tmp_path / "torch" / "lib"
+    source.mkdir()
+    for name in ("msvcp140.dll", "msvcp140_atomic_wait.dll", "vcruntime140.dll", "python312.dll"):
+        (source / name).write_bytes(b"app")
+    into.mkdir(parents=True)
+    (into / "vcruntime140.dll").write_bytes(b"own")
+    assert E.carry_cpp_runtime(into, source, platform="darwin") == []
+    assert E.carry_cpp_runtime(into, source, platform="win32") == ["msvcp140.dll", "msvcp140_atomic_wait.dll"]
+    assert (into / "vcruntime140.dll").read_bytes() == b"own"
+    assert not (into / "python312.dll").exists(), "only the C++ runtime is carried"

@@ -25,7 +25,7 @@ from khaos_attribution.engines.contract_guard import (CONTRACT_FINGERPRINT, CONT
                                                       CONTRACT_WHEEL_ENV, contract_fingerprint, contract_into,
                                                       contract_mismatch, contract_present, contract_spec,
                                                       mismatch_words)
-from khaos_attribution.engines.environment import (Report, archive_url, git_usable, make_venv,  # noqa: F401
+from khaos_attribution.engines.environment import (Report, archive_url, carry_cpp_runtime, git_usable, make_venv,  # noqa: F401
                                                    remove_tree, uv_path)
 from khaos_attribution.engines.environment import from_mirror as _from_mirror
 from khaos_attribution.engines.environment import refused as _refused
@@ -308,11 +308,14 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     ok, note = requirements_into(python)
     if not ok:
         return False, f"the engine's environment installed; {note}"
+    # torch adds its own lib folder to every library search, so the runtime it needs goes there.
+    carried = carry_cpp_runtime(root / ".venv" / "Lib" / "site-packages" / "torch" / "lib")
     probe = _run([python, "-c", probe_code])
     if probe.returncode != 0:
         return False, f"the environment installed but cannot run the engine: {probe.stderr.strip()[-200:]}"
     _write_build_record(root, "torch")
-    return True, f"the engine's environment installed; {probe_note}" + (f"; {made}" if made else "")
+    return True, (f"the engine's environment installed; {probe_note}" + (f"; {made}" if made else "")
+                  + (f"; Microsoft's C++ runtime carried from the app ({', '.join(carried)})" if carried else ""))
 
 
 def cached(repo: str, filenames: list) -> bool:
