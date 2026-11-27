@@ -92,10 +92,8 @@ def test_a_mirror_that_ignores_the_range_is_read_from_the_start_and_a_wrong_part
     _Ranged.ranges = True
     (dest / "weights" / "big.bin").unlink()
     part.write_bytes(b"\0" * 100_000)
-    with pytest.raises(W.MirrorError, match="did not match"):
-        W.fetch_into_dir(repo, dest, ["weights/*"], base=base)
-    assert not part.exists() and not (dest / "weights" / "big.bin").exists()
-    assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev and (dest / "weights" / "big.bin").read_bytes() == whole
+    assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev, "a wrong partial copy is dropped and fetched whole"
+    assert (dest / "weights" / "big.bin").read_bytes() == whole and not part.exists()
 
 
 def test_the_hub_cache_layout_is_what_the_hub_itself_reads(mirror, tmp_path):

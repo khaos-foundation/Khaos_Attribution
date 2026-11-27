@@ -280,7 +280,7 @@ def test_the_client_never_reads_or_sends_a_credential():
 
 def test_the_environment_given_to_the_hub_library_holds_no_token_and_turns_the_saved_login_off():
     env = W.anonymous_hub_env({"HF_TOKEN": "x", "HUGGING_FACE_HUB_TOKEN": "y", "HUGGINGFACE_HUB_TOKEN": "z", "PATH": "/bin"})
-    assert env == {"PATH": "/bin", "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1"}
+    assert env == {"PATH": "/bin", "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1", "NETRC": os.devnull}
 
 
 def test_inside_anonymous_hub_the_hub_library_builds_no_authorization_header(tmp_path, monkeypatch):
@@ -326,3 +326,113 @@ def test_the_pins_module_is_what_pin_weights_py_writes_from_the_pins():
     script = _pin_script()
     assert script.render(weights_pins.PINS) == Path(weights_pins.__file__).read_text()
     assert set(weights_pins.PINS) == set(script.REPOS)
+
+
+# ── a wrong partial copy, a wrong length, no source at all ───────────────────
+
+
+def test_a_stale_partial_copy_that_is_wrong_is_dropped_and_the_file_fetched_whole_before_anything_is_refused(rig, tmp_path):
+    dest = tmp_path / "d"
+    (dest / "w").mkdir(parents=True)
+    (dest / "w" / "big.bin.part").write_bytes(b"\0" * 100_000)
+    assert _fetch(rig, dest)[0] == REV and (dest / "w" / "big.bin").read_bytes() == BIG
+    assert [s["headers"].get("range") for s in rig.hub.state["seen"] if s["path"].endswith("big.bin")] == ["bytes=100000-", None]
+
+
+def test_a_hub_prefix_that_was_wrong_does_not_make_the_mirror_look_wrong(rig, tmp_path):
+    """The hub sends wrong bytes and stalls; the mirror then continues from them, fails the pin and is refetched whole."""
+    rig.hub.state["mode"] = "corrupt"
+    rig.hub.state["drops"] = [1_000] * 10
+    assert _fetch(rig, tmp_path / "d")[0] == REV
+    assert (tmp_path / "d" / "w" / "big.bin").read_bytes() == BIG
+
+
+def test_an_answer_whose_length_is_not_the_pinned_files_is_refused_without_reading_it(rig, tmp_path):
+    rig.hub.state["files"] = {**FILES, "w/big.bin": BIG + b"x"}
+    assert _fetch(rig, tmp_path / "d")[0] == REV and (tmp_path / "d" / "w" / "big.bin").read_bytes() == BIG
+    assert len([s for s in rig.hub.state["seen"] if s["path"].endswith("big.bin")]) == 1
+    assert not list((tmp_path / "d").rglob("*.part"))
+
+
+def test_a_pinned_set_no_source_answers_for_is_not_left_to_the_hub_library(rig, tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_ENDPOINT", "http://127.0.0.1:9")
+    with pytest.raises(W.Unserved) as raised:
+        W.fetch_into_dir(REPO, tmp_path / "d", base="http://127.0.0.1:9")
+    assert raised.value.pinned and "Hugging Face" in str(raised.value) and "the Khaos mirror" in str(raised.value)
+    assert W.main(["fetch", REPO, "--into", str(tmp_path / "cli"), "--base", "http://127.0.0.1:9"]) == W.EXIT_UNREACHABLE == 4
+    monkeypatch.setattr(W, "PINS", {})
+    assert W.main(["fetch", REPO, "--into", str(tmp_path / "cli2"), "--base", "http://127.0.0.1:9"]) == W.EXIT_NO_MIRROR == 3
+
+
+def test_writing_pins_needs_the_hubs_word_for_them(capsys):
+    with pytest.raises(SystemExit):
+        _pin_script().main(["--write"])
+    assert "--verify-hub" in capsys.readouterr().err
+
+
+# ── the callers hold the refusal ─────────────────────────────────────────────
+
+
+def test_a_caller_falls_back_to_the_hub_library_only_where_nothing_was_pinned():
+    from khaos_attribution.engines.environment import from_mirror
+    def raising(exc):
+        def fetch():
+            raise exc
+        return fetch
+    assert from_mirror(lambda: "rev") is True and from_mirror(lambda: None) is False
+    assert from_mirror(raising(W.Unserved("none", pinned=False))) is False
+    assert from_mirror(raising(W.MirrorError("odd manifest"))) is False and from_mirror(raising(OSError("x"))) is False
+    for refusal in (W.PinMismatch("bad"), W.Unserved("none", pinned=True)):
+        with pytest.raises(type(refusal)):
+            from_mirror(raising(refusal))
+
+
+@pytest.mark.parametrize("refusal", [W.PinMismatch("bad"), W.Unserved("no source answered (Connection refused)", pinned=True)])
+def test_a_refused_set_is_reported_and_the_hub_library_is_never_run(monkeypatch, tmp_path, refusal):
+    from khaos_attribution.engines.mimetic import provision as M
+    from khaos_attribution.engines.sa3 import provision as S
+
+    def refuse(fetch):
+        raise refusal
+
+    def never(*a, **k):
+        raise AssertionError("the hub library ran after a refusal")
+    monkeypatch.setattr(S, "venv_python", lambda *a: Path("py"))
+    monkeypatch.setattr(S, "cached", lambda *a, **k: False)
+    monkeypatch.setattr(S, "_from_mirror", refuse)
+    monkeypatch.setattr(S, "_run", never)
+    lines = S.weights(tmp_path, "torch", tmp_path)
+    assert lines and all(not ok for ok, _ in lines) and all("pinned hash" in note or "could not be downloaded" in note for _, note in lines)
+    monkeypatch.setattr(M, "venv_python", lambda *a: Path("py"))
+    monkeypatch.setattr(M, "cached", lambda *a, **k: False)
+    monkeypatch.setattr(M, "_from_mirror", refuse)
+    monkeypatch.setattr(M, "_run", never)
+    lines = M.weights(tmp_path)
+    assert lines and all(not ok for ok, _ in lines)
+
+
+def test_the_clap_text_prefetch_stops_on_a_refusal_and_does_not_call_the_hub_library(monkeypatch, tmp_path):
+    import sys
+    import types
+    from khaos_attribution import embedding
+    calls = []
+    fake = types.SimpleNamespace(snapshot_download=lambda *a, **k: calls.append(a))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+    for refusal in (W.PinMismatch("bad"), W.Unserved("none", pinned=True)):
+        def refuse(*a, **k):
+            raise refusal
+        monkeypatch.setattr(W, "fetch_into_hub_cache", refuse)
+        with pytest.raises(type(refusal)):
+            embedding.clap_text_prefetch(tmp_path / "cache")
+    assert calls == []
+
+
+def test_every_revision_the_contract_names_for_a_pinned_set_is_the_pin():
+    """A revision that differs from the pin silently leaves the set unpinned, so the descriptors and the CLAP lists agree with it."""
+    from khaos_attribution import embedding
+    from khaos_attribution.weights_pins import PINS
+    named = [(repo, pin) for repo, pin, _ in embedding.CLAP_TEXT_SNAPSHOTS]
+    named += [(w["repo"], w["revision"]) for path in Path(W.__file__).parent.glob("engines/*/engine.json")
+              for w in json.loads(path.read_text())["weights"] if w.get("revision")]
+    assert named
+    assert [(repo, rev) for repo, rev in named if repo in PINS and PINS[repo]["revision"] != rev] == []

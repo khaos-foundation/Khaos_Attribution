@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +36,8 @@ BACKOFF = (1.0, 2.0, 4.0)
 SKIP_SECONDS = 60.0
 # A shell caller falls back to the hub library on this code and nothing else.
 EXIT_NO_MIRROR = 3
+# A pinned set no source answered for: a script stops, because the hub library would install it unchecked.
+EXIT_UNREACHABLE = 4
 TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 
@@ -44,6 +47,14 @@ class MirrorError(RuntimeError):
 
 class PinMismatch(MirrorError):
     """No source served a file that matches its pinned sha256: nothing was installed, and no fallback may be."""
+
+
+class Unserved(urllib.error.URLError):
+    """No source answered for a file; `pinned` says whether the hub library may still be tried (it may not for a pin)."""
+
+    def __init__(self, reason, pinned: bool = False):
+        super().__init__(reason)
+        self.pinned = pinned
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -125,6 +136,7 @@ class _Source(NamedTuple):
     timeout: float
     agent: str | None
     hub: bool
+    repo: str = ""
 
 
 _skip: dict = {}
@@ -173,7 +185,7 @@ def _sources(repo: str, revision: str, path: str, base: str | None, pinned: bool
     out = []
     if pinned and not _offline() and not _hub_skipped(repo):
         out.append(_Source("Hugging Face", f"{hub_url()}/{repo}/resolve/{revision}/{urllib.parse.quote(path)}",
-                           HUB_TIMEOUT, None, True))
+                           HUB_TIMEOUT, None, True, repo))
     out.append(_Source("the Khaos mirror", f"{base_url(base)}/{repo}/{revision}/{path}", TIMEOUT, "khaos-weights", False))
     return out
 
@@ -185,28 +197,36 @@ def _retry_after(exc: urllib.error.HTTPError) -> float:
         return 0.0
 
 
-def _from_source(src: _Source, part: Path, size: int, sha256: str, progress: Callable[[str], None] | None) -> str:
-    """One source's bytes into `part`, resumed: ok, mismatch, gated, down (no answer or a stall) or unavailable.
-    A retry is made only once bytes have flowed, or against the mirror's own 5xx; a host that never answers is not waited on twice."""
+def _from_source(src: _Source, part: Path, size: int, sha256: str, progress: Callable[[str], None] | None) -> tuple:
+    """One source's bytes into `part`, resumed: (ok | mismatch | gated | down | unavailable, why). A retry is made only
+    once bytes have flowed, or against the mirror's own 5xx; a resumed copy that fails its hash is fetched once from zero."""
     broke = early = 0
+    resumed = fresh = False
+    why = ""
     while True:
         have = part.stat().st_size if part.is_file() else 0
         if have > size:
             part.unlink()
             have = 0
+        resumed = resumed or have > 0
         if have < size:
             try:
                 answer = _get(src.url, src.timeout, {"Range": f"bytes={have}-"} if have else None, src.agent)
             except urllib.error.HTTPError as exc:
                 if exc.code in (401, 403):
-                    return "gated"
+                    return "gated", f"HTTP {exc.code}"
                 if (exc.code == 429 or exc.code >= 500) and not src.hub and early < 2:
                     early += 1
                     _sleep(_retry_after(exc) or BACKOFF[early - 1])
                     continue
-                return "down" if exc.code == 429 or exc.code >= 500 else "unavailable"
-            except (urllib.error.URLError, OSError, http.client.HTTPException):
-                return "down"
+                return ("down" if exc.code == 429 or exc.code >= 500 else "unavailable"), f"HTTP {exc.code}"
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+                return "down", str(getattr(exc, "reason", None) or exc)
+            declared = answer.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) != (size - have if answer.status == 206 and have else size):
+                answer.close()
+                part.unlink(missing_ok=True)
+                return "mismatch", "its length is not the pinned file's"
             try:
                 with answer, part.open("ab" if have else "wb") as out:
                     if have and answer.status != 206:
@@ -218,23 +238,27 @@ def _from_source(src: _Source, part: Path, size: int, sha256: str, progress: Cal
                             progress(f"{part.name.removesuffix('.part')}: {out.tell() * 100 // max(size, 1)}%")
                         if out.tell() > size:
                             break
-            except (OSError, http.client.HTTPException):
+            except (OSError, http.client.HTTPException) as exc:
                 broke += 1
+                why = str(getattr(exc, "reason", None) or exc)
                 if broke >= ATTEMPTS:
-                    return "down"
+                    return "down", why
                 _sleep(BACKOFF[min(broke, len(BACKOFF)) - 1])
                 continue
         got = part.stat().st_size if part.is_file() else 0
         if got < size:
             broke += 1
             if broke >= ATTEMPTS:
-                return "down"
+                return "down", why or "the answer ended early"
             _sleep(BACKOFF[min(broke, len(BACKOFF)) - 1])
             continue
         if got == size and _sha256(part) == sha256:
-            return "ok"
+            return "ok", ""
         part.unlink(missing_ok=True)
-        return "mismatch"
+        if resumed and not fresh:
+            fresh, resumed = True, False
+            continue
+        return "mismatch", "its hash is not the pinned one"
 
 
 def _download(sources: list, dest: Path, size: int, sha256: str, progress: Callable[[str], None] | None = None,
@@ -250,26 +274,27 @@ def _download(sources: list, dest: Path, size: int, sha256: str, progress: Calla
         dest.write_bytes(b"")
         return
     part = dest.with_name(dest.name + ".part")
-    mismatched = []
+    mismatched, reasons = [], []
     for src in sources:
-        status = _from_source(src, part, size, sha256, progress)
+        status, why = _from_source(src, part, size, sha256, progress)
         if status == "ok":
             part.replace(dest)
             if progress:
                 progress(f"{dest.name}: from {src.name}")
             return
+        reasons.append(f"{src.name}: {why or status}")
         if status == "mismatch":
             mismatched.append(src.url)
             if progress:
                 progress(f"{dest.name}: {src.name} did not match the pinned hash; discarded")
         elif src.hub and status == "gated":
-            _skip_hub(urllib.parse.urlsplit(src.url).path.strip("/").partition("/resolve/")[0], "needs an account", progress)
+            _skip_hub(src.repo, "needs an account", progress)
         elif src.hub and status == "down":
             _skip_hub("*", "did not answer", progress)
     if mismatched:
         raise (PinMismatch if pinned else MirrorError)(
             f"{mismatched[0]} did not match the manifest (size or sha256); the partial copy was discarded")
-    raise urllib.error.URLError(f"no source could serve {dest.name}")
+    raise Unserved(f"no source answered for {dest.name} ({'; '.join(reasons)})", pinned)
 
 
 def fetch_into_dir(repo: str, dest: Path | str, patterns: list | tuple | None = None, *, base: str | None = None,
@@ -358,31 +383,37 @@ def fetch_url(url: str, dest: Path | str, *, base: str | None = None,
 
 
 def anonymous_hub_env(env: dict | None = None) -> dict:
-    """`env` (this process's by default) with no hub token and the hub library told never to look for one."""
+    """`env` (this process's by default) with no hub token, no saved login and no netrc for the hub library to find."""
     out = {k: v for k, v in (os.environ if env is None else env).items() if k not in TOKEN_VARS}
     out["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+    out["NETRC"] = os.devnull
     return out
+
+
+_anonymous = threading.RLock()
 
 
 @contextlib.contextmanager
 def anonymous_hub():
-    """Hub library calls made inside send no token: not from the environment, not from the saved login."""
-    keys = (*TOKEN_VARS, "HF_HUB_DISABLE_IMPLICIT_TOKEN")
-    saved = {k: os.environ.get(k) for k in keys}
-    constants = sys.modules.get("huggingface_hub.constants")
-    implicit = getattr(constants, "HF_HUB_DISABLE_IMPLICIT_TOKEN", None)
-    for k in TOKEN_VARS:
-        os.environ.pop(k, None)
-    os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
-    if constants is not None:
-        constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = True
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    """Hub library calls made inside send no token: not from the environment, the saved login or a netrc."""
+    keys = (*TOKEN_VARS, "HF_HUB_DISABLE_IMPLICIT_TOKEN", "NETRC")
+    with _anonymous:
+        saved = {k: os.environ.get(k) for k in keys}
+        constants = sys.modules.get("huggingface_hub.constants")
+        implicit = getattr(constants, "HF_HUB_DISABLE_IMPLICIT_TOKEN", None)
+        for k in TOKEN_VARS:
+            os.environ.pop(k, None)
+        os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+        os.environ["NETRC"] = os.devnull
         if constants is not None:
-            constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = implicit
+            constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = True
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            if constants is not None:
+                constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = implicit
 
 
 def default_hub_cache() -> Path:
@@ -396,7 +427,8 @@ def default_hub_cache() -> Path:
 
 def main(argv: list | None = None) -> int:
     """fetch <repo> (--into DIR | --hub-cache [DIR]) [--pattern P]... [--revision R] [--base URL]; check <repo>.
-    Exit 3 when no source can serve the set, so a script falls back to the hub library; 1 when a file fails its pin."""
+    Exit 3 when no source can serve an unpinned set, so a script falls back to the hub library; 4 when none answered for a
+    pinned one, which no fallback may replace; 1 when a file fails its pin."""
     import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(prog="khaos_attribution.weights")
@@ -430,6 +462,9 @@ def main(argv: list | None = None) -> int:
     except MirrorError as exc:
         say(str(exc))
         return 1
+    except Unserved as exc:
+        say(str(exc))
+        return EXIT_UNREACHABLE if exc.pinned else EXIT_NO_MIRROR
     except (urllib.error.URLError, OSError) as exc:
         say(f"no source answered: {exc}")
         return EXIT_NO_MIRROR

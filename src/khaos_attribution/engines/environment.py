@@ -158,10 +158,16 @@ def from_mirror(fetch) -> bool:
         return fetch() is not None
     except mirror.PinMismatch:
         raise
+    except mirror.Unserved as exc:
+        if exc.pinned:
+            raise
+        return False
     except (mirror.MirrorError, OSError):
         return False
 
 
-def refused(repo: str) -> tuple:
-    """The report line for a set whose files matched their pin from no source."""
-    return (False, f"{repo} did not match its pinned hash from any source; nothing was installed")
+def refused(repo: str, exc: Exception) -> tuple:
+    """The report line for a pinned set that no source served correctly: nothing was installed and no fallback was tried."""
+    if isinstance(exc, mirror.PinMismatch):
+        return (False, f"{repo} failed its pinned hash from every source; nothing was installed")
+    return (False, f"{repo} could not be downloaded: {exc}")

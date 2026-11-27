@@ -89,6 +89,8 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--verify-hub", action="store_true")
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args(argv)
+    if args.write and not args.verify_hub:
+        parser.error("--write needs --verify-hub: a pin is the hub's hash, not the mirror's own word")
     try:
         pins = from_mirror(args.mirror.rstrip("/"))
         bad = hub_differences(pins) if args.verify_hub else []

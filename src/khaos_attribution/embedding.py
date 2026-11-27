@@ -144,6 +144,10 @@ def clap_text_prefetch(cache_dir: Path | str | None = None, progress: Callable[[
             served = mirror.fetch_into_hub_cache(repo, cache, [spec.split("|")[0] for spec in files], revision=commit)
         except mirror.PinMismatch:
             raise
+        except mirror.Unserved as exc:
+            if exc.pinned:
+                raise
+            served = None
         except (mirror.MirrorError, OSError):
             served = None
         if served is None:

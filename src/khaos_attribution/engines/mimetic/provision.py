@@ -191,8 +191,8 @@ def weights(root: Path, *, check_only: bool = False) -> list:
             continue
         try:
             served = _from_mirror(lambda: mirror.fetch_into_hub_cache(repo, mirror.default_hub_cache(), w.get("patterns"), revision=rev))
-        except mirror.PinMismatch:
-            out.append(_refused(repo))
+        except (mirror.PinMismatch, mirror.Unserved) as exc:
+            out.append(_refused(repo, exc))
             continue
         if served and cached(repo, files, rev):
             out.append((True, f"{repo} fetched and checked against its pinned hashes into the Hugging Face cache"))

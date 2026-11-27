@@ -30,6 +30,8 @@ _unexpected: list = []
 def _no_real_weights_mirror(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("KHAOS_WEIGHTS_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("HF_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.setenv("HF_HOME", str(tmp_path_factory.mktemp("hf-home")))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     from khaos_attribution import weights
     weights._skip.clear()
     monkeypatch.setenv("REGISTER_LOG_WITNESSES", "")
