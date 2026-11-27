@@ -403,8 +403,18 @@ def test_on_windows_the_environment_has_its_own_layout_and_no_flash_attention(tm
     monkeypatch.setattr(P, "requirements_missing", lambda python: None)
     monkeypatch.setattr(P, "requirements_into", lambda python: (True, "contract"))
     monkeypatch.setattr(P, "cached", lambda repo, files: True)
+    app_python = tmp_path / "app-python"
+    app_python.mkdir()
+    for name in ("msvcp140.dll", "vcruntime140.dll"):
+        (app_python / name).write_bytes(b"runtime")
+    from khaos_attribution.engines import environment as E
+    monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: E.carry_cpp_runtime(venv, site, app_python, platform="win32"))
     report = P.provision(root, tmp_path / "w", device="cuda")
     assert report.passed, report.text()
+    runtime = root / ".venv" / E.CPP_RUNTIME_DIR
+    assert sorted(p.name for p in runtime.iterdir()) == ["msvcp140.dll", "vcruntime140.dll"]
+    assert (root / ".venv" / "Lib" / "site-packages" / E.CPP_RUNTIME_PTH).is_file()
+    assert "C++ runtime carried from" in report.text() and "(msvcp140.dll, vcruntime140.dll)" in report.text()
     joined = [" ".join(c) for c in calls]
     assert not any("flash-attn" in c for c in joined), "no Flash Attention build on Windows"
     assert not any("flash_attn" in c for c in joined), "the probe does not ask for it either"
@@ -822,3 +832,66 @@ def test_an_mlx_environment_built_at_another_pin_fails_the_check_and_runs_the_po
     assert not ok and "built at 111111111111" in note and not any("install.sh" in c for c in seen)
     assert P.environment(root, "mlx")[0] and any("install.sh" in c for c in seen)
     assert json.loads((python.parent.parent / P.BUILD_RECORD).read_text())["commit"] == P.DESCRIPTOR.commit
+
+
+def test_the_cpp_runtime_is_carried_from_the_app_on_windows_only_and_never_over_what_is_there(tmp_path):
+    """An engine's environment takes Microsoft's C++ runtime from the app's own Python folder, never the machine's,
+    and a .pth adds its folder to every library search from the interpreter's start."""
+    from khaos_attribution.engines import environment as E
+    source, venv = tmp_path / "app", tmp_path / ".venv"
+    site = venv / "Lib" / "site-packages"
+    source.mkdir()
+    for name in ("msvcp140.dll", "msvcp140_atomic_wait.dll", "vcruntime140.dll", "python312.dll"):
+        (source / name).write_bytes(b"app")
+    (venv / E.CPP_RUNTIME_DIR).mkdir(parents=True)
+    (venv / E.CPP_RUNTIME_DIR / "vcruntime140.dll").write_bytes(b"own")
+    assert E.carry_cpp_runtime(venv, site, source, platform="darwin") == []
+    assert not (site / E.CPP_RUNTIME_PTH).exists(), "nothing on another system"
+    assert E.carry_cpp_runtime(venv, site, source, platform="win32") == ["msvcp140.dll", "msvcp140_atomic_wait.dll"]
+    assert (venv / E.CPP_RUNTIME_DIR / "vcruntime140.dll").read_bytes() == b"own"
+    assert not (venv / E.CPP_RUNTIME_DIR / "python312.dll").exists(), "only the C++ runtime is carried"
+    line = (site / E.CPP_RUNTIME_PTH).read_text(encoding="utf-8")
+    assert line.startswith("import ") and line.count("\n") == 1, "a .pth runs a line only when it starts with import"
+    assert "os.add_dll_directory(os.path.join(sys.prefix, 'khaos_cpp_runtime'))" in line
+    assert line.isascii(), "Windows reads .pth files in its own code page: no path, nothing but ASCII"
+
+
+def _ready_windows_environment(tmp_path, monkeypatch, carried: list):
+    """A Windows torch environment that already runs the engine, with the carry recorded."""
+    from khaos_attribution.engines.sa3 import render as R
+    monkeypatch.setattr(R, "WINDOWS", True)
+    monkeypatch.setattr(P, "WINDOWS", True)
+    root = tmp_path / "sa3"
+    python = R.venv_python(root, "torch")
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: _done(0, "ok"))
+    monkeypatch.setattr(P, "build_stale", lambda root, runtime: None)
+    monkeypatch.setattr(P, "build_record", lambda root, runtime: {"recorded": True})
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
+    monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: carried.append(venv) or [])
+    return root
+
+
+def test_an_environment_made_before_the_runtime_gets_it_at_the_next_provision_and_a_check_changes_nothing(
+        tmp_path, monkeypatch):
+    carried = []
+    root = _ready_windows_environment(tmp_path, monkeypatch, carried)
+    ok, _note = P.environment(root, "torch", check_only=True)
+    assert ok and carried == [], "a check carries nothing"
+    ok, _note = P.environment(root, "torch")
+    assert ok and carried == [root / ".venv"]
+
+
+def test_an_existing_environment_gets_the_runtime_and_a_copy_that_fails_is_said(tmp_path, monkeypatch):
+    """A failed copy is a refusal in words, never a traceback."""
+    root = tmp_path / "sa3"
+    calls = []
+    monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: calls.append(venv) or ["msvcp140.dll"])
+    assert P._carry_runtime(root) == (["msvcp140.dll"], "") and calls == [root / ".venv"]
+
+    def refuse(venv, site):
+        raise PermissionError("denied")
+    monkeypatch.setattr(P, "carry_cpp_runtime", refuse)
+    carried, why = P._carry_runtime(root)
+    assert carried == [] and "could not be put in the engine's environment: denied" in why

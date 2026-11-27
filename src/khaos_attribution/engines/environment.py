@@ -73,6 +73,37 @@ def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool
     return True, note
 
 
+# Microsoft's C++ runtime: Windows does not carry it, and an engine's torch cannot load without it.
+WINDOWS_CPP_RUNTIME = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
+                       "msvcp140_codecvt_ids.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
+                       "vcomp140.dll")
+CPP_RUNTIME_DIR = "khaos_cpp_runtime"
+CPP_RUNTIME_PTH = "khaos_cpp_runtime.pth"
+
+
+def carry_cpp_runtime(venv: Path, site_packages: Path, source: Path | None = None, platform: str = sys.platform) -> list:
+    """On Windows, the C++ runtime files ``source`` (the running Python's own folder) holds, copied into the
+    environment's own folder, with a .pth that adds it to every library search from the interpreter's start; returns
+    the names copied. Nothing is taken from the machine and nothing already there is replaced."""
+    if platform != "win32":
+        return []
+    source, into = Path(source or sys.base_prefix), Path(venv) / CPP_RUNTIME_DIR
+    into.mkdir(parents=True, exist_ok=True)
+    have = {p.name.lower() for p in into.iterdir()}
+    copied = []
+    for name in WINDOWS_CPP_RUNTIME:
+        if (source / name).is_file() and name not in have:
+            shutil.copy2(source / name, into / name)
+            copied.append(name)
+    # A .pth line that starts with "import" runs at start-up, before any package loads a library. It names no path:
+    # Windows reads .pth files in its own code page, and sys.prefix is the environment wherever it now lives.
+    Path(site_packages).mkdir(parents=True, exist_ok=True)
+    (Path(site_packages) / CPP_RUNTIME_PTH).write_text(
+        "import os, sys; sys.__dict__.setdefault('_khaos_cpp_runtime', "
+        f"os.add_dll_directory(os.path.join(sys.prefix, {CPP_RUNTIME_DIR!r})))\n", encoding="ascii")
+    return copied
+
+
 def git_usable() -> bool:
     """Whether git here runs without a dialog: a Mac without the developer tools has a git stub that opens one."""
     if not shutil.which("git"):
