@@ -1,6 +1,6 @@
 """mimetic-a0's provision slot: the engine's code at the descriptor's pin, its own environment (its lock, torch from the
 CUDA 12.8 index on an NVIDIA machine, stable-audio-tools' training extras the adapters need), the contract, and the
-weights the descriptor lists, from Khaos's own mirror first. --check reports without changing anything."""
+weights the descriptor lists, from Hugging Face at their pins else Khaos's own mirror. --check reports without changing anything."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from khaos_attribution.engines.contract_guard import requirements_into, requirem
 from khaos_attribution.engines.environment import (Report, archive_url, git_usable, make_venv, unpack_archive,
                                                    uv_path)
 from khaos_attribution.engines.environment import from_mirror as _from_mirror
+from khaos_attribution.engines.environment import refused as _refused
 from khaos_attribution.engines.environment import run as _run
 
 PYTHON_VERSION = "3.11"
@@ -175,8 +176,8 @@ def pin_ref(repo: str, revision: str | None, *, check_only: bool = False) -> tup
 
 
 def weights(root: Path, *, check_only: bool = False) -> list:
-    """Every weight set the descriptor lists, into the Hugging Face cache at its pinned revision: the mirror first,
-    the hub only when the mirror cannot serve it."""
+    """Every weight set the descriptor lists, into the Hugging Face cache at its pinned revision: Hugging Face, then the
+    Khaos mirror, each file against its pin; the hub library only when neither can serve it."""
     python = venv_python(root)
     out = []
     for w in DESCRIPTOR.weights:
@@ -188,13 +189,18 @@ def weights(root: Path, *, check_only: bool = False) -> list:
         if check_only:
             out.append((False, f"{repo} missing from the Hugging Face cache"))
             continue
-        if _from_mirror(lambda: mirror.fetch_into_hub_cache(repo, mirror.default_hub_cache(), w.get("patterns"), revision=rev)) \
-                and cached(repo, files, rev):
-            out.append((True, f"{repo} fetched from the Khaos weights mirror into the Hugging Face cache"))
+        try:
+            served = _from_mirror(lambda: mirror.fetch_into_hub_cache(repo, mirror.default_hub_cache(), w.get("patterns"), revision=rev))
+        except (mirror.PinMismatch, mirror.Unserved) as exc:
+            out.append(_refused(repo, exc))
+            continue
+        if served and cached(repo, files, rev):
+            out.append((True, f"{repo} fetched and checked against its pinned hashes into the Hugging Face cache"))
             continue
         code = ("import json, sys; from huggingface_hub import snapshot_download; "
                 "snapshot_download(sys.argv[1], revision=sys.argv[2] or None, allow_patterns=json.loads(sys.argv[3]) or None)")
-        done = _run([python, "-c", code, repo, rev or "", json.dumps(w.get("patterns") or [])], env={**host_env(), "HF_HUB_OFFLINE": "0"})
+        done = _run([python, "-c", code, repo, rev or "", json.dumps(w.get("patterns") or [])],
+                    env=mirror.anonymous_hub_env({**host_env(), "HF_HUB_OFFLINE": "0"}))
         if done.returncode != 0 or not cached(repo, files, rev):
             why = done.stderr.strip().splitlines()[-1:] or ["a file is still missing"]
             out.append((False, f"{repo} could not be downloaded: {why[0][:200]}"))

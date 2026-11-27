@@ -73,6 +73,9 @@ def test_check_compares_the_pin_and_the_environment_and_each_weight(tmp_path, mo
 
 
 def test_an_install_fills_the_cache_through_the_engines_own_downloader(tmp_path, monkeypatch):
+    """A set with no pin is the one the hub library is left to; a pinned one is never installed through it."""
+    from khaos_attribution import weights
+    monkeypatch.setattr(weights, "PINS", {})
     monkeypatch.delenv("PYTHONPATH", raising=False)
     root = tmp_path / "sa3"
     (root / ".git").mkdir(parents=True)

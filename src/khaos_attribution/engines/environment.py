@@ -152,8 +152,22 @@ def unpack_archive(url: str, root: Path, commit: str, kept: tuple) -> None:
 
 
 def from_mirror(fetch) -> bool:
-    """Whether the mirror served the set; a mirror that cannot is a fallback to the hub, never an error here."""
+    """Whether the set was served and checked; a source that cannot serve falls back to the hub library, but a file that
+    fails its pin is refused (PinMismatch) and nothing falls back."""
     try:
         return fetch() is not None
+    except mirror.PinMismatch:
+        raise
+    except mirror.Unserved as exc:
+        if exc.pinned:
+            raise
+        return False
     except (mirror.MirrorError, OSError):
         return False
+
+
+def refused(repo: str, exc: Exception) -> tuple:
+    """The report line for a pinned set that no source served correctly: nothing was installed and no fallback was tried."""
+    if isinstance(exc, mirror.PinMismatch):
+        return (False, f"{repo} failed its pinned hash from every source; nothing was installed")
+    return (False, f"{repo} could not be downloaded: {exc}")

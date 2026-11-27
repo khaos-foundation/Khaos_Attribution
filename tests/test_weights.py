@@ -92,10 +92,8 @@ def test_a_mirror_that_ignores_the_range_is_read_from_the_start_and_a_wrong_part
     _Ranged.ranges = True
     (dest / "weights" / "big.bin").unlink()
     part.write_bytes(b"\0" * 100_000)
-    with pytest.raises(W.MirrorError, match="did not match"):
-        W.fetch_into_dir(repo, dest, ["weights/*"], base=base)
-    assert not part.exists() and not (dest / "weights" / "big.bin").exists()
-    assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev and (dest / "weights" / "big.bin").read_bytes() == whole
+    assert W.fetch_into_dir(repo, dest, ["weights/*"], base=base) == rev, "a wrong partial copy is dropped and fetched whole"
+    assert (dest / "weights" / "big.bin").read_bytes() == whole and not part.exists()
 
 
 def test_the_hub_cache_layout_is_what_the_hub_itself_reads(mirror, tmp_path):
@@ -149,6 +147,7 @@ def test_the_mirror_address_comes_from_the_environment_or_the_default(monkeypatc
 
 def test_the_mlx_ports_files_land_where_the_port_reads_them(mirror, tmp_path, monkeypatch):
     """Stability keeps the port's files under MLX/; the engine's weights step puts them under models/mlx/."""
+    monkeypatch.setattr(W, "PINS", {})
     from khaos_attribution.engines.sa3 import provision as P
     base, _, rev, _ = mirror
     root = tmp_path / "mirror" / "stabilityai" / "stable-audio-3-optimized"

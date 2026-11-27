@@ -1,4 +1,4 @@
-"""Every test runs with the weights mirror unreachable, no public log witness and none of this machine's git settings.
+"""Every test runs with the weights mirror and the hub unreachable, no public log witness and none of this machine's git settings.
 A test that does not run to a verdict, skipped or expected to fail, fails the run unless its reason is named here."""
 import os
 import re
@@ -29,6 +29,11 @@ _unexpected: list = []
 @pytest.fixture(autouse=True)
 def _no_real_weights_mirror(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("KHAOS_WEIGHTS_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("HF_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.setenv("HF_HOME", str(tmp_path_factory.mktemp("hf-home")))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    from khaos_attribution import weights
+    weights._skip.clear()
     monkeypatch.setenv("REGISTER_LOG_WITNESSES", "")
     # Every git a test runs reads no configuration of this machine's.
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)

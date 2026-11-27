@@ -1,32 +1,60 @@
-"""Khaos's own weights mirror: every model set an installer needs, served as plain files from a Khaos address with
-a manifest (revision, path, size, sha256) per repository, so no room ever depends on a Hugging Face account or on
-Hugging Face being reachable. Standard library only; a caller falls back to the hub when the mirror answers None."""
+"""The model weights the installers fetch: each file from Hugging Face at its pinned revision, else from Khaos's own
+mirror, and from either only once it matches the sha256 in weights_pins.py. Anonymous: no token is read or sent.
+Standard library only; a caller falls back to the hub library only when no source could serve the set."""
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
+import http.client
 import json
 import os
 import re
 import shutil
 import sys
+import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
-from typing import Callable
+from typing import Callable, NamedTuple
+
+from khaos_attribution.weights_pins import PINS
 
 MIRROR_ENV = "KHAOS_WEIGHTS_URL"
 MIRROR_BASE = "https://weights.khaos.dev"
+HUB_ENV = "HF_ENDPOINT"
+HUB_BASE = "https://huggingface.co"
 MANIFEST = "manifest.json"
 CHUNK = 1 << 20
 TIMEOUT = 30.0
-# A shell caller falls back to the hub on this code and nothing else.
+HUB_TIMEOUT = 10.0
+ATTEMPTS = 4
+BACKOFF = (1.0, 2.0, 4.0)
+SKIP_SECONDS = 60.0
+# A shell caller falls back to the hub library on this code and nothing else.
 EXIT_NO_MIRROR = 3
+# A pinned set no source answered for: a script stops, because the hub library would install it unchecked.
+EXIT_UNREACHABLE = 4
+TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 
 class MirrorError(RuntimeError):
-    """A file the mirror served did not match its manifest, or the manifest names a place outside the set."""
+    """A file did not match its manifest, or the manifest names a place outside the set."""
+
+
+class PinMismatch(MirrorError):
+    """No source served a file that matches its pinned sha256: nothing was installed, and no fallback may be."""
+
+
+class Unserved(urllib.error.URLError):
+    """No source answered for a file; `pinned` says whether the hub library may still be tried (it may not for a pin)."""
+
+    def __init__(self, reason, pinned: bool = False):
+        super().__init__(reason)
+        self.pinned = pinned
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -70,8 +98,9 @@ def base_url(base: str | None = None) -> str:
     return (base or os.environ.get(MIRROR_ENV) or MIRROR_BASE).rstrip("/")
 
 
-def _get(url: str, timeout: float = TIMEOUT, headers: dict | None = None):
-    request = urllib.request.Request(url, headers={"User-Agent": "khaos-weights", **(headers or {})})
+def _get(url: str, timeout: float = TIMEOUT, headers: dict | None = None, agent: str | None = "khaos-weights"):
+    """An anonymous GET: no credential is ever added, and the hub is sent no name for this project (agent=None)."""
+    request = urllib.request.Request(url, headers={**({"User-Agent": agent} if agent else {}), **(headers or {})})
     return urllib.request.urlopen(request, timeout=timeout)
 
 
@@ -101,50 +130,187 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _download(url: str, dest: Path, size: int, sha256: str, progress: Callable[[str], None] | None = None) -> None:
-    """One file, resumed from a partial copy, verified against the manifest before it takes its name."""
+class _Source(NamedTuple):
+    name: str
+    url: str
+    timeout: float
+    agent: str | None
+    hub: bool
+    repo: str = ""
+
+
+_skip: dict = {}
+_now = time.monotonic
+_sleep = time.sleep
+
+
+def hub_url(base: str | None = None) -> str:
+    return (base or os.environ.get(HUB_ENV) or HUB_BASE).rstrip("/")
+
+
+def _offline() -> bool:
+    return os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in ("1", "on", "yes", "true")
+
+
+def _hub_skipped(repo: str) -> bool:
+    return any(_skip.get(key, 0.0) > _now() for key in ("*", repo))
+
+
+def _skip_hub(key: str, why: str, say: Callable[[str], None] | None) -> None:
+    _skip[key] = _now() + SKIP_SECONDS
+    if say:
+        say(f"Hugging Face {why}" + ("" if key == "*" else f" for {key}") + "; using the Khaos mirror")
+
+
+def _pinned(repo: str) -> dict | None:
+    pin = PINS.get(repo)
+    if pin is None:
+        return None
+    return {"repo": repo, "revision": pin["revision"],
+            "files": [{"path": p, "size": s, "sha256": h} for p, s, h in pin["files"]]}
+
+
+def _plan(repo: str, base: str | None, revision: str | None) -> tuple | None:
+    """(manifest, pinned): the pin when it is the revision asked, else the mirror's manifest and the mirror alone."""
+    doc = _pinned(repo)
+    if doc is not None and revision in (None, "", doc["revision"]):
+        return doc, True
+    doc = manifest(repo, base)
+    if doc is None or (revision and doc["revision"] != revision):
+        return None
+    return doc, False
+
+
+def _sources(repo: str, revision: str, path: str, base: str | None, pinned: bool) -> list:
+    out = []
+    if pinned and not _offline() and not _hub_skipped(repo):
+        out.append(_Source("Hugging Face", f"{hub_url()}/{repo}/resolve/{revision}/{urllib.parse.quote(path)}",
+                           HUB_TIMEOUT, None, True, repo))
+    out.append(_Source("the Khaos mirror", f"{base_url(base)}/{repo}/{revision}/{path}", TIMEOUT, "khaos-weights", False))
+    return out
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float:
+    try:
+        return min(max(float(exc.headers.get("Retry-After", "")), 0.0), 30.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _from_source(src: _Source, part: Path, size: int, sha256: str, progress: Callable[[str], None] | None) -> tuple:
+    """One source's bytes into `part`, resumed: (ok | mismatch | gated | down | unavailable, why). A retry is made only
+    once bytes have flowed, or against the mirror's own 5xx; a resumed copy that fails its hash is fetched once from zero."""
+    broke = early = 0
+    resumed = fresh = False
+    why = ""
+    while True:
+        have = part.stat().st_size if part.is_file() else 0
+        if have > size:
+            part.unlink()
+            have = 0
+        resumed = resumed or have > 0
+        if have < size:
+            try:
+                answer = _get(src.url, src.timeout, {"Range": f"bytes={have}-"} if have else None, src.agent)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    return "gated", f"HTTP {exc.code}"
+                if (exc.code == 429 or exc.code >= 500) and not src.hub and early < 2:
+                    early += 1
+                    _sleep(_retry_after(exc) or BACKOFF[early - 1])
+                    continue
+                return ("down" if exc.code == 429 or exc.code >= 500 else "unavailable"), f"HTTP {exc.code}"
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+                return "down", str(getattr(exc, "reason", None) or exc)
+            declared = answer.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) != (size - have if answer.status == 206 and have else size):
+                answer.close()
+                part.unlink(missing_ok=True)
+                return "mismatch", "its length is not the pinned file's"
+            try:
+                with answer, part.open("ab" if have else "wb") as out:
+                    if have and answer.status != 206:
+                        out.seek(0)
+                        out.truncate()
+                    for chunk in iter(lambda: answer.read(CHUNK), b""):
+                        out.write(chunk)
+                        if progress:
+                            progress(f"{part.name.removesuffix('.part')}: {out.tell() * 100 // max(size, 1)}%")
+                        if out.tell() > size:
+                            break
+            except (OSError, http.client.HTTPException) as exc:
+                broke += 1
+                why = str(getattr(exc, "reason", None) or exc)
+                if broke >= ATTEMPTS:
+                    return "down", why
+                _sleep(BACKOFF[min(broke, len(BACKOFF)) - 1])
+                continue
+        got = part.stat().st_size if part.is_file() else 0
+        if got < size:
+            broke += 1
+            if broke >= ATTEMPTS:
+                return "down", why or "the answer ended early"
+            _sleep(BACKOFF[min(broke, len(BACKOFF)) - 1])
+            continue
+        if got == size and _sha256(part) == sha256:
+            return "ok", ""
+        part.unlink(missing_ok=True)
+        if resumed and not fresh:
+            fresh, resumed = True, False
+            continue
+        return "mismatch", "its hash is not the pinned one"
+
+
+def _download(sources: list, dest: Path, size: int, sha256: str, progress: Callable[[str], None] | None = None,
+              *, pinned: bool = False) -> None:
+    """One file from the first source that serves bytes matching the manifest, resumed from a partial copy; a source
+    whose bytes do not match is passed over, and a file no source could serve correctly is never installed."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_file() and dest.stat().st_size == size and _sha256(dest) == sha256:
         return
     if size == 0:
         if sha256 != hashlib.sha256(b"").hexdigest():
-            raise MirrorError(f"{url}: the manifest names an empty file with a hash that is not the empty hash")
+            raise MirrorError(f"{dest.name}: the manifest names an empty file with a hash that is not the empty hash")
         dest.write_bytes(b"")
         return
     part = dest.with_name(dest.name + ".part")
-    have = part.stat().st_size if part.is_file() else 0
-    if have > size:
-        part.unlink()
-        have = 0
-    if have < size:
-        headers = {"Range": f"bytes={have}-"} if have else {}
-        with _get(url, headers=headers) as answer, part.open("ab" if have else "wb") as out:
-            if have and answer.status != 206:
-                out.seek(0)
-                out.truncate()
-            for chunk in iter(lambda: answer.read(CHUNK), b""):
-                out.write(chunk)
-                if progress:
-                    progress(f"{dest.name}: {out.tell() * 100 // max(size, 1)}%")
-    if part.stat().st_size != size or _sha256(part) != sha256:
-        part.unlink()
-        raise MirrorError(f"{url} did not match the manifest (size or sha256); the partial copy was discarded")
-    part.replace(dest)
+    mismatched, reasons = [], []
+    for src in sources:
+        status, why = _from_source(src, part, size, sha256, progress)
+        if status == "ok":
+            part.replace(dest)
+            if progress:
+                progress(f"{dest.name}: from {src.name}")
+            return
+        reasons.append(f"{src.name}: {why or status}")
+        if status == "mismatch":
+            mismatched.append(src.url)
+            if progress:
+                progress(f"{dest.name}: {src.name} did not match the pinned hash; discarded")
+        elif src.hub and status == "gated":
+            _skip_hub(src.repo, "needs an account", progress)
+        elif src.hub and status == "down":
+            _skip_hub("*", "did not answer", progress)
+    if mismatched:
+        raise (PinMismatch if pinned else MirrorError)(
+            f"{mismatched[0]} did not match the manifest (size or sha256); the partial copy was discarded")
+    raise Unserved(f"no source answered for {dest.name} ({'; '.join(reasons)})", pinned)
 
 
 def fetch_into_dir(repo: str, dest: Path | str, patterns: list | tuple | None = None, *, base: str | None = None,
                    progress: Callable[[str], None] | None = None, revision: str | None = None,
                    place: Callable[[str], str] | None = None) -> str | None:
     """The repository's files, laid out under `dest` as the hub's local-dir download lays them out (or where `place`
-    maps each path); the revision served, or None when the mirror cannot serve this set or this revision."""
-    doc = manifest(repo, base)
-    if doc is None or (revision and doc["revision"] != revision):
+    maps each path); the revision served, or None when no source holds this set or this revision."""
+    plan = _plan(repo, base, revision)
+    if plan is None:
         return None
+    doc, pinned = plan
     _checked(repo, doc)
     dest = Path(dest)
     for f in _wanted(doc["files"], patterns):
-        _download(f"{base_url(base)}/{repo}/{doc['revision']}/{f['path']}", dest / (place(f["path"]) if place else f["path"]),
-                  int(f["size"]), f["sha256"], progress)
+        _download(_sources(repo, doc["revision"], f["path"], base, pinned), dest / (place(f["path"]) if place else f["path"]),
+                  int(f["size"]), f["sha256"], progress, pinned=pinned)
     return doc["revision"]
 
 
@@ -153,15 +319,17 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
                          revision: str | None = None) -> str | None:
     """The repository's files in the hub's own cache layout (blobs, a snapshot named by the revision, refs/main),
     so every library that reads the cache offline finds them; the revision served, or None."""
-    doc = manifest(repo, base)
-    if doc is None or (revision and doc["revision"] != revision):
+    plan = _plan(repo, base, revision)
+    if plan is None:
         return None
+    doc, pinned = plan
     _checked(repo, doc)
     repo_dir = Path(cache_dir) / ("models--" + repo.replace("/", "--"))
     blobs, snapshot = repo_dir / "blobs", repo_dir / "snapshots" / doc["revision"]
     for f in _wanted(doc["files"], patterns):
         blob = blobs / f["sha256"]
-        _download(f"{base_url(base)}/{repo}/{doc['revision']}/{f['path']}", blob, int(f["size"]), f["sha256"], progress)
+        _download(_sources(repo, doc["revision"], f["path"], base, pinned), blob, int(f["size"]), f["sha256"], progress,
+                  pinned=pinned)
         link = snapshot / f["path"]
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.is_symlink() or link.exists():
@@ -189,27 +357,63 @@ def _hub_file(url: str) -> tuple | None:
 
 def fetch_url(url: str, dest: Path | str, *, base: str | None = None,
               progress: Callable[[str], None] | None = None) -> bool:
-    """One file the rooms would fetch by address, from the mirror instead: a hub address from that repository's set
-    (a pinned revision must be the one served), any other address from the mirror's url manifest. True when the
-    mirror served it; False when it cannot, so the caller fetches from the address itself."""
+    """One file the rooms would fetch by address, from its pinned set (hub first, then the mirror) or, for any other
+    address, from the mirror's url manifest. True when it was served; False when it cannot be, so the caller fetches
+    from the address itself."""
     hub = _hub_file(url)
     if hub:
         repo, revision, name = hub
-        doc = manifest(repo, base)
-        if doc is None or (revision != "main" and revision != doc["revision"]):
+        plan = _plan(repo, base, None if revision == "main" else revision)
+        if plan is None:
             return False
+        doc, pinned = plan
         entry = next((f for f in doc["files"] if f["path"] == name), None)
         if entry is None:
             return False
-        _download(f"{base_url(base)}/{repo}/{doc['revision']}/{name}", Path(dest), int(entry["size"]), entry["sha256"],
-                  progress)
+        _download(_sources(repo, doc["revision"], name, base, pinned), Path(dest), int(entry["size"]), entry["sha256"],
+                  progress, pinned=pinned)
         return True
     doc = manifest(URLS_DIR, base)
     entry = next((f for f in (doc or {}).get("files", []) if f.get("url") == url), None)
     if entry is None:
         return False
-    _download(f"{base_url(base)}/{URLS_DIR}/{entry['path']}", Path(dest), int(entry["size"]), entry["sha256"], progress)
+    source = _Source("the Khaos mirror", f"{base_url(base)}/{URLS_DIR}/{entry['path']}", TIMEOUT, "khaos-weights", False)
+    _download([source], Path(dest), int(entry["size"]), entry["sha256"], progress)
     return True
+
+
+def anonymous_hub_env(env: dict | None = None) -> dict:
+    """`env` (this process's by default) with no hub token, no saved login and no netrc for the hub library to find."""
+    out = {k: v for k, v in (os.environ if env is None else env).items() if k not in TOKEN_VARS}
+    out["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+    out["NETRC"] = os.devnull
+    return out
+
+
+_anonymous = threading.RLock()
+
+
+@contextlib.contextmanager
+def anonymous_hub():
+    """Hub library calls made inside send no token: not from the environment, the saved login or a netrc."""
+    keys = (*TOKEN_VARS, "HF_HUB_DISABLE_IMPLICIT_TOKEN", "NETRC")
+    with _anonymous:
+        saved = {k: os.environ.get(k) for k in keys}
+        constants = sys.modules.get("huggingface_hub.constants")
+        implicit = getattr(constants, "HF_HUB_DISABLE_IMPLICIT_TOKEN", None)
+        for k in TOKEN_VARS:
+            os.environ.pop(k, None)
+        os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+        os.environ["NETRC"] = os.devnull
+        if constants is not None:
+            constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = True
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            if constants is not None:
+                constants.HF_HUB_DISABLE_IMPLICIT_TOKEN = implicit
 
 
 def default_hub_cache() -> Path:
@@ -223,7 +427,8 @@ def default_hub_cache() -> Path:
 
 def main(argv: list | None = None) -> int:
     """fetch <repo> (--into DIR | --hub-cache [DIR]) [--pattern P]... [--revision R] [--base URL]; check <repo>.
-    Exit 3 when the mirror cannot serve the set, so a script falls back to the hub; 1 when a file fails its check."""
+    Exit 3 when no source can serve an unpinned set, so a script falls back to the hub library; 4 when none answered for a
+    pinned one, which no fallback may replace; 1 when a file fails its pin."""
     import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(prog="khaos_attribution.weights")
@@ -242,11 +447,11 @@ def main(argv: list | None = None) -> int:
     a = parser.parse_args(argv)
     say = lambda text: print(text, file=sys.stderr, flush=True)  # noqa: E731
     if a.command == "check":
-        doc = manifest(a.repo, a.base)
-        if doc is None:
-            say(f"{base_url(a.base)} serves no {a.repo}")
+        plan = _plan(a.repo, a.base, None)
+        if plan is None:
+            say(f"no pin for {a.repo}, and {base_url(a.base)} serves no {a.repo}")
             return EXIT_NO_MIRROR
-        print(doc["revision"])
+        print(plan[0]["revision"])
         return 0
     try:
         if a.into is not None:
@@ -257,11 +462,14 @@ def main(argv: list | None = None) -> int:
     except MirrorError as exc:
         say(str(exc))
         return 1
+    except Unserved as exc:
+        say(str(exc))
+        return EXIT_UNREACHABLE if exc.pinned else EXIT_NO_MIRROR
     except (urllib.error.URLError, OSError) as exc:
-        say(f"the mirror stopped answering: {exc}")
+        say(f"no source answered: {exc}")
         return EXIT_NO_MIRROR
     if served is None:
-        say(f"{base_url(a.base)} serves no {a.repo}" + (f" at {a.revision}" if a.revision else ""))
+        say(f"no source serves {a.repo}" + (f" at {a.revision}" if a.revision else ""))
         return EXIT_NO_MIRROR
     print(served)
     return 0
