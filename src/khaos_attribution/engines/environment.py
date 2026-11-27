@@ -104,6 +104,22 @@ def carry_cpp_runtime(venv: Path, site_packages: Path, source: Path | None = Non
     return copied
 
 
+def leave_out_ffmpeg_bindings(site_packages: Path, platform: str = sys.platform) -> list:
+    """On Windows, torchaudio's own FFmpeg bindings (torio's) leave an engine's environment: through them it would load
+    an FFmpeg found on the machine, and without them torchaudio reads with its other backends. Returns what left."""
+    if platform != "win32":
+        return []
+    lib = Path(site_packages) / "torio" / "lib"
+    gone = []
+    for path in sorted(lib.glob("*torio_ffmpeg*")) if lib.is_dir() else []:
+        try:
+            path.unlink()
+        except PermissionError:
+            continue    # held open by a running job; the next provision takes it
+        gone.append(path.name)
+    return gone
+
+
 def git_usable() -> bool:
     """Whether git here runs without a dialog: a Mac without the developer tools has a git stub that opens one."""
     if not shutil.which("git"):
