@@ -852,12 +852,39 @@ def test_the_cpp_runtime_is_carried_from_the_app_on_windows_only_and_never_over_
     assert not (venv / E.CPP_RUNTIME_DIR / "python312.dll").exists(), "only the C++ runtime is carried"
     line = (site / E.CPP_RUNTIME_PTH).read_text(encoding="utf-8")
     assert line.startswith("import ") and line.count("\n") == 1, "a .pth runs a line only when it starts with import"
-    assert "os.add_dll_directory(" + repr(str(venv / E.CPP_RUNTIME_DIR)) + ")" in line
+    assert "os.add_dll_directory(os.path.join(sys.prefix, 'khaos_cpp_runtime'))" in line
+    assert line.isascii(), "Windows reads .pth files in its own code page: no path, nothing but ASCII"
+
+
+def _ready_windows_environment(tmp_path, monkeypatch, carried: list):
+    """A Windows torch environment that already runs the engine, with the carry recorded."""
+    from khaos_attribution.engines.sa3 import render as R
+    monkeypatch.setattr(R, "WINDOWS", True)
+    monkeypatch.setattr(P, "WINDOWS", True)
+    root = tmp_path / "sa3"
+    python = R.venv_python(root, "torch")
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    _patch(monkeypatch, "run", lambda cmd, cwd=None, env=None: _done(0, "ok"))
+    monkeypatch.setattr(P, "build_stale", lambda root, runtime: None)
+    monkeypatch.setattr(P, "build_record", lambda root, runtime: {"recorded": True})
+    monkeypatch.setattr(P, "requirements_missing", lambda python: None)
+    monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: carried.append(venv) or [])
+    return root
+
+
+def test_an_environment_made_before_the_runtime_gets_it_at_the_next_provision_and_a_check_changes_nothing(
+        tmp_path, monkeypatch):
+    carried = []
+    root = _ready_windows_environment(tmp_path, monkeypatch, carried)
+    ok, _note = P.environment(root, "torch", check_only=True)
+    assert ok and carried == [], "a check carries nothing"
+    ok, _note = P.environment(root, "torch")
+    assert ok and carried == [root / ".venv"]
 
 
 def test_an_existing_environment_gets_the_runtime_and_a_copy_that_fails_is_said(tmp_path, monkeypatch):
-    """An environment made before the runtime was carried gets it at the next provision; a failed copy is a refusal in
-    words, never a traceback."""
+    """A failed copy is a refusal in words, never a traceback."""
     root = tmp_path / "sa3"
     calls = []
     monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: calls.append(venv) or ["msvcp140.dll"])

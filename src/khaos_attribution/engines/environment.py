@@ -95,11 +95,12 @@ def carry_cpp_runtime(venv: Path, site_packages: Path, source: Path | None = Non
         if (source / name).is_file() and name not in have:
             shutil.copy2(source / name, into / name)
             copied.append(name)
-    # A .pth line that starts with "import" runs at start-up, before any package loads a library.
+    # A .pth line that starts with "import" runs at start-up, before any package loads a library. It names no path:
+    # Windows reads .pth files in its own code page, and sys.prefix is the environment wherever it now lives.
     Path(site_packages).mkdir(parents=True, exist_ok=True)
     (Path(site_packages) / CPP_RUNTIME_PTH).write_text(
-        f"import os, sys; sys.__dict__.setdefault('_khaos_cpp_runtime', os.add_dll_directory({str(into)!r}))\n",
-        encoding="utf-8")
+        "import os, sys; sys.__dict__.setdefault('_khaos_cpp_runtime', "
+        f"os.add_dll_directory(os.path.join(sys.prefix, {CPP_RUNTIME_DIR!r})))\n", encoding="ascii")
     return copied
 
 
