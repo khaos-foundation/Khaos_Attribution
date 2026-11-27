@@ -77,14 +77,17 @@ def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool
 WINDOWS_CPP_RUNTIME = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
                        "msvcp140_codecvt_ids.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
                        "vcomp140.dll")
+CPP_RUNTIME_DIR = "khaos_cpp_runtime"
+CPP_RUNTIME_PTH = "khaos_cpp_runtime.pth"
 
 
-def carry_cpp_runtime(into: Path, source: Path | None = None, platform: str = sys.platform) -> list:
-    """On Windows, the C++ runtime files the room's own Python folder carries and ``into`` lacks, copied into it, so an
-    engine's environment takes them from the app and never from the machine; returns the names copied."""
+def carry_cpp_runtime(venv: Path, site_packages: Path, source: Path | None = None, platform: str = sys.platform) -> list:
+    """On Windows, the C++ runtime files ``source`` (the running Python's own folder) holds, copied into the
+    environment's own folder, with a .pth that adds it to every library search from the interpreter's start; returns
+    the names copied. Nothing is taken from the machine and nothing already there is replaced."""
     if platform != "win32":
         return []
-    source, into = Path(source or sys.base_prefix), Path(into)
+    source, into = Path(source or sys.base_prefix), Path(venv) / CPP_RUNTIME_DIR
     into.mkdir(parents=True, exist_ok=True)
     have = {p.name.lower() for p in into.iterdir()}
     copied = []
@@ -92,6 +95,11 @@ def carry_cpp_runtime(into: Path, source: Path | None = None, platform: str = sy
         if (source / name).is_file() and name not in have:
             shutil.copy2(source / name, into / name)
             copied.append(name)
+    # A .pth line that starts with "import" runs at start-up, before any package loads a library.
+    Path(site_packages).mkdir(parents=True, exist_ok=True)
+    (Path(site_packages) / CPP_RUNTIME_PTH).write_text(
+        f"import os, sys; sys.__dict__.setdefault('_khaos_cpp_runtime', os.add_dll_directory({str(into)!r}))\n",
+        encoding="utf-8")
     return copied
 
 

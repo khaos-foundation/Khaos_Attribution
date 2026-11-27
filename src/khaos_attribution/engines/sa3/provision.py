@@ -260,6 +260,10 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
                 return False, f"the environment at {python} {stale}: provision again to rebuild it"
             if not stale:
                 note = probe_note + ("" if build_record(root, "torch") else unrecorded)
+                # An environment made before the runtime was carried gets it now; a check changes nothing.
+                why = "" if check_only else _carry_runtime(root)[1]
+                if why:
+                    return False, why
                 lacks = requirements_missing(python)
                 if lacks is None:
                     return True, note
@@ -308,14 +312,23 @@ def environment(root: Path, runtime: str, *, check_only: bool = False) -> tuple:
     ok, note = requirements_into(python)
     if not ok:
         return False, f"the engine's environment installed; {note}"
-    # torch adds its own lib folder to every library search, so the runtime it needs goes there.
-    carried = carry_cpp_runtime(root / ".venv" / "Lib" / "site-packages" / "torch" / "lib")
+    carried, why = _carry_runtime(root)
+    if why:
+        return False, why
     probe = _run([python, "-c", probe_code])
     if probe.returncode != 0:
         return False, f"the environment installed but cannot run the engine: {probe.stderr.strip()[-200:]}"
     _write_build_record(root, "torch")
     return True, (f"the engine's environment installed; {probe_note}" + (f"; {made}" if made else "")
-                  + (f"; Microsoft's C++ runtime carried from the app ({', '.join(carried)})" if carried else ""))
+                  + (f"; Microsoft's C++ runtime carried from {sys.base_prefix} ({', '.join(carried)})" if carried else ""))
+
+
+def _carry_runtime(root: Path) -> tuple:
+    """The C++ runtime into the torch environment (Windows only): (names copied, why it could not be, or "")."""
+    try:
+        return carry_cpp_runtime(root / ".venv", root / ".venv" / "Lib" / "site-packages"), ""
+    except OSError as exc:
+        return [], f"Microsoft's C++ runtime could not be put in the engine's environment: {exc}"
 
 
 def cached(repo: str, filenames: list) -> bool:
