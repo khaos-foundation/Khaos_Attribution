@@ -48,7 +48,9 @@ FILES = {
         "class FixedLoRAModule:\n    def training_step(self, batch):\n        return F.mse_loss(batch, batch)\n",
     "acestep/training_v2/preprocess.py":
         "def preprocess_audio_files():\n    from acestep.training_v2.model_loader import (\n        load_vae,\n    )\n"
-        "    return load_vae\n",
+        "    return load_vae\n\n\ndef _pass1_light():\n"
+        "    from acestep.training.dataset_builder_modules.preprocess_audio import (\n        load_audio_stereo,\n    )\n"
+        "    return load_audio_stereo\n",
     "acestep/training/data_module.py":
         "def collate_preprocessed_batch(batch):\n    return batch\n\nclass PreprocessedDataModule:\n"
         "    def train_dataloader(self):\n        return None\n",
@@ -81,6 +83,9 @@ def test_a_checkout_holding_every_seam_passes(tmp_path):
      "def _select_compute_dtype(device_type, requested_precision='auto'):\n    return 1\n\n"
      "class FixedLoRAModule:\n    def training_step(self, batch):\n        return batch\n", "mse_loss"),
     ("acestep/training_v2/preprocess.py", "from acestep.training_v2.model_loader import load_vae\n", "load_vae"),
+    ("acestep/training_v2/preprocess.py",
+     "def preprocess_audio_files():\n    from acestep.training_v2.model_loader import load_vae\n    return load_vae\n\n"
+     "from acestep.training.dataset_builder_modules.preprocess_audio import load_audio_stereo\n", "load_audio_stereo"),
     ("acestep/training/data_module.py", "class PreprocessedDataModule:\n    pass\n", "collate_preprocessed_batch"),
     ("acestep/core/generation/handler/init_service_catalog.py", "class M:\n    pass\n", "is_turbo_model"),
     ("acestep/core/generation/handler/init_service_orchestrator.py",

@@ -52,6 +52,9 @@ def _fake_training_v2(monkeypatch, asked):
 
     package.preprocess = module("acestep.training_v2.preprocess", preprocess_audio_files=preprocess_audio_files)
     acestep.training_v2 = package
+    reader = module("acestep.training.dataset_builder_modules.preprocess_audio", load_audio_stereo=None)
+    builders = module("acestep.training.dataset_builder_modules", preprocess_audio=reader)
+    acestep.training = module("acestep.training", dataset_builder_modules=builders)
     return package
 
 
@@ -205,3 +208,38 @@ def test_a_training_field_the_revision_does_not_take_refuses_the_run_never_train
         T.open_session(_api([f for f in training if f != "weight_decay"], adapter), RECIPE, **kw)
     with pytest.raises(T.TrainingUnavailable, match="factor"):
         T.open_session(_api(training, [f for f in adapter if f != "factor"]), RECIPE, **kw)
+
+
+def _fake_reader_module(monkeypatch):
+    def engine_reader(audio_path, target_sample_rate, max_duration):
+        raise AssertionError("the engine's own reader ran")
+
+    names = ("acestep.training", "acestep.training.dataset_builder_modules",
+             "acestep.training.dataset_builder_modules.preprocess_audio")
+    mods = [types.ModuleType(n) for n in names]
+    for n, m in zip(names, mods):
+        monkeypatch.setitem(sys.modules, n, m)
+    mods[1].preprocess_audio = mods[2]
+    mods[0].dataset_builder_modules = mods[1]
+    mods[2].load_audio_stereo = engine_reader
+    return mods[2]
+
+
+def test_the_training_door_installs_the_soundfile_reader_once(monkeypatch, tmp_path):
+    _fake_torch(monkeypatch)
+    _fake_training_v2(monkeypatch, [])
+    reader = _fake_reader_module(monkeypatch)
+    from khaos_attribution.engines.acestep import train as T
+
+    T.training_api(tmp_path)
+    assert reader.load_audio_stereo is T.load_audio_stereo
+    T.patch_audio_reader()
+    assert reader.load_audio_stereo is T.load_audio_stereo, "a second patch leaves the reader as it is"
+
+
+def test_a_checkout_without_the_reader_refuses_training(monkeypatch):
+    _fake_torch(monkeypatch)
+    monkeypatch.setitem(sys.modules, "acestep.training.dataset_builder_modules.preprocess_audio", None)
+    from khaos_attribution.engines.acestep import train as T
+    with pytest.raises(T.TrainingUnavailable, match="preparation reader"):
+        T.patch_audio_reader()
