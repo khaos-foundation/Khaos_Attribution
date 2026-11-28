@@ -433,8 +433,11 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
     blobs, snapshot = repo_dir / "blobs", repo_dir / "snapshots" / doc["revision"]
     for f in _wanted(doc["files"], patterns):
         blob = blobs / f["sha256"]
-        _download(_sources(repo, doc["revision"], f["path"], base, pinned), blob, int(f["size"]), f["sha256"], progress,
-                  pinned=pinned)
+        try:
+            _download(_sources(repo, doc["revision"], f["path"], base, pinned), blob, int(f["size"]), f["sha256"], progress,
+                      pinned=pinned)
+        except NotPlaced as exc:
+            raise type(exc)(str(exc).replace(blob.name, f"{repo}/{f['path']}")) from exc   # a blob is named by its hash
         link = snapshot / f["path"]
         with _on_this_computer(link):
             link.parent.mkdir(parents=True, exist_ok=True)

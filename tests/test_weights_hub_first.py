@@ -547,6 +547,11 @@ def test_a_folder_that_cannot_be_made_or_a_link_that_cannot_be_placed_is_refused
     monkeypatch.setattr(W, "_place_link", refuse)
     with pytest.raises(W.NotPlaced):
         W.fetch_into_hub_cache(REPO, tmp_path / "cache", base=rig.mirror_url)
+    _held(monkeypatch, None)
+    with pytest.raises(W.NotPlaced) as raised:
+        W.fetch_into_hub_cache(REPO, tmp_path / "cache2", base=rig.mirror_url)
+    assert str(raised.value).startswith(f"{REPO}/config.json was downloaded and matched its pin")
+    assert hashlib.sha256(SMALL).hexdigest() not in str(raised.value), "a blob's hash name is not the person's word for it"
 
 
 def test_the_command_line_stops_on_a_file_it_cannot_put_in_place_and_never_says_fall_back(rig, tmp_path, monkeypatch, capsys):
