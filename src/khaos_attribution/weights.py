@@ -438,6 +438,8 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
                       pinned=pinned)
         except NotPlaced as exc:
             raise type(exc)(str(exc).replace(blob.name, f"{repo}/{f['path']}")) from exc   # a blob is named by its hash
+        except Unserved as exc:
+            raise Unserved(str(exc.reason).replace(blob.name, f"{repo}/{f['path']}"), exc.pinned) from exc
         link = snapshot / f["path"]
         with _on_this_computer(link):
             link.parent.mkdir(parents=True, exist_ok=True)
@@ -528,8 +530,9 @@ def anonymous_hub():
 
 def default_hub_cache() -> Path:
     """Where the hub library keeps its cache, read the way it reads it, without importing it."""
-    if os.environ.get("HF_HUB_CACHE"):
-        return Path(os.environ["HF_HUB_CACHE"])
+    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if os.environ.get(name):
+            return Path(os.environ[name])
     home = Path(os.environ["HF_HOME"]) if os.environ.get("HF_HOME") else Path(
         os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "huggingface"
     return home / "hub"

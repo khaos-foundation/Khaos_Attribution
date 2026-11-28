@@ -360,6 +360,9 @@ def test_a_pinned_set_no_source_answers_for_is_not_left_to_the_hub_library(rig, 
     with pytest.raises(W.Unserved) as raised:
         W.fetch_into_dir(REPO, tmp_path / "d", base="http://127.0.0.1:9")
     assert raised.value.pinned and "Hugging Face" in str(raised.value) and "the Khaos mirror" in str(raised.value)
+    with pytest.raises(W.Unserved) as raised:
+        W.fetch_into_hub_cache(REPO, tmp_path / "cache", base="http://127.0.0.1:9")
+    assert raised.value.pinned and f"no source answered for {REPO}/config.json" in str(raised.value)
     assert W.main(["fetch", REPO, "--into", str(tmp_path / "cli"), "--base", "http://127.0.0.1:9"]) == W.EXIT_UNREACHABLE == 4
     monkeypatch.setattr(W, "PINS", {})
     assert W.main(["fetch", REPO, "--into", str(tmp_path / "cli2"), "--base", "http://127.0.0.1:9"]) == W.EXIT_NO_MIRROR == 3
@@ -584,8 +587,9 @@ def test_a_set_served_and_checked_is_never_fetched_again_by_the_hub_library_when
     monkeypatch.setattr(S, "cached", lambda *a, **k: False)
     monkeypatch.setattr(S, "_from_mirror", lambda fetch: True)
     monkeypatch.setattr(S, "_run", never)
-    lines = S.weights(tmp_path, "torch", tmp_path)
-    assert lines and all(not ok and "was fetched and checked, but" in note for ok, note in lines)
+    for runtime in ("torch", "mlx"):
+        sets = [(ok, note) for ok, note in S.weights(tmp_path, runtime, tmp_path) if note.startswith("stabilityai/")]
+        assert sets and all(not ok and "was fetched and checked, but" in note for ok, note in sets), (runtime, sets)
     from khaos_attribution.engines.mimetic import provision as M
     monkeypatch.setattr(M, "venv_python", lambda *a: Path("py"))
     monkeypatch.setattr(M, "cached", lambda *a, **k: False)
@@ -593,3 +597,28 @@ def test_a_set_served_and_checked_is_never_fetched_again_by_the_hub_library_when
     monkeypatch.setattr(M, "_run", never)
     lines = M.weights(tmp_path)
     assert lines and all(not ok and "was fetched and checked, but" in note for ok, note in lines)
+
+
+def test_every_file_an_engine_reads_is_in_its_pin_so_a_served_set_is_whole():
+    """A set the checked path served is never completed by the hub library, so a component outside its pin fails every install."""
+    from khaos_attribution.engines.sa3.provision import MLX_REPO_DIR
+    missing = []
+    for engine in ("sa3", "mimetic"):    # the provisioners that hold a served set to the files they read
+        for w in json.loads((Path(W.__file__).parent / "engines" / engine / "engine.json").read_text())["weights"]:
+            pin = W.PINS.get(w["repo"])
+            if pin is None:
+                continue
+            pinned = {p for p, _, _ in pin["files"]}
+            wanted = ([f"{MLX_REPO_DIR}/{Path(c).name}" for c in w.get("components") or []] if w.get("runtime") == "mlx"
+                      else list(w.get("components") or []))
+            missing += [(w["repo"], c) for c in wanted if c not in pinned]
+    assert missing == []
+
+
+def test_the_hub_cache_is_found_where_the_hub_library_looks_for_it(monkeypatch, tmp_path):
+    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "old"))
+    assert W.default_hub_cache() == tmp_path / "old"
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "new"))
+    assert W.default_hub_cache() == tmp_path / "new"
