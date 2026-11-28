@@ -77,7 +77,8 @@ def test_a_removal_that_fails_is_not_recorded_and_the_next_export_retries(regist
         if not ignore_errors:
             raise PermissionError(f"cannot remove {path}")
 
-    monkeypatch.setattr(TL.shutil, "rmtree", refuse)
+    import shutil
+    monkeypatch.setattr(shutil, "rmtree", refuse)
     with pytest.raises(PermissionError):
         export_all(app.state.cfg, store.log, store.log.signer, True)
     assert store.db.execute("SELECT format FROM log_exports WHERE place = ?", (str(log.resolve()),)).fetchone()["format"] == 2
