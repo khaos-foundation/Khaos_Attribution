@@ -46,10 +46,23 @@ def uv_path() -> str:
     return found
 
 
+# On Windows uv reads the system's certificate store, so an antivirus that inspects HTTPS is trusted as the browser
+# trusts it, and meets a version request only with a Python it manages, never one installed on the PC.
+WINDOWS_UV_ENV = {"UV_SYSTEM_CERTS": "1", "UV_MANAGED_PYTHON": "1"}
+
+
+def command_env(env: dict | None = None, platform: str | None = None) -> dict:
+    """What a provisioning command runs with: without the room's PYTHONPATH (its packages are not the engine's), and
+    with WINDOWS_UV_ENV on Windows, whatever the caller set."""
+    out = {k: v for k, v in (env if env is not None else host_env()).items() if k != "PYTHONPATH"}
+    if (platform or sys.platform) == "win32":
+        out.update(WINDOWS_UV_ENV)
+    return out
+
+
 def run(cmd: list, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
-    # The engine's interpreters never see the room's PYTHONPATH: its packages are not theirs.
-    env = {k: v for k, v in (env if env is not None else host_env()).items() if k != "PYTHONPATH"}
-    return subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
+    return subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None, env=command_env(env),
+                          capture_output=True, text=True)
 
 
 def make_venv(uv: str, venv: Path, python: Path, version: str, *, fallback: bool = False) -> tuple:
@@ -202,22 +215,20 @@ def unpack_archive(url: str, root: Path, commit: str, kept: tuple) -> None:
 
 
 def from_mirror(fetch) -> bool:
-    """Whether the set was served and checked; a source that cannot serve falls back to the hub library, but a file that
-    fails its pin is refused (PinMismatch) and nothing falls back."""
+    """Whether the set was served and checked; only a set with no pin that no source served falls back to the hub
+    library (weights.may_fall_back): a refused file, or one this computer could not write, is raised."""
     try:
         return fetch() is not None
-    except mirror.PinMismatch:
+    except (mirror.MirrorError, OSError) as exc:
+        if mirror.may_fall_back(exc):
+            return False
         raise
-    except mirror.Unserved as exc:
-        if exc.pinned:
-            raise
-        return False
-    except (mirror.MirrorError, OSError):
-        return False
 
 
 def refused(repo: str, exc: Exception) -> tuple:
     """The report line for a pinned set that no source served correctly: nothing was installed and no fallback was tried."""
     if isinstance(exc, mirror.PinMismatch):
         return (False, f"{repo} failed its pinned hash from every source; nothing was installed")
+    if isinstance(exc, mirror.NotPlaced):
+        return (False, f"{repo}: {exc}")
     return (False, f"{repo} could not be downloaded: {exc}")

@@ -934,3 +934,16 @@ def test_making_the_environment_stand_alone_also_leaves_the_ffmpeg_bindings_out(
     monkeypatch.setattr(P, "carry_cpp_runtime", lambda venv, site: [])
     monkeypatch.setattr(P, "leave_out_ffmpeg_bindings", lambda site: left.append(site) or [])
     assert P._carry_runtime(root) == ([], "") and left == [root / ".venv" / "Lib" / "site-packages"]
+
+
+def test_on_windows_every_provisioning_command_trusts_the_systems_certificates_and_only_a_python_uv_manages(monkeypatch):
+    """An antivirus that inspects HTTPS breaks uv's own certificate list, and a version request could be met by the PC's own Python."""
+    given = {"PYTHONPATH": "room", "UV_MANAGED_PYTHON": "0", "KEEP": "1"}
+    assert EN.command_env(given, platform="win32") == {"KEEP": "1", "UV_SYSTEM_CERTS": "1", "UV_MANAGED_PYTHON": "1"}
+    assert EN.command_env(given, platform="darwin") == {"UV_MANAGED_PYTHON": "0", "KEEP": "1"}
+    seen = []
+    monkeypatch.setattr(EN.subprocess, "run", lambda cmd, **k: seen.append(k["env"]) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(EN.sys, "platform", "win32")
+    EN.run(["uv", "pip", "install", "x"], env={"PATH": "p"})
+    EN.make_venv("uv", Path("v"), Path("v/python.exe"), "3.11")
+    assert seen and all(e["UV_SYSTEM_CERTS"] == "1" and e["UV_MANAGED_PYTHON"] == "1" for e in seen)
