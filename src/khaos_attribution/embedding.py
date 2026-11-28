@@ -142,13 +142,9 @@ def clap_text_prefetch(cache_dir: Path | str | None = None, progress: Callable[[
         from khaos_attribution import weights as mirror  # noqa: PLC0415
         try:
             served = mirror.fetch_into_hub_cache(repo, cache, [spec.split("|")[0] for spec in files], revision=commit)
-        except mirror.PinMismatch:
-            raise
-        except mirror.Unserved as exc:
-            if exc.pinned:
+        except (mirror.MirrorError, OSError) as exc:
+            if not mirror.may_fall_back(exc):
                 raise
-            served = None
-        except (mirror.MirrorError, OSError):
             served = None
         if served is None:
             with mirror.anonymous_hub():

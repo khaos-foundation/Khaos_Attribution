@@ -1,5 +1,6 @@
 """The hub is asked first at the pinned revision, the mirror second, and a file is installed only when it matches its pin;
 nothing here reaches the real hub or the real mirror, and no request ever carries a credential."""
+import errno
 import hashlib
 import http.server
 import importlib.util
@@ -381,13 +382,15 @@ def test_a_caller_falls_back_to_the_hub_library_only_where_nothing_was_pinned():
         return fetch
     assert from_mirror(lambda: "rev") is True and from_mirror(lambda: None) is False
     assert from_mirror(raising(W.Unserved("none", pinned=False))) is False
-    assert from_mirror(raising(W.MirrorError("odd manifest"))) is False and from_mirror(raising(OSError("x"))) is False
-    for refusal in (W.PinMismatch("bad"), W.Unserved("none", pinned=True)):
+    assert from_mirror(raising(W.MirrorError("odd manifest"))) is False
+    for refusal in (W.PinMismatch("bad"), W.Unserved("none", pinned=True), W.NotPlaced("held"), W.NoSpace("full"),
+                    OSError("x")):
         with pytest.raises(type(refusal)):
             from_mirror(raising(refusal))
 
 
-@pytest.mark.parametrize("refusal", [W.PinMismatch("bad"), W.Unserved("no source answered (Connection refused)", pinned=True)])
+@pytest.mark.parametrize("refusal", [W.PinMismatch("bad"), W.Unserved("no source answered (Connection refused)", pinned=True),
+                                     W.NotPlaced("x could not be written"), W.NoSpace("No space left on the drive")])
 def test_a_refused_set_is_reported_and_the_hub_library_is_never_run(monkeypatch, tmp_path, refusal):
     from khaos_attribution.engines.mimetic import provision as M
     from khaos_attribution.engines.sa3 import provision as S
@@ -402,7 +405,8 @@ def test_a_refused_set_is_reported_and_the_hub_library_is_never_run(monkeypatch,
     monkeypatch.setattr(S, "_from_mirror", refuse)
     monkeypatch.setattr(S, "_run", never)
     lines = S.weights(tmp_path, "torch", tmp_path)
-    assert lines and all(not ok for ok, _ in lines) and all("pinned hash" in note or "could not be downloaded" in note for _, note in lines)
+    assert lines and all(not ok for ok, _ in lines) and all(("pinned hash" in note or "could not be downloaded" in note
+                                                             or str(refusal) in note) for _, note in lines)
     monkeypatch.setattr(M, "venv_python", lambda *a: Path("py"))
     monkeypatch.setattr(M, "cached", lambda *a, **k: False)
     monkeypatch.setattr(M, "_from_mirror", refuse)
@@ -418,7 +422,7 @@ def test_the_clap_text_prefetch_stops_on_a_refusal_and_does_not_call_the_hub_lib
     calls = []
     fake = types.SimpleNamespace(snapshot_download=lambda *a, **k: calls.append(a))
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
-    for refusal in (W.PinMismatch("bad"), W.Unserved("none", pinned=True)):
+    for refusal in (W.PinMismatch("bad"), W.Unserved("none", pinned=True), W.NotPlaced("held")):
         def refuse(*a, **k):
             raise refusal
         monkeypatch.setattr(W, "fetch_into_hub_cache", refuse)
@@ -436,3 +440,131 @@ def test_every_revision_the_contract_names_for_a_pinned_set_is_the_pin():
               for w in json.loads(path.read_text())["weights"] if w.get("revision")]
     assert named
     assert [(repo, rev) for repo, rev in named if repo in PINS and PINS[repo]["revision"] != rev] == []
+
+
+# ── a file this computer cannot write is never fetched again unchecked ───────
+
+
+def _held(monkeypatch, times):
+    """Path.replace of a .part refused `times` times (None: always), as Windows refuses a file another program holds."""
+    real, calls = Path.replace, []
+
+    def replace(self, target):
+        if self.name.endswith(".part"):
+            calls.append(self.name)
+            if times is None or len(calls) <= times:
+                raise PermissionError(13, "The process cannot access the file because it is being used by another process",
+                                      str(self))
+        return real(self, target)
+    monkeypatch.setattr(Path, "replace", replace)
+    return calls
+
+
+def test_a_checked_file_another_program_holds_is_put_in_place_once_it_is_let_go(rig, tmp_path, monkeypatch):
+    calls = _held(monkeypatch, 2)
+    served, _ = _fetch(rig, tmp_path / "d")
+    assert served == REV and (tmp_path / "d" / "w" / "big.bin").read_bytes() == BIG
+    assert calls == ["config.json.part"] * 3 + ["big.bin.part"] and rig.sleeps == list(W.PLACE_WAITS[:2])
+    assert [s["path"] for s in rig.hub.state["seen"]].count(f"/{REPO}/resolve/{REV}/w/big.bin") == 1
+
+
+def test_a_checked_file_held_throughout_is_refused_plainly_kept_and_used_by_the_next_fetch(rig, tmp_path, monkeypatch):
+    _held(monkeypatch, None)
+    with pytest.raises(W.NotPlaced) as raised:
+        _fetch(rig, tmp_path / "d")
+    assert "matched its pin" in str(raised.value) and "antivirus" in str(raised.value)
+    assert (tmp_path / "d" / "config.json.part").read_bytes() == SMALL and rig.mirror.state["seen"] == []
+    assert not W.may_fall_back(raised.value)
+    asked = len(rig.hub.state["seen"])
+    monkeypatch.undo()
+    monkeypatch.setattr(W, "PINS", _pins())
+    monkeypatch.setenv("HF_ENDPOINT", f"http://127.0.0.1:{rig.hub.server_address[1]}")
+    monkeypatch.setattr(W, "_sleep", lambda s: None)
+    served, _ = _fetch(rig, tmp_path / "d")
+    assert served == REV and (tmp_path / "d" / "config.json").read_bytes() == SMALL
+    assert not (tmp_path / "d" / "config.json.part").exists()
+    assert [s["path"] for s in rig.hub.state["seen"][asked:]].count(f"/{REPO}/resolve/{REV}/config.json") == 0
+
+
+class _FullDrive:
+    """A file whose writes fail as a full drive's do."""
+
+    def __init__(self, fh):
+        self.fh = fh
+
+    def write(self, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def __getattr__(self, name):
+        return getattr(self.fh, name)
+
+
+def test_a_full_drive_says_no_space_left_and_no_source_is_blamed_or_skipped(rig, tmp_path, monkeypatch):
+    real = Path.open
+    monkeypatch.setattr(Path, "open", lambda self, mode="r", *a, **k: (
+        _FullDrive(real(self, mode, *a, **k)) if self.name.endswith(".part") and "b" in mode and mode[0] in "aw"
+        else real(self, mode, *a, **k)))
+    log = []
+    with pytest.raises(W.NoSpace) as raised:
+        W.fetch_into_dir(REPO, tmp_path / "d", base=rig.mirror_url, progress=log.append)
+    assert str(raised.value).startswith("No space left on the drive for config.json.part") and "GB free" in str(raised.value)
+    assert len(rig.hub.state["seen"]) == 1 and rig.mirror.state["seen"] == [] and rig.sleeps == []
+    assert W._skip == {} and not any("did not answer" in line for line in log)
+    assert not W.may_fall_back(raised.value)
+
+
+def test_a_connection_reset_mid_file_is_still_a_network_break_and_resumes(rig, tmp_path, monkeypatch):
+    import errno as E
+    real_get, resets = W._get, []
+
+    def get(url, *a, **k):
+        answer = real_get(url, *a, **k)
+        if url.endswith("big.bin") and not resets:
+            read = answer.read
+
+            def broken(n=-1):
+                if resets:
+                    raise ConnectionResetError(E.ECONNRESET, "Connection reset by peer")
+                resets.append(1)
+                return read(100_000)
+            answer.read = broken
+        return answer
+    monkeypatch.setattr(W, "_get", get)
+    served, _ = _fetch(rig, tmp_path / "d")
+    assert served == REV and (tmp_path / "d" / "w" / "big.bin").read_bytes() == BIG and resets
+    ranges = [s["headers"].get("range") for s in rig.hub.state["seen"] if s["path"].endswith("big.bin")]
+    assert ranges[0] is None and ranges[1] == "bytes=100000-"
+
+
+def test_a_folder_that_cannot_be_made_or_a_link_that_cannot_be_placed_is_refused_as_this_computers(rig, tmp_path, monkeypatch):
+    (tmp_path / "file").write_text("in the way")
+    with pytest.raises(W.NotPlaced) as raised:
+        _fetch(rig, tmp_path / "file" / "d")
+    assert "on this computer" in str(raised.value)
+
+    def refuse(blob, link):
+        raise PermissionError(13, "Access is denied", str(link))
+    monkeypatch.setattr(W, "_place_link", refuse)
+    with pytest.raises(W.NotPlaced):
+        W.fetch_into_hub_cache(REPO, tmp_path / "cache", base=rig.mirror_url)
+
+
+def test_the_command_line_stops_on_a_file_it_cannot_put_in_place_and_never_says_fall_back(rig, tmp_path, monkeypatch, capsys):
+    _held(monkeypatch, None)
+    assert W.main(["fetch", REPO, "--into", str(tmp_path / "cli"), "--base", rig.mirror_url]) == W.EXIT_LOCAL == 5
+    assert "antivirus" in capsys.readouterr().err
+    monkeypatch.setattr(W, "fetch_into_dir", lambda *a, **k: (_ for _ in ()).throw(OSError("odd")))
+    assert W.main(["fetch", REPO, "--into", str(tmp_path / "cli2"), "--base", rig.mirror_url]) == W.EXIT_LOCAL
+
+
+def test_only_a_set_with_no_pin_that_no_source_served_may_fall_back():
+    assert W.may_fall_back(W.Unserved("none", pinned=False)) and W.may_fall_back(W.MirrorError("odd manifest"))
+    for exc in (W.Unserved("none", pinned=True), W.PinMismatch("bad"), W.NotPlaced("held"), W.NoSpace("full"),
+                OSError("x"), ValueError("x")):
+        assert not W.may_fall_back(exc), exc
+
+
+def test_a_refusal_on_this_computer_is_reported_in_its_own_words():
+    from khaos_attribution.engines.environment import refused
+    ok, line = refused("org/set", W.NoSpace("No space left on the drive for x in y (1.0 GB free): make room, then fetch again"))
+    assert ok is False and line == "org/set: No space left on the drive for x in y (1.0 GB free): make room, then fetch again"

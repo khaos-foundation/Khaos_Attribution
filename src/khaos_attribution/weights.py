@@ -1,10 +1,12 @@
 """The model weights the installers fetch: each file from Hugging Face at its pinned revision, else from Khaos's own
 mirror, and from either only once it matches the sha256 in weights_pins.py. Anonymous: no token is read or sent.
-Standard library only; a caller falls back to the hub library only when no source could serve the set."""
+Standard library only; a caller falls back to the hub library only where `may_fall_back` says so: a set with no pin
+that no source served, never a refused file or one this computer could not write."""
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import fnmatch
 import hashlib
 import http.client
@@ -38,6 +40,8 @@ SKIP_SECONDS = 60.0
 EXIT_NO_MIRROR = 3
 # A pinned set no source answered for: a script stops, because the hub library would install it unchecked.
 EXIT_UNREACHABLE = 4
+# A file could not be written or put in place on this computer (a full drive, a file another program holds): a script stops.
+EXIT_LOCAL = 5
 TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 
@@ -55,6 +59,80 @@ class Unserved(urllib.error.URLError):
     def __init__(self, reason, pinned: bool = False):
         super().__init__(reason)
         self.pinned = pinned
+
+
+class NotPlaced(MirrorError):
+    """A file could not be written or put in place on this computer: no other source and no hub library is tried."""
+
+
+class NoSpace(NotPlaced):
+    """The drive filled while a file was written."""
+
+
+def may_fall_back(exc: BaseException) -> bool:
+    """Whether a caller may still try the hub library after `exc`: only for a set with no pin that no source served."""
+    if isinstance(exc, (PinMismatch, NotPlaced)):
+        return False
+    if isinstance(exc, Unserved):
+        return not exc.pinned
+    return isinstance(exc, MirrorError)
+
+
+_FULL = {errno.ENOSPC} | ({errno.EDQUOT} if hasattr(errno, "EDQUOT") else set())
+# A checked file another program holds (antivirus, on Windows) is asked again for about 15 s before it is refused.
+PLACE_WAITS = (0.5, 1.0, 2.0, 4.0, 8.0)
+
+
+def _free_gb(path: Path) -> str:
+    for folder in (path, *path.parents):
+        with contextlib.suppress(OSError):
+            return f"{shutil.disk_usage(folder).free / 1e9:.1f} GB free"
+    return "free space unknown"
+
+
+def _unwritable(exc: OSError, path: Path) -> NotPlaced:
+    """What a failed write or move on this computer is called: NoSpace for a full drive, else NotPlaced."""
+    where = Path(exc.filename) if isinstance(exc.filename, str) and exc.filename else Path(path)
+    if exc.errno in _FULL:
+        return NoSpace(f"No space left on the drive for {where.name} in {where.parent} ({_free_gb(where.parent)}): "
+                       "make room, then fetch again")
+    return NotPlaced(f"{where.name} could not be written in {where.parent} on this computer "
+                     f"({exc.strerror or exc}): check the drive is connected and writable, then fetch again")
+
+
+def _here(step: Callable, path: Path):
+    """A step on this computer's files; its OSError raised as NotPlaced or NoSpace."""
+    try:
+        return step()
+    except OSError as exc:
+        raise _unwritable(exc, path) from exc
+
+
+def _put_in_place(part: Path, dest: Path) -> None:
+    """The checked copy renamed to its name, asked again while another program holds it; it is kept when refused."""
+    for wait in (*PLACE_WAITS, None):
+        try:
+            part.replace(dest)
+            return
+        except OSError as exc:
+            if exc.errno in _FULL:
+                raise _unwritable(exc, dest) from exc
+            if wait is None:
+                raise NotPlaced(f"{dest.name} was downloaded and matched its pin, but could not be put in place in "
+                                f"{dest.parent} ({exc.strerror or exc}). Another program, often antivirus, may be holding "
+                                "it: fetch again, and the checked copy is used without downloading it again") from exc
+            _sleep(wait)
+
+
+@contextlib.contextmanager
+def _on_this_computer(where: Path):
+    """Any OSError a fetch's own file steps raise becomes NotPlaced; Unserved, a URLError and so an OSError, passes."""
+    try:
+        yield
+    except (Unserved, NotPlaced):
+        raise
+    except OSError as exc:
+        raise _unwritable(exc, where) from exc
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -197,6 +275,37 @@ def _retry_after(exc: urllib.error.HTTPError) -> float:
         return 0.0
 
 
+def _receive(answer, part: Path, have: int, size: int, progress: Callable[[str], None] | None) -> str | None:
+    """The answer's body appended to `part`: None once it ends, or why the connection broke. A failure to write here is
+    this computer's, never the source's, and raises NotPlaced at once."""
+    try:
+        out = part.open("ab" if have else "wb")
+    except OSError as exc:
+        with contextlib.suppress(Exception):
+            answer.close()
+        raise _unwritable(exc, part) from exc
+    try:
+        if have and answer.status != 206:
+            _here(lambda: (out.seek(0), out.truncate()), part)
+        written = _here(out.tell, part)
+        while written <= size:
+            try:
+                chunk = answer.read(CHUNK)
+            except (OSError, http.client.HTTPException) as exc:
+                return str(getattr(exc, "reason", None) or exc)
+            if not chunk:
+                return None
+            _here(lambda: (out.write(chunk), out.flush()), part)    # a full drive is said at this chunk
+            written += len(chunk)
+            if progress:
+                progress(f"{part.name.removesuffix('.part')}: {written * 100 // max(size, 1)}%")
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            answer.close()
+        _here(out.close, part)
+
+
 def _from_source(src: _Source, part: Path, size: int, sha256: str, progress: Callable[[str], None] | None) -> tuple:
     """One source's bytes into `part`, resumed: (ok | mismatch | gated | down | unavailable, why). A retry is made only
     once bytes have flowed, or against the mirror's own 5xx; a resumed copy that fails its hash is fetched once from zero."""
@@ -227,20 +336,10 @@ def _from_source(src: _Source, part: Path, size: int, sha256: str, progress: Cal
                 answer.close()
                 part.unlink(missing_ok=True)
                 return "mismatch", "its length is not the pinned file's"
-            try:
-                with answer, part.open("ab" if have else "wb") as out:
-                    if have and answer.status != 206:
-                        out.seek(0)
-                        out.truncate()
-                    for chunk in iter(lambda: answer.read(CHUNK), b""):
-                        out.write(chunk)
-                        if progress:
-                            progress(f"{part.name.removesuffix('.part')}: {out.tell() * 100 // max(size, 1)}%")
-                        if out.tell() > size:
-                            break
-            except (OSError, http.client.HTTPException) as exc:
+            lost = _receive(answer, part, have, size, progress)
+            if lost is not None:
                 broke += 1
-                why = str(getattr(exc, "reason", None) or exc)
+                why = lost
                 if broke >= ATTEMPTS:
                     return "down", why
                 _sleep(BACKOFF[min(broke, len(BACKOFF)) - 1])
@@ -265,6 +364,12 @@ def _download(sources: list, dest: Path, size: int, sha256: str, progress: Calla
               *, pinned: bool = False) -> None:
     """One file from the first source that serves bytes matching the manifest, resumed from a partial copy; a source
     whose bytes do not match is passed over, and a file no source could serve correctly is never installed."""
+    with _on_this_computer(dest):
+        _download_into(sources, dest, size, sha256, progress, pinned)
+
+
+def _download_into(sources: list, dest: Path, size: int, sha256: str, progress: Callable[[str], None] | None,
+                   pinned: bool) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_file() and dest.stat().st_size == size and _sha256(dest) == sha256:
         return
@@ -278,7 +383,7 @@ def _download(sources: list, dest: Path, size: int, sha256: str, progress: Calla
     for src in sources:
         status, why = _from_source(src, part, size, sha256, progress)
         if status == "ok":
-            part.replace(dest)
+            _put_in_place(part, dest)
             if progress:
                 progress(f"{dest.name}: from {src.name}")
             return
@@ -331,13 +436,15 @@ def fetch_into_hub_cache(repo: str, cache_dir: Path | str, patterns: list | tupl
         _download(_sources(repo, doc["revision"], f["path"], base, pinned), blob, int(f["size"]), f["sha256"], progress,
                   pinned=pinned)
         link = snapshot / f["path"]
-        link.parent.mkdir(parents=True, exist_ok=True)
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        _place_link(blob, link)
+        with _on_this_computer(link):
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            _place_link(blob, link)
     refs = repo_dir / "refs"
-    refs.mkdir(parents=True, exist_ok=True)
-    (refs / "main").write_text(doc["revision"], encoding="utf-8")
+    with _on_this_computer(refs / "main"):
+        refs.mkdir(parents=True, exist_ok=True)
+        (refs / "main").write_text(doc["revision"], encoding="utf-8")
     return doc["revision"]
 
 
@@ -428,7 +535,7 @@ def default_hub_cache() -> Path:
 def main(argv: list | None = None) -> int:
     """fetch <repo> (--into DIR | --hub-cache [DIR]) [--pattern P]... [--revision R] [--base URL]; check <repo>.
     Exit 3 when no source can serve an unpinned set, so a script falls back to the hub library; 4 when none answered for a
-    pinned one, which no fallback may replace; 1 when a file fails its pin."""
+    pinned one, which no fallback may replace; 1 when a file fails its pin; 5 when a file cannot be written here."""
     import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(prog="khaos_attribution.weights")
@@ -459,15 +566,18 @@ def main(argv: list | None = None) -> int:
         else:
             cache = Path(a.hub_cache) if a.hub_cache else default_hub_cache()
             served = fetch_into_hub_cache(a.repo, cache, a.pattern or None, base=a.base, progress=say, revision=a.revision)
+    except NotPlaced as exc:
+        say(str(exc))
+        return EXIT_LOCAL
     except MirrorError as exc:
         say(str(exc))
         return 1
     except Unserved as exc:
         say(str(exc))
         return EXIT_UNREACHABLE if exc.pinned else EXIT_NO_MIRROR
-    except (urllib.error.URLError, OSError) as exc:
-        say(f"no source answered: {exc}")
-        return EXIT_NO_MIRROR
+    except OSError as exc:
+        say(f"{a.repo} could not be fetched on this computer: {exc}")
+        return EXIT_LOCAL
     if served is None:
         say(f"no source serves {a.repo}" + (f" at {a.revision}" if a.revision else ""))
         return EXIT_NO_MIRROR

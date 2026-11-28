@@ -191,7 +191,7 @@ def weights(root: Path, *, check_only: bool = False) -> list:
             continue
         try:
             served = _from_mirror(lambda: mirror.fetch_into_hub_cache(repo, mirror.default_hub_cache(), w.get("patterns"), revision=rev))
-        except (mirror.PinMismatch, mirror.Unserved) as exc:
+        except (mirror.MirrorError, OSError) as exc:
             out.append(_refused(repo, exc))
             continue
         if served and cached(repo, files, rev):

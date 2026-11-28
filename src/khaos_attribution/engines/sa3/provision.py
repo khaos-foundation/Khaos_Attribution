@@ -432,7 +432,7 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
             # Hugging Face, then the Khaos mirror, each file against its pin; the port's downloader only when neither can serve.
             try:
                 served = _from_mirror(lambda: _mlx_from_mirror(w["repo"], mlx, w.get("components") or []))
-            except (mirror.PinMismatch, mirror.Unserved) as exc:
+            except (mirror.MirrorError, OSError) as exc:
                 out.append(_refused(w["repo"], exc))
                 continue
             if served and all(f.exists() for f in parts):
@@ -455,7 +455,7 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
             continue
         try:
             served = _from_mirror(lambda: mirror.fetch_into_hub_cache(w["repo"], mirror.default_hub_cache(), w.get("patterns")))
-        except (mirror.PinMismatch, mirror.Unserved) as exc:
+        except (mirror.MirrorError, OSError) as exc:
             out.append(_refused(w["repo"], exc))
             continue
         if served and cached(w["repo"], files):
