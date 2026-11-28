@@ -194,8 +194,12 @@ def weights(root: Path, *, check_only: bool = False) -> list:
         except (mirror.MirrorError, OSError) as exc:
             out.append(_refused(repo, exc))
             continue
-        if served and cached(repo, files, rev):
-            out.append((True, f"{repo} fetched and checked against its pinned hashes into the Hugging Face cache"))
+        if served:
+            # A set served and checked is never fetched again by the hub library, which checks nothing.
+            found = cached(repo, files, rev)
+            out.append((found, f"{repo} fetched and checked against its pinned hashes into the Hugging Face cache" if found
+                        else f"{repo} was fetched and checked, but the engine does not find it in the Hugging Face cache "
+                        f"at {mirror.default_hub_cache()}"))
             continue
         code = ("import json, sys; from huggingface_hub import snapshot_download; "
                 "snapshot_download(sys.argv[1], revision=sys.argv[2] or None, allow_patterns=json.loads(sys.argv[3]) or None)")

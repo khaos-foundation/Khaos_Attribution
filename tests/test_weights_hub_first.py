@@ -465,7 +465,7 @@ def test_a_checked_file_another_program_holds_is_put_in_place_once_it_is_let_go(
     served, _ = _fetch(rig, tmp_path / "d")
     assert served == REV and (tmp_path / "d" / "w" / "big.bin").read_bytes() == BIG
     assert calls == ["config.json.part"] * 3 + ["big.bin.part"] and rig.sleeps == list(W.PLACE_WAITS[:2])
-    assert [s["path"] for s in rig.hub.state["seen"]].count(f"/{REPO}/resolve/{REV}/w/big.bin") == 1
+    assert [s["path"] for s in rig.hub.state["seen"]].count(f"/{REPO}/resolve/{REV}/config.json") == 1, "held, not fetched again"
 
 
 def test_a_checked_file_held_throughout_is_refused_plainly_kept_and_used_by_the_next_fetch(rig, tmp_path, monkeypatch):
@@ -540,7 +540,7 @@ def test_a_folder_that_cannot_be_made_or_a_link_that_cannot_be_placed_is_refused
     (tmp_path / "file").write_text("in the way")
     with pytest.raises(W.NotPlaced) as raised:
         _fetch(rig, tmp_path / "file" / "d")
-    assert "on this computer" in str(raised.value)
+    assert "could not be read or written on this computer" in str(raised.value)
 
     def refuse(blob, link):
         raise PermissionError(13, "Access is denied", str(link))
@@ -568,3 +568,23 @@ def test_a_refusal_on_this_computer_is_reported_in_its_own_words():
     from khaos_attribution.engines.environment import refused
     ok, line = refused("org/set", W.NoSpace("No space left on the drive for x in y (1.0 GB free): make room, then fetch again"))
     assert ok is False and line == "org/set: No space left on the drive for x in y (1.0 GB free): make room, then fetch again"
+
+
+def test_a_set_served_and_checked_is_never_fetched_again_by_the_hub_library_when_the_engine_misses_it(monkeypatch, tmp_path):
+    from khaos_attribution.engines.sa3 import provision as S
+
+    def never(*a, **k):
+        raise AssertionError("the hub library ran after a checked download")
+    monkeypatch.setattr(S, "venv_python", lambda *a: Path("py"))
+    monkeypatch.setattr(S, "cached", lambda *a, **k: False)
+    monkeypatch.setattr(S, "_from_mirror", lambda fetch: True)
+    monkeypatch.setattr(S, "_run", never)
+    lines = S.weights(tmp_path, "torch", tmp_path)
+    assert lines and all(not ok and "was fetched and checked, but" in note for ok, note in lines)
+    from khaos_attribution.engines.mimetic import provision as M
+    monkeypatch.setattr(M, "venv_python", lambda *a: Path("py"))
+    monkeypatch.setattr(M, "cached", lambda *a, **k: False)
+    monkeypatch.setattr(M, "_from_mirror", lambda fetch: True)
+    monkeypatch.setattr(M, "_run", never)
+    lines = M.weights(tmp_path)
+    assert lines and all(not ok and "was fetched and checked, but" in note for ok, note in lines)

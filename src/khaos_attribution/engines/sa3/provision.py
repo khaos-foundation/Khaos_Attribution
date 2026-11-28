@@ -435,8 +435,11 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
             except (mirror.MirrorError, OSError) as exc:
                 out.append(_refused(w["repo"], exc))
                 continue
-            if served and all(f.exists() for f in parts):
-                out.append((True, f"{w['repo']} fetched and checked against its pinned hashes"))
+            if served:
+                # A set served and checked is never fetched again by the port's own downloader, which checks nothing.
+                lacking = [f.name for f in parts if not f.exists()]
+                out.append((not lacking, f"{w['repo']} fetched and checked against its pinned hashes" if not lacking
+                            else f"{w['repo']} was fetched and checked, but {', '.join(lacking)} is not under {mlx}"))
                 continue
             code = ("import sys; sys.path.insert(0, 'scripts'); from weights import ensure_local; "
                     "[ensure_local(p, verbose=False) for p in sys.argv[1:]]")
@@ -458,8 +461,12 @@ def weights(root: Path, runtime: str, weights_dir: Path, *, check_only: bool = F
         except (mirror.MirrorError, OSError) as exc:
             out.append(_refused(w["repo"], exc))
             continue
-        if served and cached(w["repo"], files):
-            out.append((True, f"{w['repo']} fetched and checked against its pinned hashes into the Hugging Face cache"))
+        if served:
+            # A set served and checked is never fetched again by the hub library, which checks nothing.
+            found = cached(w["repo"], files)
+            out.append((found, f"{w['repo']} fetched and checked against its pinned hashes into the Hugging Face cache"
+                        if found else f"{w['repo']} was fetched and checked, but the engine does not find it in the "
+                        f"Hugging Face cache at {mirror.default_hub_cache()}"))
             continue
         code = ("import json, sys; from huggingface_hub import snapshot_download; "
                 "snapshot_download(sys.argv[1], allow_patterns=json.loads(sys.argv[2]) or None)")

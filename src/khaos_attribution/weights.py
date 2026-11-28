@@ -96,7 +96,7 @@ def _unwritable(exc: OSError, path: Path) -> NotPlaced:
     if exc.errno in _FULL:
         return NoSpace(f"No space left on the drive for {where.name} in {where.parent} ({_free_gb(where.parent)}): "
                        "make room, then fetch again")
-    return NotPlaced(f"{where.name} could not be written in {where.parent} on this computer "
+    return NotPlaced(f"{where.name} in {where.parent} could not be read or written on this computer "
                      f"({exc.strerror or exc}): check the drive is connected and writable, then fetch again")
 
 
