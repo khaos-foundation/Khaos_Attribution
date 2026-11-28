@@ -61,8 +61,10 @@ def real_listdir(folder) -> list[str]:
 
 
 def real_walk(top, **kwargs):
-    """``os.walk`` that neither enters nor yields a leftover."""
+    """``os.walk`` that neither enters nor yields a leftover, top-down or bottom-up."""
     for root, dirs, files in os.walk(top, **kwargs):
+        if _leftover_below(Path(root), Path(top)):
+            continue
         dirs[:] = [d for d in dirs if not is_os_leftover(d)]
         yield root, dirs, [f for f in files if not is_os_leftover(f)]
 
@@ -90,8 +92,10 @@ def _gone_is_fine(func, path, exc) -> None:
 def remove_tree(path, *, missing_ok: bool = False, ignore_errors: bool = False) -> None:
     """``shutil.rmtree`` on which a ``._`` twin that went with its file is not an error."""
     path = Path(path)
-    if missing_ok and not os.path.lexists(path):
-        return
+    if not os.path.lexists(path):
+        if missing_ok or ignore_errors:
+            return
+        raise FileNotFoundError(2, "No such file or directory", str(path))
     if ignore_errors:
         shutil.rmtree(path, ignore_errors=True)
     elif sys.version_info >= (3, 12):
@@ -110,21 +114,47 @@ def copy_tree(src, dst, **kwargs):
     return shutil.copytree(src, dst, **kwargs)
 
 
+def _samefile(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _inside(dst: str, src: str) -> bool:
+    src, dst = os.path.abspath(src), os.path.abspath(dst)
+    return (dst + os.sep).startswith(src.rstrip(os.sep) + os.sep)
+
+
 def move(src, dst) -> str:
-    """``shutil.move``, whose copy to another drive leaves the leftovers behind and whose clean-up is ``remove_tree``."""
+    """``shutil.move`` step for step, except that its copy to another drive leaves the leftovers behind and its
+    clean-up is ``remove_tree``."""
     src, dst = os.fspath(src), os.fspath(dst)
-    real_dst = os.path.join(dst, os.path.basename(src.rstrip(os.sep))) if os.path.isdir(dst) else dst
-    if os.path.isdir(dst) and os.path.lexists(real_dst):
-        raise shutil.Error(f"Destination path '{real_dst}' already exists")
+    real_dst = dst
+    if os.path.isdir(dst):
+        if _samefile(src, dst) and not os.path.islink(src):
+            os.rename(src, dst)  # a case-only rename on a case-insensitive drive
+            return dst
+        real_dst = os.path.join(dst, os.path.basename(src.rstrip(os.sep + (os.altsep or ''))))
+        if os.path.exists(real_dst):
+            raise shutil.Error(f"Destination path '{real_dst}' already exists")
     try:
         os.rename(src, real_dst)
-        return real_dst
     except OSError:
-        pass
-    if os.path.isdir(src) and not os.path.islink(src):
-        copy_tree(src, real_dst, symlinks=True)
-        remove_tree(src)
-    else:
-        shutil.copy2(src, real_dst)
-        os.unlink(src)
+        if os.path.islink(src):
+            linkto = os.readlink(src)
+            os.symlink(linkto, real_dst)
+            os.unlink(src)
+        elif os.path.isdir(src):
+            if _inside(dst, src):
+                raise shutil.Error(f"Cannot move a directory '{src}' into itself '{dst}'.") from None
+            if (not os.access(src, os.W_OK) and os.listdir(src)  # os-leftovers: emptiness, as shutil asks it
+                    and sys.platform == "darwin"):
+                raise PermissionError(f"Cannot move the non-empty directory '{src}': Lacking write permission to "
+                                      f"'{src}'.") from None
+            copy_tree(src, real_dst, symlinks=True)
+            remove_tree(src)
+        else:
+            shutil.copy2(src, real_dst)
+            os.unlink(src)
     return real_dst

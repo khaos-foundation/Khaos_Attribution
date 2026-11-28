@@ -160,15 +160,19 @@ def _plain_calls(path: Path):
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.ImportFrom) and any((node.module, n.name) in _PLAIN for n in node.names):
+            yield f"{path.relative_to(SRC).as_posix()}:{node.lineno}: {lines[node.lineno - 1].strip()}"
+            continue
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         f = node.func
+        plain_walk = f.attr == "walk" and not (isinstance(f.value, ast.Name) and f.value.id in ("ast", "os"))
         plain = (isinstance(f.value, ast.Name) and (f.value.id, f.attr) in _PLAIN) or f.attr in _LISTING_ATTRS
-        if plain:
+        if plain or plain_walk:
             line = lines[node.lineno - 1]
             reason = line.split(MARK, 1)[1].strip() if MARK in line else ""
             if not reason:
-                yield f"{path.relative_to(SRC)}:{node.lineno}: {line.strip()}"
+                yield f"{path.relative_to(SRC).as_posix()}:{node.lineno}: {line.strip()}"
 
 
 def test_every_listing_and_removal_goes_through_the_helper():
@@ -193,3 +197,54 @@ def test_ace_steps_dataset_is_handed_the_real_pairs(tmp_path):
     assert path.name == PAIR_MANIFEST and sorted(samples) == ["a_seg_000.pt", "b_seg_001.pt"]
     assert samples == [n for n in os.listdir(tmp_path) if n in samples]
     assert write_pair_manifest(tmp_path / "gone") is None
+
+
+def _no_rename(monkeypatch):
+    """os.rename refused, as it is between two drives."""
+    import errno
+
+    def refuse(*_a, **_k):
+        raise OSError(errno.EXDEV, "Cross-device link")
+    monkeypatch.setattr(os, "rename", refuse)
+
+
+def test_a_move_between_drives_copies_the_real_entries_and_removes_the_source(tmp_path, monkeypatch):
+    _seed(tmp_path / "a")
+    (tmp_path / "a" / "link").symlink_to("take_0.wav")
+    _no_rename(monkeypatch)
+    F.move(tmp_path / "a", tmp_path / "b")
+    assert not (tmp_path / "a").exists()
+    assert sorted(os.listdir(tmp_path / "b")) == sorted([*F.real_listdir(tmp_path / "b")])
+    assert os.readlink(tmp_path / "b" / "link") == "take_0.wav"
+
+
+def test_a_move_refuses_what_shutil_refuses(tmp_path, monkeypatch):
+    """Into itself, or onto a name already in the destination folder: refused, and nothing is lost."""
+    _seed(tmp_path / "a")
+    _no_rename(monkeypatch)
+    with pytest.raises(shutil.Error, match="into itself"):
+        F.move(tmp_path / "a", tmp_path / "a" / "sub")
+    (tmp_path / "d" / "a").mkdir(parents=True)
+    with pytest.raises(shutil.Error, match="already exists"):
+        F.move(tmp_path / "a", tmp_path / "d")
+    assert (tmp_path / "a" / "take_0.wav").read_bytes() == b"real"
+
+
+def test_a_case_only_rename_is_a_rename(tmp_path):
+    (tmp_path / "Run").mkdir()
+    (tmp_path / "Run" / "x.wav").write_bytes(b"real")
+    F.move(tmp_path / "Run", tmp_path / "run")
+    assert (tmp_path / "run" / "x.wav").read_bytes() == b"real"
+
+
+def test_remove_tree_on_a_missing_folder_raises_unless_asked_not_to(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        F.remove_tree(tmp_path / "gone")
+    F.remove_tree(tmp_path / "gone", missing_ok=True)
+    F.remove_tree(tmp_path / "gone", ignore_errors=True)
+
+
+def test_a_bottom_up_walk_skips_the_leftovers_too(tmp_path):
+    _seed(tmp_path)
+    roots = [Path(r).relative_to(tmp_path).as_posix() for r, _, _ in F.real_walk(tmp_path, topdown=False)]
+    assert sorted(roots) == [".", "sub"]
