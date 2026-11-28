@@ -74,13 +74,14 @@ def _score_torch(wrapped, req: dict, torch) -> dict:
     """Per-sample bucket losses of the clips under the model as it stands: the trainer's forward, noise seeded per
     clip by torch's own generator, the input at the model's precision."""
     from khaos_attribution.engines.sa3 import forward_torch as F  # noqa: PLC0415
+    from khaos_attribution.files import real_glob  # noqa: PLC0415
     model = wrapped.model
     model.eval()
     device = wrapped.device
     timesteps = [float(t) for t in req["timesteps"]]
     per_sample = {}
     with torch.no_grad():
-        for wav in sorted(Path(req["clips_dir"]).glob("*.wav")):
+        for wav in real_glob(req["clips_dir"], "*.wav"):
             latents, n, valid = F.encode(model, torch, wav, device)
             cond = F.condition(model, torch, latents, F.caption(wav), n / int(model.sample_rate), device)
             mask = F.padding_mask(torch, latents, valid)
@@ -108,11 +109,12 @@ def heldout_mlx(req: dict) -> dict:
     from lora_train_mlx import rectified_flow_loss  # noqa: PLC0415
     from khaos_attribution.engines import mlx_cache  # noqa: PLC0415
     from khaos_attribution.engines.sa3 import forward_mlx as FM  # noqa: PLC0415
+    from khaos_attribution.files import real_glob  # noqa: PLC0415
     mlx_cache.apply(mx)
 
     latents_dir = Path(req["latents_dir"])
     items = []
-    for npy in sorted(latents_dir.glob("*.npy")):
+    for npy in real_glob(latents_dir, "*.npy"):
         meta = json.loads(npy.with_suffix(".json").read_text(encoding="utf-8"))
         items.append((npy, meta, np.load(str(npy)).astype(np.float32)))
     if not items:

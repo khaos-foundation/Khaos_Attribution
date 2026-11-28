@@ -12,6 +12,7 @@ from typing import Any
 from khaos_attribution.engines.train import NoLossHooks
 from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.mock import DESCRIPTOR
+from khaos_attribution.files import real_glob
 from khaos_attribution.engines.train import TrainingUnavailable
 
 __all__ = ["LossHooks", "Session", "TrainingApi", "TrainingUnavailable", "adapter_file_in", "adapter_kwargs",
@@ -47,7 +48,7 @@ def adapter_kwargs(cfg: dict) -> tuple:
 
 
 def pair_files(tensor_dir) -> list:
-    return sorted(Path(tensor_dir).glob("*.pt"))
+    return real_glob(tensor_dir, "*.pt")
 
 
 def adapter_file_in(directory: Path | str) -> Path | None:

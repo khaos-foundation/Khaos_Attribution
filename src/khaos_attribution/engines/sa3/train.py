@@ -17,6 +17,7 @@ from khaos_attribution.engines.train import NoLossHooks
 from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.render import RenderFailed
 from khaos_attribution.engines.sa3 import DESCRIPTOR
+from khaos_attribution.files import move, real_glob, real_rglob
 from khaos_attribution.engines.sa3 import train_driver as TD
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, python_for, runtime_for
 from khaos_attribution.engines import worker_process as W
@@ -129,7 +130,7 @@ def trained_values(run_dir: Path | str) -> dict:
 
 
 def pair_files(tensor_dir: Path | str) -> list:
-    return sorted(Path(tensor_dir).glob(f"*{PAIR_SUFFIX}"))
+    return real_glob(tensor_dir, f"*{PAIR_SUFFIX}")
 
 
 def repeat_pairs_to(tensor_dir: Path | str, n: int) -> list:
@@ -144,7 +145,7 @@ def repeat_pairs_to(tensor_dir: Path | str, n: int) -> list:
         src = originals[i % len(originals)]
         i += 1
         stem = f"{src.stem}_rep{i}"
-        for sidecar in sorted(tensor_dir.glob(f"{src.stem}.*")):
+        for sidecar in real_glob(tensor_dir, f"{src.stem}.*"):
             target = tensor_dir / f"{stem}{sidecar.suffix}"
             shutil.copy2(sidecar, target)
             if sidecar.suffix == PAIR_SUFFIX:
@@ -206,7 +207,7 @@ def pre_encode(api: TrainingApi, clips_dir: Path, checkpoint_root: Path) -> dict
                                    label="Stable Audio 3 pre-encoder", timeout=None)
     if code != 0:
         raise TrainingUnavailable("pre-encoding for the MLX trainer failed: " + "\n".join(stderr.strip().splitlines()[-6:]))
-    return {"dir": str(out), "n": len(list(out.glob("*.npy")))}
+    return {"dir": str(out), "n": len(real_glob(out, "*.npy"))}
 
 
 def _env(api: TrainingApi) -> dict:
@@ -377,16 +378,16 @@ class Session(PE.ProcessSession):
         """A resumed run's logs and checkpoints move out of the way, or the old rows would replay as new epochs."""
         aside = self.save_dir / f"before_resume_{time.strftime('%Y%m%d_%H%M%S')}"
         for f in [self.save_dir / LOSSES_CSV, self.save_dir / TELEMETRY,
-                  *self.save_dir.rglob("*.ckpt"), *self.save_dir.rglob("*.safetensors")]:
+                  *real_rglob(self.save_dir, "*.ckpt"), *real_rglob(self.save_dir, "*.safetensors")]:
             rel = f.relative_to(self.save_dir)
             if not f.is_file() or any(part.startswith("before_resume_") for part in rel.parts):
                 continue
             (aside / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(f), str(aside / rel))
+            move(f, aside / rel)
 
     def _checkpoints(self) -> dict:
         found = {}
-        for f in [*self.save_dir.rglob("*.ckpt"), *self.save_dir.rglob("*.safetensors")]:
+        for f in [*real_rglob(self.save_dir, "*.ckpt"), *real_rglob(self.save_dir, "*.safetensors")]:
             if any(part.startswith("before_resume_") for part in f.relative_to(self.save_dir).parts):
                 continue
             step = checkpoint_step(f)

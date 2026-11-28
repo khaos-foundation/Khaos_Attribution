@@ -13,6 +13,7 @@ import math
 
 from khaos_attribution.base_model import is_base_model_id
 from khaos_attribution import canonical
+from khaos_attribution.files import real_glob
 import os
 import base64
 import secrets
@@ -343,8 +344,8 @@ class Outbox:
         return seq
 
     def _append_locked(self, kind: str, entry: dict, entry_id: str, first: bool = False) -> str:
-        pending = sorted(self.dir.glob("*.json"))
-        done = sorted((self.dir / "sent").glob("*.json")) + sorted((self.dir / "refused").glob("*.json"))
+        pending = real_glob(self.dir, "*.json")
+        done = real_glob(self.dir / "sent", "*.json") + real_glob(self.dir / "refused", "*.json")
         suffix = f"-{entry_id[:12]}.json"
         if any(p.name.endswith(suffix) for p in done):
             return entry_id   # the same record twice is one entry
@@ -373,9 +374,9 @@ class Outbox:
 
     def pending(self) -> list:
         """Entries still to send. One also in `sent/` was taken and its move interrupted: it is finished, not resent."""
-        sent = {p.name for p in (self.dir / "sent").glob("*.json")}
+        sent = {p.name for p in real_glob(self.dir / "sent", "*.json")}
         out = []
-        for p in sorted(self.dir.glob("*.json")):
+        for p in real_glob(self.dir, "*.json"):
             if p.name in sent:
                 p.unlink(missing_ok=True)
                 continue
@@ -406,7 +407,7 @@ class Outbox:
 
     def sent_entries(self) -> list:
         out = []
-        for p in sorted((self.dir / "sent").glob("*.json")):
+        for p in real_glob(self.dir / "sent", "*.json"):
             try:
                 out.append(json.loads(p.read_text(encoding="utf-8")))
             except (OSError, ValueError):
@@ -415,7 +416,7 @@ class Outbox:
 
     def refused(self) -> list:
         out = []
-        for p in sorted((self.dir / "refused").glob("*.json")):
+        for p in real_glob(self.dir / "refused", "*.json"):
             try:
                 out.append(json.loads(p.read_text(encoding="utf-8")))
             except (OSError, ValueError):
@@ -424,7 +425,7 @@ class Outbox:
 
     def drop(self, entry_id: str) -> bool:
         """A pending entry withdrawn before it was ever sent: gone, as if never written."""
-        for p in self.dir.glob("*.json"):
+        for p in real_glob(self.dir, "*.json"):
             if p.name.endswith(f"-{entry_id[:12]}.json"):
                 p.unlink()
                 return True

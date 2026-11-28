@@ -421,7 +421,7 @@ def _warn_once(what: str, message: str) -> None:
 def _parents_from_proc(root: Path) -> dict:
     """pid -> parent pid from ``<root>/<pid>/stat``; the name between brackets may itself hold brackets and spaces."""
     out = {}
-    for entry in os.listdir(root):
+    for entry in os.listdir(root):  # os-leftovers: /proc, the kernel's own listing
         if not entry.isdigit():
             continue
         try:
@@ -468,7 +468,7 @@ def _marked(mark: str) -> tuple | None:
     found, unread = set(), set()
     if sys.platform.startswith("linux"):
         try:
-            entries = [e for e in os.listdir("/proc") if e.isdigit()]
+            entries = [e for e in os.listdir("/proc") if e.isdigit()]  # os-leftovers: /proc, the kernel's own listing
         except OSError:
             entries = None
         for entry in entries or ():

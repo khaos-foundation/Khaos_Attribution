@@ -14,6 +14,7 @@ from typing import Any
 
 from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.acestep import DESCRIPTOR
+from khaos_attribution.files import real_glob
 
 log = logging.getLogger(__name__)
 
@@ -318,7 +319,7 @@ PAIR_SUFFIX = ".pt"
 
 def pair_files(tensor_dir: Path | str) -> list:
     """The preprocessed pairs under a directory, sorted by name."""
-    return sorted(Path(tensor_dir).glob(f"*{PAIR_SUFFIX}"))
+    return real_glob(tensor_dir, f"*{PAIR_SUFFIX}")
 
 
 class LossHooks:
