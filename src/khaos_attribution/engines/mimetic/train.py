@@ -11,6 +11,7 @@ from pathlib import Path
 from khaos_attribution.engines.train import NoLossHooks
 from khaos_attribution.engines.train import adapter_file_in as _adapter_file_in
 from khaos_attribution.engines.mimetic import DESCRIPTOR
+from khaos_attribution.files import real_glob
 from khaos_attribution.engines.mimetic.render import WINDOWS, find_root, python_for, worker_env
 from khaos_attribution.engines.render import RenderFailed
 from khaos_attribution.engines import process_engine as PE
@@ -71,7 +72,7 @@ def run_refusal(run_dir: Path | str) -> str | None:
 
 
 def pair_files(tensor_dir: Path | str) -> list:
-    return sorted(Path(tensor_dir).glob(f"*{PAIR_SUFFIX}"))
+    return real_glob(tensor_dir, f"*{PAIR_SUFFIX}")
 
 
 def open_module(api: TrainingApi, cfg: dict, adapter_file, *, checkpoint_root=None, device: str = "cuda",
@@ -161,7 +162,7 @@ class Session(PE.ProcessSession):
                                seed=self.seed, device=self.device)
 
     def _checkpoints(self) -> dict:
-        return {step: f for f in self.save_dir.glob("*.ckpt") if (step := checkpoint_step(f))}
+        return {step: f for f in real_glob(self.save_dir, "*.ckpt") if (step := checkpoint_step(f))}
 
     def _lay_out(self, step: int, source: Path, loss: float) -> Path:
         """The checkpoint in the Workshop's layout, as a float32 safetensors adapter."""

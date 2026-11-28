@@ -12,6 +12,8 @@ import ast
 import sys
 from pathlib import Path
 
+from khaos_attribution.files import real_glob
+
 HANDLER = "acestep/core/generation/handler"
 LORA_MODULE = "acestep/training_v2/fixed_lora_module.py"
 PREPROCESS = "acestep/training_v2/preprocess.py"
@@ -29,7 +31,7 @@ def _parse(root: Path, rel: str, found: list) -> ast.Module | None:
 
 def _handler_sources(root: Path, found: list) -> list:
     folder = root / HANDLER
-    files = sorted(p for p in folder.glob("*.py") if not p.name.endswith("_test.py")) if folder.is_dir() else []
+    files = [p for p in real_glob(folder, "*.py") if not p.name.endswith("_test.py")]
     if not files:
         found.append(f"{HANDLER} cannot be read, so the handler's seams cannot be checked")
     return [tree for p in files if (tree := _parse(root, p.relative_to(root).as_posix(), found)) is not None]

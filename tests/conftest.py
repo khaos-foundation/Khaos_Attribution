@@ -16,7 +16,7 @@ ALLOWED_REASONS = ("torchaudio aligner not installed", "ffmpeg unavailable", "FF
                    "the base model's config is not in this machine's cache", "no ACE-Step checkout beside this one",
                    "no Python 3.11 on this machine to load the contract under",
                    "no Python 3.11 with numpy and jsonschema on this machine to import the contract under",
-                   POSIX_ONLY, LINUX_ONLY)
+                   "needs macOS's hdiutil to make an exFAT drive", POSIX_ONLY, LINUX_ONLY)
 # gate.sh torch needs these all; only the register's own package may be missing, as the pytest gate runs its test.
 TORCH_RUN_NEEDS = ("torch", "torchaudio", "librosa", "huggingface_hub", "huggingface_hub.constants", "soundfile")
 if os.environ.get("KHAOS_TORCH_RUN") == "1":

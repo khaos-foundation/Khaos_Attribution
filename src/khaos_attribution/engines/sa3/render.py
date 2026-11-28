@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from khaos_attribution.engines import worker_process as W
+from khaos_attribution.files import remove_tree
 from khaos_attribution.engines.render import RenderCancelled, RenderFailed, RenderRequest, RenderResult
 from khaos_attribution.engines.sa3 import DESCRIPTOR
 from khaos_attribution.engines.sa3 import rework as RW
@@ -216,7 +217,7 @@ class Renderer:
         try:
             return REWORKS[mode](self, req, out, work, on_progress, should_stop)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            remove_tree(work, ignore_errors=True)
 
     def _render(self, request: dict, on_progress, should_stop, done: int, total: int) -> dict:
         """One worker pass as part ``done`` of ``total``, its sampling steps reported as they are taken."""

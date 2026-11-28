@@ -5,7 +5,6 @@ the trainer takes it (khaos_attribution.engines.mimetic.clip); noise is seeded p
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 if __name__ in ("__main__", "__mp_main__"):  # the room's contract, only through engines/launch.py
     import pathlib
@@ -19,13 +18,14 @@ def heldout(req: dict) -> dict:
     from khaos_attribution import gradient as G  # noqa: PLC0415
     from khaos_attribution.engines.mimetic import clip as C  # noqa: PLC0415
     from khaos_attribution.engines.mimetic.loading import apply_adapter, load_model  # noqa: PLC0415
+    from khaos_attribution.files import real_glob  # noqa: PLC0415
 
     model, config, device = load_model(req.get("device"))
     if req.get("adapter"):
         apply_adapter(model, config, req["adapter"], 1.0)
     timesteps = [float(t) for t in req["timesteps"]]
     per_sample = {}
-    for wav in sorted(Path(req["clips_dir"]).glob("*.wav")):
+    for wav in real_glob(req["clips_dir"], "*.wav"):
         latents, cond, mask, noise = C.prepare(model, config, wav, device, G.pair_noise_seed(int(req["seed"]), wav.name))
         with torch.no_grad():
             per_sample[wav.name] = {f"{t:.2f}": float(C.velocity_mse(C.forward(model, latents, cond, mask, noise, t),

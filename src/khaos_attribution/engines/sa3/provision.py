@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 
 from khaos_attribution.engines.sa3 import DESCRIPTOR
+from khaos_attribution.files import real_glob
 from khaos_attribution.engines.sa3.render import MLX_SUBDIR, WINDOWS, find_root, runtime_for, venv_python
 from khaos_attribution.engines.sa3.train import BASE_NPZ
 from khaos_attribution.engines import environment as shared_environment
@@ -373,7 +374,7 @@ def licence_note(w: dict) -> str | None:
     if where is None:
         return None
     snapshot = Path(where).parents[len(Path(first).parts) - 1]
-    if any(any(snapshot.glob(p)) for p in LICENCE_PATTERNS):
+    if any(real_glob(snapshot, p) for p in LICENCE_PATTERNS):
         return None
     return (f"no licence file beside {w['repo']} in the Hugging Face cache: these weights were fetched before their "
             "licence travelled with them")

@@ -10,6 +10,7 @@ from typing import Any, Callable, Sequence
 from khaos_attribution.engines.heldout import (DEFAULT_BUCKETS, HIGH_NOISE_T, bucket_key, bucket_timesteps,  # noqa: F401
                                               pair_noise_seed, summary_of)
 from khaos_attribution.identifiers import track_of_segment
+from khaos_attribution.files import real_glob
 
 
 def evaluate_heldout(
@@ -87,7 +88,7 @@ class HeldoutEvaluator:
         import torch  # noqa: PLC0415
 
         out: list[tuple[str, dict]] = []
-        for p in sorted(self.tensor_dir.glob("*.pt")):
+        for p in real_glob(self.tensor_dir, "*.pt"):
             data = torch.load(str(p), map_location="cpu", weights_only=True)
             out.append((p.name, {
                 "target_latents": data["target_latents"],

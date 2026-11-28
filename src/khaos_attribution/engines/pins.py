@@ -8,6 +8,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from khaos_attribution.files import real_rglob
+
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 # Environment variables that make git answer about another repository no matter what `-C <dir>` says.
 GIT_REPO_ENV_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
@@ -76,7 +78,7 @@ def package_sha256(root=None) -> str:
     import khaos_attribution  # noqa: PLC0415
     root = Path(root) if root is not None else Path(khaos_attribution.__file__).parent
     h = hashlib.sha256()
-    for p in sorted(root.rglob("*")):
+    for p in real_rglob(root, "*"):
         if p.suffix in (".py", ".json") and "__pycache__" not in p.parts:
             h.update(p.relative_to(root).as_posix().encode())
             h.update(p.read_bytes().replace(b"\r\n", b"\n"))

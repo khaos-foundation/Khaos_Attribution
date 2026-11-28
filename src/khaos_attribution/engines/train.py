@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from khaos_attribution.files import real_glob
+
 
 class TrainingUnavailable(RuntimeError):
     """The engine's training side cannot be reached here, with the reason."""
@@ -33,7 +35,7 @@ def adapter_file_in(directory: Path | str, descriptor) -> Path | None:
     for name in descriptor.adapter["filenames"]:
         if (directory / name).is_file():
             return directory / name
-    files = sorted(directory.glob("*.safetensors"))
+    files = real_glob(directory, "*.safetensors")
     return files[0] if files else None
 
 

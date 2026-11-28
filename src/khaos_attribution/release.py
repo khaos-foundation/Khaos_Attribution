@@ -12,6 +12,7 @@ import tarfile
 from pathlib import Path, PurePosixPath
 
 from khaos_attribution.canonical import compact_ascii
+from khaos_attribution.files import remove_tree
 
 BUNDLE_VERSION = "khaos.release_bundle/1"
 MANIFEST_NAME = "release.json"
@@ -128,7 +129,6 @@ def _checked_manifest(manifest) -> dict:
 def read_bundle(tar_path: Path, dest: Path) -> dict:
     """Open the bundle into `dest` (made here, must not exist): every member a plain file the manifest names, every
     manifest file present, every hash matching. Returns the manifest; on any refusal nothing is left in `dest`."""
-    import shutil  # noqa: PLC0415
     dest = Path(dest)
     if dest.exists():
         raise BundleError(f"{dest} exists")
@@ -164,6 +164,6 @@ def read_bundle(tar_path: Path, dest: Path) -> dict:
             raise BundleError(f"the bundle lacks {len(missing)} file(s) the manifest names: {missing[0]}")
         (dest / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
     except BaseException:
-        shutil.rmtree(dest, ignore_errors=True)
+        remove_tree(dest, ignore_errors=True)
         raise
     return manifest

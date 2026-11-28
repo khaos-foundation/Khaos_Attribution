@@ -13,6 +13,7 @@ from pathlib import Path
 
 from khaos_attribution import weights as mirror
 from khaos_attribution.engines.worker_process import host_env
+from khaos_attribution import files as F
 
 @dataclass
 class Report:
@@ -89,7 +90,7 @@ def carry_cpp_runtime(venv: Path, site_packages: Path, source: Path | None = Non
         return []
     source, into = Path(source or sys.base_prefix), Path(venv) / CPP_RUNTIME_DIR
     into.mkdir(parents=True, exist_ok=True)
-    have = {p.name.lower() for p in into.iterdir()}
+    have = {p.name.lower() for p in F.real_iterdir(into)}
     copied = []
     for name in WINDOWS_CPP_RUNTIME:
         if (source / name).is_file() and name not in have:
@@ -111,7 +112,7 @@ def leave_out_ffmpeg_bindings(site_packages: Path, platform: str = sys.platform)
         return []
     lib = Path(site_packages) / "torio" / "lib"
     gone = []
-    for path in sorted(lib.glob("*torio_ffmpeg*")) if lib.is_dir() else []:
+    for path in F.real_glob(lib, "*torio_ffmpeg*"):
         try:
             path.unlink()
         except PermissionError:
@@ -138,7 +139,9 @@ def remove_tree(path: Path) -> None:
     """``path`` removed, read-only files too (git marks its objects so on Windows); raises when any of it stays."""
     import stat  # noqa: PLC0415
 
-    def writable_then_again(func, p, _exc):
+    def writable_then_again(func, p, exc):
+        if isinstance(exc if isinstance(exc, BaseException) else exc[1], FileNotFoundError):
+            return  # gone already: a ._ twin removed with its file
         for q in (p, os.path.dirname(p)):
             try:
                 os.chmod(q, os.stat(q).st_mode | stat.S_IWRITE | stat.S_IWUSR)
@@ -147,9 +150,9 @@ def remove_tree(path: Path) -> None:
         func(p)
     if path.exists():
         if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=writable_then_again)
+            shutil.rmtree(path, onexc=writable_then_again)  # os-leftovers: an engine's environment, in the app's own home
         else:
-            shutil.rmtree(path, onerror=writable_then_again)
+            shutil.rmtree(path, onerror=writable_then_again)  # os-leftovers: an engine's environment, in the app's own home
     if path.exists():
         raise OSError(f"{path} could not be removed")
 
@@ -179,8 +182,8 @@ def unpack_archive(url: str, root: Path, commit: str, kept: tuple) -> None:
     for rel in kept:
         if (root / rel).exists():
             (part / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.rmtree(part / rel, ignore_errors=True)
-            shutil.move(str(root / rel), str(part / rel))
+            F.remove_tree(part / rel, ignore_errors=True)
+            F.move(root / rel, part / rel)
     if root.exists():
         try:
             root.replace(old)
@@ -189,7 +192,7 @@ def unpack_archive(url: str, root: Path, commit: str, kept: tuple) -> None:
             for rel in kept:
                 if (part / rel).exists():
                     (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(part / rel), str(root / rel))
+                    F.move(part / rel, root / rel)
             raise
     part.replace(root)
     try:

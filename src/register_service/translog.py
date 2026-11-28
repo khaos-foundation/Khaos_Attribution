@@ -10,12 +10,12 @@ import bisect
 import json
 import os
 import secrets
-import shutil
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from khaos_attribution.files import real_glob, remove_tree
 from khaos_attribution import translog as T
 
 SCHEMA = """
@@ -985,12 +985,12 @@ def _write_log(root: Path, snap: dict, key_doc: dict, pending: int | None, done:
         # A whole export: what an earlier layout wrote, and any body tile past the sealed ones, go last.
         for name in ("hashes.json", "bodies.json", "records.json", "struck.json", "withheld.json"):
             _remove(root / name)
-        for tile in (root / "bodies").glob("*.json"):
+        for tile in real_glob(root / "bodies", "*.json"):
             if tile.stem.isdigit() and int(tile.stem) >= final_first // width:
                 _remove(tile)
         if (root / "entries").exists():
             # A removal that fails raises: the export is not recorded, so the next one is whole and tries again.
-            shutil.rmtree(root / "entries")
+            remove_tree(root / "entries")
     return latest
 
 

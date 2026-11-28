@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from khaos_attribution import translog as T
+from khaos_attribution.files import remove_tree
 
 DEFAULT_MIRRORS = ("https://register.khaos.dev/mirror", T.PUBLIC_MIRROR_RAW)
 STATE_FILE = Path.home() / ".khaos" / "log-verify-state.json"
@@ -128,11 +129,10 @@ class CachedMirror(Mirror):
 
     def evict(self, name: str | None = None) -> None:
         """One tile, or with no name every tile of this key and width, read from the mirror again next time."""
-        import shutil  # noqa: PLC0415
         if name is None:
             folder = self._folder()
             if folder is not None and folder.is_dir():
-                shutil.rmtree(folder, ignore_errors=True)
+                remove_tree(folder, ignore_errors=True)
             self.cached.clear()
             return
         place = self._place(name)
