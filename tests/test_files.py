@@ -177,3 +177,19 @@ def test_every_listing_and_removal_goes_through_the_helper():
     found = [hit for p in sorted(SRC.rglob("*.py")) if p.name != "files.py" or p.parent.name != "khaos_attribution"
              for hit in _plain_calls(p)]
     assert found == [], "list or remove through khaos_attribution.files:\n" + "\n".join(found)
+
+
+def test_ace_steps_dataset_is_handed_the_real_pairs(tmp_path):
+    """ACE-Step's dataset lists its folder itself unless a manifest names the pairs; the manifest names the real
+    pairs only, in the folder's own order."""
+    import json
+    from khaos_attribution.engines.acestep.train import PAIR_MANIFEST, write_pair_manifest
+    _seed(tmp_path)
+    for name in ("a_seg_000.pt", "b_seg_001.pt"):
+        (tmp_path / name).write_bytes(b"pair")
+        (tmp_path / f"._{name}").write_bytes(b"\x00\x05\x16\x07")
+    path = write_pair_manifest(tmp_path)
+    samples = json.loads(path.read_text(encoding="utf-8"))["samples"]
+    assert path.name == PAIR_MANIFEST and sorted(samples) == ["a_seg_000.pt", "b_seg_001.pt"]
+    assert samples == [n for n in os.listdir(tmp_path) if n in samples]
+    assert write_pair_manifest(tmp_path / "gone") is None

@@ -317,9 +317,29 @@ from khaos_attribution.engines.train import TrainingUpdate  # noqa: E402,F401
 PAIR_SUFFIX = ".pt"
 
 
+PAIR_MANIFEST = "manifest.json"
+
+
 def pair_files(tensor_dir: Path | str) -> list:
     """The preprocessed pairs under a directory, sorted by name."""
     return real_glob(tensor_dir, f"*{PAIR_SUFFIX}")
+
+
+def write_pair_manifest(tensor_dir: Path | str) -> Path | None:
+    """ACE-Step's own list of the pairs it trains on, in the order its folder scan would give, so its dataset never
+    lists the folder itself and loads a ``._`` twin as a pair."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    from khaos_attribution.files import is_os_leftover  # noqa: PLC0415
+    tensor_dir = Path(tensor_dir)
+    if not tensor_dir.is_dir():
+        return None
+    names = [n for n in os.listdir(tensor_dir)  # os-leftovers: the scan order ACE-Step would use, leftovers dropped
+             if n.endswith(PAIR_SUFFIX) and not is_os_leftover(n)]
+    path, tmp = tensor_dir / PAIR_MANIFEST, tensor_dir / f"{PAIR_MANIFEST}.tmp"
+    tmp.write_text(json.dumps({"samples": names}, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
 
 
 class LossHooks:
@@ -507,6 +527,7 @@ def open_session(api: TrainingApi, cfg: dict, *, checkpoint_root, tensor_dir, ou
     # Every field the recipe sets reaches the trainer, or the run is refused: its record keeps them all.
     adapter_type, adapter_cfg = adapter_config(api, cfg, keep_none=False, strict=True)
     train_cfg = accepted_config(api.TrainingConfig, kwargs, strict=True)
+    write_pair_manifest(tensor_dir)
     log.info("Adapter config: type=%s rank=%d alpha=%d lr=%g epochs=%d", adapter_type, int(cfg["adapter_rank"]),
              int(cfg["adapter_alpha"]), float(cfg["learning_rate"]), int(cfg["max_epochs"]))
     trainer = api.Trainer(model, adapter_cfg, train_cfg)
